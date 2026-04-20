@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_TITLE="LLM Model Manager"
+APP_BYLINE="by soulhash.ai"
+APP_WEBSITE="https://soulhash.ai"
+DEFAULT_LLAMA_MODEL_WEB_BIN="$SCRIPT_DIR/llama-model-web"
+if [[ ! -x "$DEFAULT_LLAMA_MODEL_WEB_BIN" ]] && command -v llama-model-web >/dev/null 2>&1; then
+    DEFAULT_LLAMA_MODEL_WEB_BIN="$(command -v llama-model-web)"
+fi
+DEFAULT_LLAMA_MODEL_BIN="$SCRIPT_DIR/llama-model"
+if [[ ! -x "$DEFAULT_LLAMA_MODEL_BIN" ]] && command -v llama-model >/dev/null 2>&1; then
+    DEFAULT_LLAMA_MODEL_BIN="$(command -v llama-model)"
+fi
+
+LLAMA_MODEL_BIN="${LLAMA_MODEL_BIN:-$DEFAULT_LLAMA_MODEL_BIN}"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/llama-server"
+MODELS_FILE="${LLAMA_MODELS_FILE:-$CONFIG_DIR/models.tsv}"
+DEFAULTS_FILE="${LLAMA_DEFAULTS_FILE:-$CONFIG_DIR/defaults.env}"
+HELP_FILE="${LLAMA_HELP_FILE:-$CONFIG_DIR/HELP.txt}"
+TERMINAL_BIN="${TERMINAL_BIN:-$(command -v x-terminal-emulator || true)}"
+
+if [[ "${LLAMA_MODEL_UI:-web}" != "zenity" ]] && [[ -x "$DEFAULT_LLAMA_MODEL_WEB_BIN" ]] && command -v python3 >/dev/null 2>&1; then
+    exec "$DEFAULT_LLAMA_MODEL_WEB_BIN" "$@"
+fi
+
+die() {
+    zenity --error --title="$APP_TITLE" --text="$*"
+    exit 1
+}
+
+[[ -x "$LLAMA_MODEL_BIN" ]] || die "Missing llama-model helper: $LLAMA_MODEL_BIN"
+command -v zenity >/dev/null 2>&1 || {
+    printf 'zenity is required for llama-model-gui\n' >&2
+    exit 1
+}
+
+show_text() {
+    local title="$1"
+    local body="$2"
+    local tmp
+
+    tmp="$(mktemp)"
+    printf '%s\n' "$body" >"$tmp"
+    zenity --text-info --title="$title" --width=980 --height=720 --filename="$tmp"
+    rm -f "$tmp"
+}
+
+open_terminal_cmd() {
+    local title="$1"
+    local cmd="$2"
+
+    [[ -n "$TERMINAL_BIN" ]] || die "No terminal emulator found"
+
+    "$TERMINAL_BIN" -e bash -lc "printf '%s\n\n' \"$title\"; $cmd; status=\$?; printf '\nExit status: %s\n' \"\$status\"; printf 'Press Enter to close...'; read -r; exit \$status"
+}
+
+show_current() {
+    show_text "Current Model" "$("$LLAMA_MODEL_BIN" current)"
+}
+
+menu_status_text() {
+    local current
+    local alias
+    local health
+    local mode
+
+    current="$("$LLAMA_MODEL_BIN" current 2>/dev/null || true)"
+    alias="$(printf '%s\n' "$current" | awk -F': ' '/^alias:/ { print $2; exit }')"
+    health="$(printf '%s\n' "$current" | awk -F': ' '/^health:/ { print $2; exit }')"
+    mode="$(printf '%s\n' "$current" | awk -F': ' '/^active_mode:/ { print $2; exit }')"
+
+    [[ -n "$alias" ]] || alias="stopped"
+    [[ -n "$health" ]] || health="unavailable"
+    [[ -n "$mode" ]] || mode="stopped"
+
+    printf 'Current model: %s\nClient mode: %s\nHealth: %s' "$alias" "$mode" "$health"
+}
+
+show_list() {
+    show_text "Registered Models" "$("$LLAMA_MODEL_BIN" list)"
+}
+
+show_logs() {
+    local lines
+    local cmd
+
+    lines="$(zenity --entry --title="Llama Logs" --text="How many log lines should be shown?" --entry-text="40")" || return 0
+    [[ "$lines" =~ ^[0-9]+$ ]] || die "Log lines must be a number"
+    printf -v cmd '%q logs %q' "$LLAMA_MODEL_BIN" "$lines"
+    open_terminal_cmd "Llama Server Logs" "$cmd"
+}
+
+select_model() {
+    local current_alias=""
+    local alias
+    local path
+    local extra
+    local selected
+    local -a args
+
+    current_alias="$("$LLAMA_MODEL_BIN" current 2>/dev/null | awk -F': ' '/^alias:/ {print $2}' || true)"
+    args=(
+        --list
+        --radiolist
+        --title="Switch Llama Model"
+        --width=1100
+        --height=520
+        --column ""
+        --column "Alias"
+        --column "Model"
+        --column "Extra Args"
+    )
+
+    while IFS=$'\t' read -r alias path extra; do
+        [[ -n "$alias" ]] || continue
+        [[ "${alias:0:1}" == "#" ]] && continue
+        if [[ "$alias" == "$current_alias" ]]; then
+            args+=(TRUE "$alias" "$path" "${extra:-}")
+        else
+            args+=(FALSE "$alias" "$path" "${extra:-}")
+        fi
+    done <"$MODELS_FILE"
+
+    selected="$(zenity "${args[@]}")" || return 0
+    [[ -n "$selected" ]] || return 0
+
+    local cmd
+    printf -v cmd '%q switch %q' "$LLAMA_MODEL_BIN" "$selected"
+    open_terminal_cmd "Switching To $selected" "$cmd"
+}
+
+set_client_mode() {
+    local current_mode
+    local selected
+    local cmd
+
+    current_mode="$("$LLAMA_MODEL_BIN" mode 2>/dev/null | awk -F': ' '/^configured_mode:/ { print $2; exit }' || true)"
+
+    selected="$(
+        zenity --list \
+            --radiolist \
+            --title="Client Mode" \
+            --width=760 \
+            --height=320 \
+            --text="Single Client is safer on this machine. Multi Client restores auto parallel slots." \
+            --column "" \
+            --column "Mode" \
+            --column "Behavior" \
+            "$([[ "$current_mode" == "single-client" ]] && printf TRUE || printf FALSE)" "single" "One active client at a time; safer and steadier" \
+            "$([[ "$current_mode" == "multi-client" ]] && printf TRUE || printf FALSE)" "multi" "Auto parallel slots; more concurrency, more pressure"
+    )" || return 0
+
+    [[ -n "$selected" ]] || return 0
+
+    printf -v cmd '%q set-mode %q --restart' "$LLAMA_MODEL_BIN" "$selected"
+    open_terminal_cmd "Applying ${selected^} Client Mode" "$cmd"
+}
+
+restart_server() {
+    local cmd
+
+    printf -v cmd '%q restart' "$LLAMA_MODEL_BIN"
+    open_terminal_cmd "Restarting Llama Server" "$cmd"
+}
+
+stop_server() {
+    zenity --question --title="Stop Llama Server" --text="Stop the server on port 8081?" || return 0
+
+    local cmd
+    printf -v cmd '%q stop' "$LLAMA_MODEL_BIN"
+    open_terminal_cmd "Stopping Llama Server" "$cmd"
+}
+
+open_file() {
+    local path="$1"
+
+    if command -v xdg-open >/dev/null 2>&1; then
+        xdg-open "$path" >/dev/null 2>&1 &
+    else
+        local cmd
+        printf -v cmd '%q %q' "${EDITOR:-nano}" "$path"
+        open_terminal_cmd "Open $path" "$cmd"
+    fi
+}
+
+open_website() {
+    if command -v xdg-open >/dev/null 2>&1; then
+        xdg-open "$APP_WEBSITE" >/dev/null 2>&1 &
+    elif command -v sensible-browser >/dev/null 2>&1; then
+        sensible-browser "$APP_WEBSITE" >/dev/null 2>&1 &
+    else
+        die "No browser launcher found for $APP_WEBSITE"
+    fi
+}
+
+show_help() {
+    zenity --text-info --title="$APP_TITLE Help" --width=980 --height=720 --filename="$HELP_FILE"
+}
+
+main_menu() {
+    zenity --list \
+        --title="$APP_TITLE" \
+        --width=760 \
+        --height=520 \
+        --text="$APP_BYLINE"$'\n'"$APP_WEBSITE"$'\n\n'"$(menu_status_text)" \
+        --column "Action" \
+        --column "Description" \
+        "Current" "Show the running model and health status" \
+        "List" "Show registered model aliases" \
+        "Switch" "Pick a model and restart the server" \
+        "Client Mode" "Toggle single-client safer mode vs multi-client auto slots" \
+        "Restart" "Restart the current model with the current defaults" \
+        "Logs" "Open recent server logs in a terminal" \
+        "Stop" "Stop the server on port 8081" \
+        "Registry" "Open models.tsv for editing" \
+        "Defaults" "Open defaults.env for runtime tuning" \
+        "Website" "Open soulhash.ai in the browser" \
+        "Help" "Show commands and registry format" \
+        "Exit" "Close the manager"
+}
+
+while true; do
+    choice="$(main_menu)" || exit 0
+    case "$choice" in
+        Current) show_current ;;
+        List) show_list ;;
+        Switch) select_model ;;
+        "Client Mode") set_client_mode ;;
+        Restart) restart_server ;;
+        Logs) show_logs ;;
+        Stop) stop_server ;;
+        Registry) open_file "$MODELS_FILE" ;;
+        Defaults) open_file "$DEFAULTS_FILE" ;;
+        Website) open_website ;;
+        Help) show_help ;;
+        Exit) exit 0 ;;
+    esac
+done

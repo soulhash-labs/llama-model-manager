@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=LLM Model Manager
+GenericName=Local Model Manager
+Comment=Launch the LLM Model Manager dashboard by soulhash.ai
+Exec=llama-model-gui
+Icon=llama-model-manager-icon
+Terminal=false
+Categories=Utility;
+Keywords=llama;llm;model;manager;local ai;gguf;
+StartupNotify=true

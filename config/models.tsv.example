@@ -1,0 +1,5 @@
+# alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes
+qwen36-35b-q2	/absolute/path/to/Qwen3.6-35-Q2_M.gguf
+qwen36-35b-iq3	/absolute/path/to/Qwen3.6-35B-A3B-IQ3_M.gguf
+qwen35-9b-q8	/absolute/path/to/Qwen3.5-9B-Q8_0.gguf		65536	999	128	16	1	cuda0	single-client coding preset
+gemma4-e4b-q8	/absolute/path/to/Gemma-4-E4B-Q8_K_P.gguf	--mmproj /absolute/path/to/mmproj-Gemma-4-E4B-f16.gguf
