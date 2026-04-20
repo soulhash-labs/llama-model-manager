@@ -155,21 +155,18 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     local readme
     local help
     local defaults
-    local launch
     local web_index
     local install_script
 
     readme="$(cat "$ROOT_DIR/README.md")"
     help="$(cat "$ROOT_DIR/config/HELP.txt")"
     defaults="$(cat "$ROOT_DIR/config/defaults.env.example")"
-    launch="$(cat "$ROOT_DIR/docs/GITHUB-LAUNCH.md")"
     web_index="$(cat "$ROOT_DIR/web/index.html")"
     install_script="$(cat "$ROOT_DIR/install.sh")"
 
     assert_contains "$readme" "backend-, platform-, and architecture-specific"
     assert_contains "$readme" "shows the install commands it plans to run"
     assert_contains "$help" "llama-model build-runtime --backend auto"
-    assert_contains "$launch" "host-specific runtimes"
     assert_not_contains "$defaults" "LLAMA_SERVER_DEVICE=cuda0"
     assert_not_contains "$web_index" "GPU-aware defaults"
     assert_contains "$install_script" "Would you like to check/install build dependencies"

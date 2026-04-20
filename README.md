@@ -22,7 +22,6 @@ Contents:
 - `web/`: browser dashboard assets and Python server
 - `LICENSE`: Apache License 2.0
 - `NOTICE`: copyright and attribution notice
-- `docs/ORION-INTEGRATION.md`: inclusion notes for Agent Orion
 - `install.sh`: optional local installer for user-space deployment
 
 Quick install:
@@ -142,5 +141,3 @@ License:
 - Licensed under `Apache-2.0`
 - The code is free to use under the license terms while `soulhash.ai` remains the copyright owner
 
-Release notes:
-- see `docs/RELEASE-NOTES-v2.md`
