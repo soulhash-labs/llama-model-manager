@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_PY="$SCRIPT_DIR/../web/app.py"
+
+if [[ ! -f "$APP_PY" ]]; then
+    APP_PY="${XDG_DATA_HOME:-$HOME/.local/share}/llama-model-manager/web/app.py"
+fi
+
+command -v python3 >/dev/null 2>&1 || {
+    printf 'python3 is required for llama-model-web\n' >&2
+    exit 1
+}
+
+[[ -f "$APP_PY" ]] || {
+    printf 'llama-model web app not found: %s\n' "$APP_PY" >&2
+    exit 1
+}
+
+exec python3 "$APP_PY" "$@"

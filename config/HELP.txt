@@ -1,0 +1,66 @@
+Llama Model Manager
+
+by soulhash.ai
+
+Commands:
+  llama-model list
+  llama-model show <alias>
+  llama-model add <alias> <path> [--mmproj <path>] [--extra "<args>"] [--context N] [--ngl N] [--batch N] [--threads N] [--parallel auto|N] [--device NAME] [--notes TEXT]
+  llama-model remove <alias>
+  llama-model discover [root]
+  llama-model current
+  llama-model doctor
+  llama-model build-runtime --backend auto
+  llama-model mode
+  llama-model set-mode single --restart
+  llama-model set-mode multi --restart
+  llama-model switch qwen35-9b-q8
+  llama-model switch qwen36-35b-iq3
+  llama-model switch gemma4-e4b-q8
+  llama-model switch /absolute/path/to/model.gguf
+  llama-model logs 40
+  llama-model stop
+  llama-model-web
+
+Registry file:
+  ~/.config/llama-server/models.tsv
+
+Format:
+  alias<TAB>/full/path/to/model.gguf<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes
+
+Example:
+  gemma4-e4b-q8<TAB>/absolute/path/to/Gemma-4-E4B-Q8_K_P.gguf<TAB>--mmproj /absolute/path/to/mmproj-Gemma-4-E4B-f16.gguf
+  qwen35-9b-q8<TAB>/absolute/path/to/Qwen3.5-9B-Q8_0.gguf<TAB><TAB>65536<TAB>999<TAB>128<TAB>16<TAB>1<TAB><TAB>single-client coding preset
+
+Runtime defaults live in:
+  ~/.config/llama-server/defaults.env
+
+Useful defaults:
+  LLAMA_SERVER_CONTEXT=128000
+  LLAMA_SERVER_NGL=999
+  LLAMA_SERVER_DEVICE=
+  LLAMA_SERVER_PARALLEL=
+  LLAMA_SERVER_EXTRA_ARGS=
+
+Binary portability:
+  llama.cpp source is portable. Built binaries are not universal.
+  CUDA, Vulkan, Metal, and CPU builds are backend-specific and may also be
+  platform- or architecture-specific.
+  llama-model only auto-accepts bundled binaries that pass an explicit host
+  compatibility check.
+  If no safe runtime is available, run:
+    llama-model build-runtime --backend auto
+  or from a repo checkout:
+    ./scripts/build-llama-server.sh --backend auto
+
+For single-client coding harnesses, a good optional tweak is:
+  LLAMA_SERVER_PARALLEL=1
+
+That does not increase context. It simply reduces slot count so the server is more deterministic for one active client.
+
+Dashboard:
+  Run llama-model-web or launch "LLM Model Manager" from the desktop or app menu.
+  The browser UI can switch models, scan/import new GGUFs, edit presets, save defaults, and inspect runtime/binary diagnostics.
+
+Legacy UI:
+  Set LLAMA_MODEL_UI=zenity if you want to force the old Zenity launcher.

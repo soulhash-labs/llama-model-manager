@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LLM Model Manager</title>
+    <meta
+      name="description"
+      content="Browser-first control surface for local llama.cpp models with registry switching, GGUF discovery, and runtime tuning."
+    >
+    <meta name="theme-color" content="#2763FF">
+    <link rel="icon" href="/branding/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div class="hero-rail">
+          <span class="eyebrow">Operator Deck</span>
+          <span class="rail-rule"></span>
+          <a class="brand-link" href="https://soulhash.ai" target="_blank" rel="noreferrer">soulhash.ai</a>
+        </div>
+
+        <div class="hero-grid">
+          <div class="hero-copy-block">
+            <h1>LLM Model Manager</h1>
+            <p class="hero-copy">
+              Serve local llama.cpp models, inspect runtime posture, and keep registry, defaults,
+              and endpoint wiring aligned from one control surface.
+            </p>
+            <div class="hero-pill-row" aria-label="Key capabilities">
+              <span class="hero-pill">Registry-backed switching</span>
+              <span class="hero-pill">OpenAI-compatible local API</span>
+              <span class="hero-pill">Validated runtime selection</span>
+            </div>
+            <div class="hero-actions">
+              <button
+                id="refresh-all"
+                class="button button-primary"
+                title="Reload live server status, registry entries, defaults, and the current discovery root."
+              >Refresh State</button>
+              <button
+                id="toggle-mode"
+                class="button"
+                title="Switch between safer single-client mode and higher-concurrency multi-client mode."
+              >Toggle Client Mode</button>
+            </div>
+          </div>
+
+          <aside class="hero-stage">
+            <div class="hero-stage-head">
+              <span class="panel-tag">Live Signal</span>
+              <p id="status-subtitle">Loading live server state...</p>
+            </div>
+
+            <div class="hero-stat-grid">
+              <article class="hero-stat">
+                <span class="hero-stat-label">Active Model</span>
+                <strong id="hero-current-model">-</strong>
+                <span id="hero-current-path" class="hero-stat-note">-</span>
+              </article>
+              <article class="hero-stat">
+                <span class="hero-stat-label">Client Mode</span>
+                <strong id="hero-current-mode">-</strong>
+                <span id="hero-lanes" class="hero-stat-note">-</span>
+              </article>
+              <article class="hero-stat">
+                <span class="hero-stat-label">Endpoint</span>
+                <strong id="hero-endpoint">-</strong>
+                <span id="hero-build" class="hero-stat-note">-</span>
+              </article>
+              <article class="hero-stat">
+                <span class="hero-stat-label">Registry</span>
+                <strong id="hero-registry-count">-</strong>
+                <span id="hero-health" class="hero-stat-note">-</span>
+              </article>
+            </div>
+          </aside>
+        </div>
+      </header>
+
+      <details class="help-strip" open>
+        <summary>
+          <span class="help-badge">?</span>
+          <span class="help-summary-copy">
+            <strong>Operator Notes</strong>
+            <span>Plain-English guidance for the main actions and runtime terms. Tap to collapse or expand.</span>
+          </span>
+        </summary>
+
+        <div class="help-grid">
+          <article class="help-card">
+            <span class="panel-tag">Action</span>
+            <h3>Serve</h3>
+            <p>Switch the live llama-server to that model right now using its saved presets and your global defaults.</p>
+          </article>
+          <article class="help-card">
+            <span class="panel-tag">Action</span>
+            <h3>Tune</h3>
+            <p>Load a model into the editor so you can inspect or change settings first. This does not switch the live server.</p>
+          </article>
+          <article class="help-card">
+            <span class="panel-tag">Action</span>
+            <h3>Stage</h3>
+            <p>Take a discovered GGUF from the scan list and prefill the editor so you can save it into the registry.</p>
+          </article>
+          <article class="help-card">
+            <span class="panel-tag">Mode</span>
+            <h3>Single vs Multi Client</h3>
+            <p><strong>Single</strong> queues requests one at a time for stability. <strong>Multi</strong> allows concurrent clients but increases contention.</p>
+          </article>
+          <article class="help-card">
+            <span class="panel-tag">Runtime</span>
+            <h3>Context</h3>
+            <p>The maximum token window. Larger values keep more conversation or code history, but they consume more memory.</p>
+          </article>
+          <article class="help-card">
+            <span class="panel-tag">Runtime</span>
+            <h3>NGL And Parallel</h3>
+            <p><strong>NGL</strong> controls GPU layer offload when the selected runtime supports it. CPU fallback forces <strong>NGL=0</strong>. <strong>Parallel</strong> controls how many client lanes the server can handle at once.</p>
+          </article>
+        </div>
+      </details>
+
+      <main class="layout">
+        <section class="panel status-panel">
+          <div class="panel-head panel-head-anchored">
+            <div>
+              <span class="panel-tag">Engine Room</span>
+              <h2>Live Server</h2>
+              <p>Focused runtime view of the active model, binary compatibility posture, endpoint wiring, and operator controls.</p>
+            </div>
+            <div class="inline-actions">
+              <button
+                id="restart-server"
+                class="button"
+                title="Restart llama-server with the current model and saved settings. Use this after changing defaults."
+              >Restart</button>
+              <button
+                id="stop-server"
+                class="button button-danger"
+                title="Stop llama-server. The local API goes offline until you serve or restart a model."
+              >Stop</button>
+              <button
+                id="load-logs"
+                class="button"
+                title="Show the latest llama-server logs for warmup progress, load failures, and troubleshooting."
+              >Logs</button>
+            </div>
+          </div>
+
+          <div class="status-layout">
+            <article class="live-stage">
+              <span class="metric-label">Current Model</span>
+              <strong id="metric-model">-</strong>
+              <span id="metric-model-path" class="metric-note"></span>
+            </article>
+
+            <div class="status-side">
+              <article class="metric-card">
+                <span class="metric-label">Health</span>
+                <strong id="metric-health">-</strong>
+                <span id="metric-mode" class="metric-note"></span>
+              </article>
+              <article class="metric-card">
+                <span class="metric-label">Offload Status</span>
+                <strong id="metric-offload">-</strong>
+                <span id="metric-kv" class="metric-note"></span>
+              </article>
+              <article class="metric-card">
+                <span class="metric-label">Endpoint</span>
+                <strong id="metric-endpoint">-</strong>
+                <span id="metric-build" class="metric-note"></span>
+              </article>
+            </div>
+          </div>
+
+          <pre id="logs-output" class="log-box hidden"></pre>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <span class="panel-tag">Registry</span>
+              <h2>Model Registry</h2>
+              <p><span id="registry-count">0</span> entries with per-model overrides and multimodal sidecars.</p>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="models-table">
+              <thead>
+                <tr>
+                  <th>Alias</th>
+                  <th>Model</th>
+                  <th>Preset</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <span class="panel-tag">Tune Bay</span>
+              <h2>Model Editor</h2>
+              <p>Stage a clean registry entry with runtime overrides instead of hand-editing TSV lines.</p>
+            </div>
+          </div>
+          <form id="model-form" class="form-grid">
+            <label title="Short name shown in the registry and used by commands like llama-model switch alias.">
+              Alias
+              <input name="alias" id="model-alias" required>
+            </label>
+            <label class="span-2" title="Absolute path to the GGUF model file you want this entry to serve.">
+              Model Path
+              <input name="path" id="model-path" required placeholder="/absolute/path/to/model.gguf">
+            </label>
+            <label
+              class="span-2"
+              title="Projector file for multimodal models. Leave blank for text-only models."
+            >
+              mmproj Path
+              <input name="mmproj" id="model-mmproj" placeholder="/absolute/path/to/mmproj.gguf">
+            </label>
+            <label
+              class="span-2"
+              title="Extra llama-server flags for this model only. These are added after the standard settings."
+            >
+              Extra Args
+              <input name="extra_args" id="model-extra" placeholder="--no-warmup --jinja">
+            </label>
+            <label title="Maximum context window in tokens. Higher values use more memory.">
+              Context
+              <input name="context" id="model-context" placeholder="128000">
+            </label>
+            <label title="GPU layer offload count. 999 usually means offload as much of the model as possible. CPU fallback forces this to 0.">
+              NGL
+              <input name="ngl" id="model-ngl" placeholder="999">
+            </label>
+            <label title="Prompt processing batch size. Higher can improve throughput but increases memory use.">
+              Batch
+              <input name="batch" id="model-batch" placeholder="128">
+            </label>
+            <label title="CPU threads for work that is not running on the GPU.">
+              Threads
+              <input name="threads" id="model-threads" placeholder="16">
+            </label>
+            <label title="Concurrent client slots. Use 1 for safest single-client operation; leave blank for defaults or auto.">
+              Parallel
+              <input name="parallel" id="model-parallel" placeholder="1 or auto">
+            </label>
+            <label title="Optional target accelerator such as cuda0 or vulkan0. Leave blank unless you have a matching backend-specific runtime.">
+              Device
+              <input name="device" id="model-device" placeholder="cuda0">
+            </label>
+            <label class="span-2" title="Optional note about the model's purpose, strengths, or caution points.">
+              Notes
+              <input name="notes" id="model-notes" placeholder="Operator note or use-case cue">
+            </label>
+            <div class="form-actions span-2">
+              <button
+                type="submit"
+                class="button button-primary"
+                title="Save or update this registry entry. This does not switch the live model by itself."
+              >Save Model</button>
+              <button
+                type="button"
+                id="clear-model-form"
+                class="button"
+                title="Clear the editor fields so you can stage a different model entry."
+              >Clear</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <span class="panel-tag">Intake</span>
+              <h2>Discovery</h2>
+              <p><span id="discovery-count">0</span> candidates in the current scan root.</p>
+            </div>
+          </div>
+          <div class="discovery-controls">
+            <input
+              id="discovery-root"
+              placeholder="~/models"
+              title="Folder to scan recursively for .gguf models and matching mmproj files."
+            >
+            <button
+              id="scan-models"
+              class="button button-primary"
+              title="Scan the chosen folder for model files you may want to add to the registry."
+            >Scan Root</button>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="discovery-table">
+              <thead>
+                <tr>
+                  <th>Alias</th>
+                  <th>Model</th>
+                  <th>mmproj</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <span class="panel-tag">Baseline</span>
+              <h2>Global Defaults</h2>
+              <p>These values become the room posture unless a model overrides them.</p>
+            </div>
+          </div>
+          <form id="defaults-form" class="form-grid">
+            <label title="Network host for llama-server. 127.0.0.1 keeps it local to this machine.">
+              Host
+              <input name="LLAMA_SERVER_HOST" id="default-host">
+            </label>
+            <label title="Port used by llama-server for its local API.">
+              Port
+              <input name="LLAMA_SERVER_PORT" id="default-port">
+            </label>
+            <label title="Optional default accelerator such as cuda0 or vulkan0. Leave blank to let the validated runtime choose its own default or to allow CPU fallback.">
+              Device
+              <input name="LLAMA_SERVER_DEVICE" id="default-device">
+            </label>
+            <label title="Default context window in tokens when a model does not override it.">
+              Context
+              <input name="LLAMA_SERVER_CONTEXT" id="default-context">
+            </label>
+            <label title="Default GPU layer offload count. 999 usually means use as much GPU as the model can fit. CPU fallback forces this to 0.">
+              NGL
+              <input name="LLAMA_SERVER_NGL" id="default-ngl">
+            </label>
+            <label title="Default prompt processing batch size for models that do not override it.">
+              Batch
+              <input name="LLAMA_SERVER_BATCH" id="default-batch">
+            </label>
+            <label title="Default CPU thread count for work not handled on the GPU.">
+              Threads
+              <input name="LLAMA_SERVER_THREADS" id="default-threads">
+            </label>
+            <label title="Default concurrent client slots. Use 1 to queue requests instead of serving many at once.">
+              Parallel
+              <input name="LLAMA_SERVER_PARALLEL" id="default-parallel" placeholder="blank for auto">
+            </label>
+            <label class="span-2" title="Where the live llama-server log is written on disk.">
+              Log File
+              <input name="LLAMA_SERVER_LOG" id="default-log">
+            </label>
+            <label class="span-2" title="Extra llama-server flags added to every launch unless a model overrides them.">
+              Extra Args
+              <input name="LLAMA_SERVER_EXTRA_ARGS" id="default-extra">
+            </label>
+            <div class="form-actions span-2">
+              <button
+                type="submit"
+                class="button button-primary"
+                title="Save the global runtime defaults used when a model entry does not provide an override."
+              >Save Defaults</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <span class="panel-tag">Wiring</span>
+              <h2>Integrations</h2>
+              <p>Use the live endpoint below for tools that expect an OpenAI-compatible local server.</p>
+            </div>
+          </div>
+          <div class="integration-grid">
+            <article class="integration-card">
+              <span class="metric-label">API Base</span>
+              <code id="api-base">-</code>
+            </article>
+            <article class="integration-card">
+              <span class="metric-label">opencode Model</span>
+              <code id="opencode-model">-</code>
+            </article>
+          </div>
+        </section>
+      </main>
+
+      <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+    </div>
+
+    <template id="model-row-template">
+      <tr>
+        <td class="alias-cell"></td>
+        <td class="path-cell"></td>
+        <td class="preset-cell"></td>
+        <td class="row-actions">
+          <button
+            data-action="switch"
+            class="button button-small"
+            title="Start serving this model now using its saved presets and the global defaults."
+          >Serve</button>
+          <button
+            data-action="edit"
+            class="button button-small"
+            title="Load this model into the editor so you can inspect or change settings. This does not switch the live server."
+          >Tune</button>
+          <button
+            data-action="remove"
+            class="button button-small button-danger"
+            title="Remove this registry entry. The model file stays on disk."
+          >Remove</button>
+        </td>
+      </tr>
+    </template>
+
+    <template id="discovery-row-template">
+      <tr>
+        <td class="alias-cell"></td>
+        <td class="path-cell"></td>
+        <td class="path-cell mmproj-cell"></td>
+        <td class="status-cell"></td>
+        <td class="row-actions">
+          <button
+            data-action="import"
+            class="button button-small button-primary"
+            title="Copy this discovered model into the editor so you can save it into the registry."
+          >Stage</button>
+        </td>
+      </tr>
+    </template>
+
+    <script src="/app.js"></script>
+  </body>
+  </html>

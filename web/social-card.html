@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LLM Model Manager Social Card</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #08101c;
+        --bg-alt: #10192a;
+        --ink: #f5f8fc;
+        --muted: #92a1b8;
+        --line: rgba(160, 183, 212, 0.18);
+        --panel: rgba(13, 22, 37, 0.92);
+        --panel-alt: rgba(18, 30, 48, 0.95);
+        --accent: #2763ff;
+        --accent-soft: rgba(39, 99, 255, 0.16);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 1280px;
+        height: 640px;
+        overflow: hidden;
+        font-family: "DejaVu Sans", "Liberation Sans", sans-serif;
+        background:
+          radial-gradient(circle at top left, rgba(54, 110, 255, 0.24), transparent 34%),
+          radial-gradient(circle at right 16% top 18%, rgba(255, 255, 255, 0.08), transparent 22%),
+          linear-gradient(140deg, #0b1322 0%, #07101c 48%, #050c16 100%);
+        color: var(--ink);
+      }
+
+      body::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background-image:
+          linear-gradient(var(--line) 1px, transparent 1px),
+          linear-gradient(90deg, var(--line) 1px, transparent 1px);
+        background-size: 80px 80px;
+        mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.6), transparent 88%);
+        pointer-events: none;
+      }
+
+      body::after {
+        content: "";
+        position: absolute;
+        inset: 24px;
+        border-radius: 34px;
+        border: 1px solid rgba(154, 177, 212, 0.14);
+        box-shadow:
+          0 0 0 1px rgba(255, 255, 255, 0.02) inset,
+          0 34px 70px rgba(0, 0, 0, 0.34);
+        pointer-events: none;
+      }
+
+      .canvas {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        padding: 42px 46px;
+      }
+
+      .topline {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        font-size: 15px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: rgba(228, 236, 247, 0.78);
+      }
+
+      .topline strong {
+        font-weight: 700;
+        color: #ffffff;
+      }
+
+      .rule {
+        flex: 1;
+        height: 1px;
+        background: linear-gradient(90deg, rgba(39, 99, 255, 0.42), rgba(154, 177, 212, 0.14));
+      }
+
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 14px;
+        border-radius: 999px;
+        background: rgba(8, 16, 28, 0.56);
+        border: 1px solid rgba(154, 177, 212, 0.18);
+        font-size: 13px;
+        letter-spacing: 0.12em;
+      }
+
+      .brand img {
+        width: 22px;
+        height: 22px;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: 1.25fr 0.86fr;
+        gap: 34px;
+        height: calc(100% - 70px);
+        padding-top: 28px;
+      }
+
+      .copy {
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        gap: 22px;
+        padding: 16px 8px 12px 0;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        width: fit-content;
+        padding: 10px 14px;
+        border-radius: 999px;
+        background: rgba(39, 99, 255, 0.12);
+        border: 1px solid rgba(39, 99, 255, 0.22);
+        color: #d9e6ff;
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 0;
+        max-width: 720px;
+        font-size: 72px;
+        line-height: 0.96;
+        letter-spacing: -0.055em;
+      }
+
+      .lede {
+        margin: 0;
+        max-width: 700px;
+        color: var(--muted);
+        font-size: 24px;
+        line-height: 1.42;
+      }
+
+      .pill-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 2px;
+      }
+
+      .pill {
+        padding: 12px 16px;
+        border-radius: 999px;
+        border: 1px solid rgba(154, 177, 212, 0.18);
+        background: rgba(9, 18, 31, 0.86);
+        color: #dde6f3;
+        font-size: 14px;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+      }
+
+      .footnote {
+        display: flex;
+        gap: 28px;
+        padding-top: 8px;
+        color: #b5c2d4;
+        font-size: 15px;
+      }
+
+      .footnote strong {
+        display: block;
+        margin-bottom: 8px;
+        color: #ffffff;
+        font-size: 13px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .stage {
+        position: relative;
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        gap: 18px;
+        padding: 24px;
+        border-radius: 28px;
+        background:
+          linear-gradient(160deg, rgba(15, 24, 40, 0.96), rgba(8, 15, 28, 0.94)),
+          linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent);
+        border: 1px solid rgba(154, 177, 212, 0.18);
+        box-shadow:
+          0 28px 60px rgba(0, 0, 0, 0.3),
+          0 0 0 1px rgba(255, 255, 255, 0.02) inset;
+      }
+
+      .stage::before {
+        content: "";
+        position: absolute;
+        inset: 18px;
+        border-radius: 22px;
+        border: 1px solid rgba(39, 99, 255, 0.1);
+        pointer-events: none;
+      }
+
+      .stage-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 18px;
+      }
+
+      .tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: rgba(39, 99, 255, 0.12);
+        color: #d8e5ff;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .tag::before {
+        content: "";
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: var(--accent);
+        box-shadow: 0 0 16px rgba(39, 99, 255, 0.6);
+      }
+
+      .mini-meta {
+        color: #93a3ba;
+        font-size: 13px;
+      }
+
+      .stat-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .stat {
+        padding: 16px 16px 18px;
+        border-radius: 20px;
+        background: rgba(15, 23, 37, 0.88);
+        border: 1px solid rgba(154, 177, 212, 0.14);
+      }
+
+      .stat-label {
+        display: block;
+        margin-bottom: 10px;
+        color: #8fa0b8;
+        font-size: 12px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .stat strong {
+        display: block;
+        color: #ffffff;
+        font-size: 22px;
+        line-height: 1.18;
+      }
+
+      .stat span:last-child {
+        display: block;
+        margin-top: 10px;
+        color: #95a6be;
+        font-size: 13px;
+        line-height: 1.38;
+      }
+
+      .stage-foot {
+        display: grid;
+        gap: 12px;
+      }
+
+      .endpoint {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 14px 16px;
+        border-radius: 18px;
+        background: rgba(8, 16, 28, 0.92);
+        border: 1px solid rgba(154, 177, 212, 0.14);
+      }
+
+      .endpoint strong {
+        display: block;
+        margin-bottom: 6px;
+        font-size: 13px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: #cad7ea;
+      }
+
+      .endpoint code {
+        color: #ffffff;
+        font-size: 14px;
+      }
+
+      .badge-row {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .badge {
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: #dce7ff;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="canvas" aria-label="LLM Model Manager social preview">
+      <div class="topline">
+        <strong>Modern Operator</strong>
+        <span class="rule"></span>
+        <span class="brand">
+          <img src="/branding/favicon.svg" alt="">
+          by soulhash.ai
+        </span>
+      </div>
+
+      <section class="layout">
+        <div class="copy">
+          <div>
+            <span class="eyebrow">Browser-first local inference control</span>
+            <h1>Operate local llama.cpp models without hand-editing your runtime.</h1>
+            <p class="lede">
+              Switch registered models, discover new GGUFs, tune GPU-aware presets, and inspect
+              live server posture from one clean control surface.
+            </p>
+          </div>
+
+          <div>
+            <div class="pill-row" aria-label="Key features">
+              <span class="pill">Registry-backed switching</span>
+              <span class="pill">GGUF discovery</span>
+              <span class="pill">OpenAI-compatible endpoint</span>
+              <span class="pill">Single or multi-client posture</span>
+            </div>
+
+            <div class="footnote">
+              <div>
+                <strong>Ships With</strong>
+                Browser dashboard, CLI helpers, and desktop launcher
+              </div>
+              <div>
+                <strong>Best For</strong>
+                Personal rigs, local tools, and portable repo bundles
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <aside class="stage" aria-label="Product preview panel">
+          <div class="stage-head">
+            <span class="tag">Live Signal</span>
+            <span class="mini-meta">Healthy. Single Client. 4 models in registry.</span>
+          </div>
+
+          <div class="stat-grid">
+            <article class="stat">
+              <span class="stat-label">Active Model</span>
+              <strong>qwen36-35b-q2</strong>
+              <span>Primary long-context coding profile</span>
+            </article>
+            <article class="stat">
+              <span class="stat-label">Client Mode</span>
+              <strong>Single Client</strong>
+              <span>1 lane active for steadier harness use</span>
+            </article>
+            <article class="stat">
+              <span class="stat-label">GPU Posture</span>
+              <strong>41/41 layers on GPU</strong>
+              <span>CUDA-aware defaults with 128k context preserved</span>
+            </article>
+            <article class="stat">
+              <span class="stat-label">Registry</span>
+              <strong>4 tracked models</strong>
+              <span>Stage discoveries, tune entries, and serve instantly</span>
+            </article>
+          </div>
+
+          <div class="stage-foot">
+            <div class="endpoint">
+              <div>
+                <strong>Endpoint</strong>
+                <code>http://127.0.0.1:8081/v1</code>
+              </div>
+              <div class="badge-row" aria-label="Feature badges">
+                <span class="badge">GPU-aware</span>
+                <span class="badge">Portable</span>
+                <span class="badge">Docs-ready</span>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </section>
+    </main>
+  </body>
+</html>

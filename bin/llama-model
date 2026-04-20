@@ -1,0 +1,2236 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+INSTALLED_APP_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/llama-model-manager"
+if [[ ! -d "$APP_ROOT/web" ]] && [[ -d "$INSTALLED_APP_ROOT" ]]; then
+    APP_ROOT="$INSTALLED_APP_ROOT"
+fi
+
+DEFAULT_LLAMA_SERVER_BIN="$HOME/.local/bin/llama-server"
+if command -v llama-server >/dev/null 2>&1; then
+    DEFAULT_LLAMA_SERVER_BIN="$(command -v llama-server)"
+fi
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/llama-server"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/llama-server"
+DEFAULTS_FILE="${LLAMA_DEFAULTS_FILE:-$CONFIG_DIR/defaults.env}"
+MODELS_FILE="${LLAMA_MODELS_FILE:-$CONFIG_DIR/models.tsv}"
+STATE_FILE="${LLAMA_STATE_FILE:-$STATE_DIR/current.env}"
+LLAMA_SERVER_RUNTIME_DIR="${LLAMA_SERVER_RUNTIME_DIR:-$APP_ROOT/runtime}"
+LLAMA_CPP_REPO_URL="${LLAMA_CPP_REPO_URL:-https://github.com/ggml-org/llama.cpp.git}"
+LLAMA_CPP_REF="${LLAMA_CPP_REF:-b8851}"
+
+LLAMA_SERVER_BIN="$DEFAULT_LLAMA_SERVER_BIN"
+LLAMA_SERVER_HOST="127.0.0.1"
+LLAMA_SERVER_PORT="8081"
+LLAMA_SERVER_DEVICE=""
+LLAMA_SERVER_CONTEXT="128000"
+LLAMA_SERVER_NGL="999"
+LLAMA_SERVER_BATCH="128"
+LLAMA_SERVER_THREADS="16"
+LLAMA_SERVER_PARALLEL=""
+LLAMA_SERVER_LOG="$HOME/models/llama-server.log"
+LLAMA_SERVER_WAIT_SECONDS="300"
+LLAMA_SERVER_EXTRA_ARGS=""
+
+if [[ -f "$DEFAULTS_FILE" ]]; then
+    # User-tunable runtime defaults live here, not in the wrapper itself.
+    # shellcheck disable=SC1090
+    source "$DEFAULTS_FILE"
+fi
+
+REQUESTED_LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN:-}"
+mkdir -p "$STATE_DIR"
+
+SELECTED_LLAMA_SERVER_BIN=""
+SELECTED_LLAMA_SERVER_SOURCE=""
+SELECTED_LLAMA_SERVER_BACKEND=""
+SELECTED_LLAMA_SERVER_STATUS=""
+SELECTED_LLAMA_SERVER_MESSAGE=""
+SELECTED_LLAMA_SERVER_GUIDANCE=""
+SELECTED_LLAMA_SERVER_HOST_OS=""
+SELECTED_LLAMA_SERVER_HOST_ARCH=""
+SELECTED_LLAMA_SERVER_HOST_BACKENDS=""
+SELECTED_LLAMA_SERVER_LABEL=""
+SELECTED_LLAMA_SERVER_BUNDLE_MANIFEST=""
+SELECTED_LLAMA_SERVER_PATH_KIND=""
+BUNDLE_VALIDATE_REASON=""
+BUNDLE_VALIDATE_BACKEND=""
+BUNDLE_VALIDATE_LABEL=""
+BUNDLE_VALIDATE_MANIFEST=""
+EXTERNAL_VALIDATE_REASON=""
+BUNDLED_SELECTION_FAILURE_REASON=""
+
+usage() {
+    cat <<'EOF'
+Usage:
+  llama-model list
+  llama-model show <alias>
+  llama-model add <alias> <path> [--mmproj <path>] [--extra "<args>"] [--context N] [--ngl N] [--batch N] [--threads N] [--parallel auto|N] [--device NAME] [--notes TEXT]
+  llama-model remove <alias>
+  llama-model discover [root]
+  llama-model current
+  llama-model doctor
+  llama-model build-runtime [--backend auto|cpu|cuda|vulkan|metal] [--ref REF]
+  llama-model mode
+  llama-model set-mode <single|multi> [--restart]
+  llama-model switch <alias|/path/to/model.gguf> [extra llama-server args...]
+  llama-model restart [alias|/path/to/model.gguf] [extra llama-server args...]
+  llama-model stop
+  llama-model logs [lines]
+
+Examples:
+  llama-model list
+  llama-model show gemma4-e4b-q8
+  llama-model add gemma4-e4b-q8 /models/Gemma-4-E4B-Q8_K_P.gguf --mmproj /models/mmproj-Gemma-4-E4B-f16.gguf
+  llama-model discover ~/models
+  llama-model build-runtime --backend auto
+  llama-model mode
+  llama-model set-mode single --restart
+  llama-model switch qwen35-9b-q8
+  llama-model switch /absolute/path/to/model.gguf --no-warmup
+
+Registry format:
+  alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes
+
+Older 3-column files remain supported.
+
+Notes:
+  - Bundled llama.cpp binaries are backend-, platform-, and architecture-specific.
+  - llama-model only auto-accepts bundled binaries that pass an explicit compatibility check.
+  - If no safe binary is available, run: llama-model build-runtime
+EOF
+}
+
+die() {
+    printf 'error: %s\n' "$*" >&2
+    exit 1
+}
+
+timestamp() {
+    date +%Y%m%dT%H%M%S
+}
+
+ensure_models_file() {
+    mkdir -p "$CONFIG_DIR"
+    if [[ ! -f "$MODELS_FILE" ]]; then
+        cat >"$MODELS_FILE" <<'EOF'
+# alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes
+EOF
+    fi
+}
+
+trim_whitespace() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s\n' "$value"
+}
+
+normalize_os() {
+    local raw="${1:-}"
+    raw="${raw,,}"
+    case "$raw" in
+        linux) printf 'linux\n' ;;
+        darwin|macos|mac|osx) printf 'darwin\n' ;;
+        *) printf '%s\n' "$raw" ;;
+    esac
+}
+
+normalize_arch() {
+    local raw="${1:-}"
+    raw="${raw,,}"
+    case "$raw" in
+        amd64|x86_64) printf 'x86_64\n' ;;
+        arm64|aarch64) printf 'arm64\n' ;;
+        *) printf '%s\n' "$raw" ;;
+    esac
+}
+
+detect_host_os() {
+    if [[ -n "${LLAMA_HOST_OS:-}" ]]; then
+        normalize_os "$LLAMA_HOST_OS"
+    else
+        normalize_os "$(uname -s)"
+    fi
+}
+
+detect_host_arch() {
+    if [[ -n "${LLAMA_HOST_ARCH:-}" ]]; then
+        normalize_arch "$LLAMA_HOST_ARCH"
+    else
+        normalize_arch "$(uname -m)"
+    fi
+}
+
+command_available() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+canonicalize_path() {
+    local target="$1"
+    local dir
+    local base
+
+    if command_available realpath; then
+        realpath "$target"
+        return 0
+    fi
+
+    if [[ -d "$target" ]]; then
+        (cd "$target" && pwd -P)
+        return 0
+    fi
+
+    dir="$(dirname "$target")"
+    base="$(basename "$target")"
+    (cd "$dir" && printf '%s/%s\n' "$(pwd -P)" "$base")
+}
+
+host_has_cuda_runtime() {
+    case "${LLAMA_HOST_CUDA_AVAILABLE:-}" in
+        1|true|yes) return 0 ;;
+        0|false|no) return 1 ;;
+    esac
+
+    if command_available nvidia-smi && nvidia-smi -L >/dev/null 2>&1; then
+        return 0
+    fi
+    [[ -e /dev/nvidiactl || -d /proc/driver/nvidia ]] && return 0
+    return 1
+}
+
+host_has_vulkan_runtime() {
+    case "${LLAMA_HOST_VULKAN_AVAILABLE:-}" in
+        1|true|yes) return 0 ;;
+        0|false|no) return 1 ;;
+    esac
+
+    if command_available vulkaninfo && vulkaninfo --summary >/dev/null 2>&1; then
+        return 0
+    fi
+    if command_available ldconfig && ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so'; then
+        return 0
+    fi
+    return 1
+}
+
+host_has_metal_runtime() {
+    case "${LLAMA_HOST_METAL_AVAILABLE:-}" in
+        1|true|yes) return 0 ;;
+        0|false|no) return 1 ;;
+    esac
+
+    [[ "$(detect_host_os)" == "darwin" ]] || return 1
+    if command_available system_profiler; then
+        system_profiler SPDisplaysDataType 2>/dev/null | grep -qi 'metal' && return 0
+    fi
+    return 0
+}
+
+detect_host_backends() {
+    local normalized=""
+    local entry
+
+    if [[ -n "${LLAMA_HOST_BACKENDS:-}" ]]; then
+        for entry in ${LLAMA_HOST_BACKENDS//,/ }; do
+            entry="$(trim_whitespace "$entry")"
+            [[ -n "$entry" ]] || continue
+            case "$entry" in
+                cpu|cuda|vulkan|metal)
+                    if [[ ",$normalized," != *",$entry,"* ]]; then
+                        normalized="${normalized:+$normalized,}$entry"
+                    fi
+                    ;;
+            esac
+        done
+    fi
+
+    if [[ -z "$normalized" ]]; then
+        normalized="cpu"
+        if host_has_cuda_runtime; then
+            normalized+=",cuda"
+        fi
+        if host_has_vulkan_runtime; then
+            normalized+=",vulkan"
+        fi
+        if host_has_metal_runtime; then
+            normalized+=",metal"
+        fi
+    elif [[ ",$normalized," != *",cpu,"* ]]; then
+        normalized="cpu,$normalized"
+    fi
+
+    printf '%s\n' "$normalized"
+}
+
+host_has_backend() {
+    local backend="$1"
+    [[ ",$SELECTED_LLAMA_SERVER_HOST_BACKENDS," == *",$backend,"* ]]
+}
+
+infer_backend_from_device() {
+    local device="${1:-}"
+    device="${device,,}"
+    case "$device" in
+        cuda*) printf 'cuda\n' ;;
+        vulkan*|vk*) printf 'vulkan\n' ;;
+        metal*) printf 'metal\n' ;;
+        *) printf '\n' ;;
+    esac
+}
+
+cc_to_int() {
+    local value="${1:-}"
+    local major=0
+    local minor=0
+
+    value="${value//[[:space:]]/}"
+    IFS='.' read -r major minor <<<"$value"
+    major="${major:-0}"
+    minor="${minor:-0}"
+    printf '%d%02d\n' "$major" "$minor"
+}
+
+detect_host_cuda_cc() {
+    local cc
+
+    if [[ -n "${LLAMA_HOST_CUDA_CC:-}" ]]; then
+        printf '%s\n' "$LLAMA_HOST_CUDA_CC"
+        return 0
+    fi
+
+    if command_available nvidia-smi; then
+        cc="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n 1 | tr -d '[:space:]' || true)"
+        if [[ -n "$cc" ]]; then
+            printf '%s\n' "$cc"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+manifest_value() {
+    local file="$1"
+    local key="$2"
+    local line
+
+    [[ -f "$file" ]] || return 1
+    line="$(grep -E "^${key}=" "$file" | tail -n 1 || true)"
+    [[ -n "$line" ]] || return 1
+    line="${line#*=}"
+    line="${line%\"}"
+    line="${line#\"}"
+    line="${line%\'}"
+    line="${line#\'}"
+    printf '%s\n' "$line"
+}
+
+binary_file_info() {
+    file -bL "$1" 2>/dev/null || true
+}
+
+binary_platform_matches_host() {
+    local binary="$1"
+    local info
+
+    info="$(binary_file_info "$binary")"
+    if [[ -z "$info" ]] || [[ "$info" == *"script"* ]] || [[ "$info" == *"text executable"* ]]; then
+        return 0
+    fi
+
+    case "$SELECTED_LLAMA_SERVER_HOST_OS" in
+        linux)
+            [[ "$info" == *ELF* ]] || return 1
+            ;;
+        darwin)
+            [[ "$info" == *Mach-O* ]] || return 1
+            ;;
+    esac
+
+    case "$SELECTED_LLAMA_SERVER_HOST_ARCH" in
+        x86_64)
+            [[ "$info" == *x86-64* || "$info" == *x86_64* ]] || return 1
+            ;;
+        arm64)
+            [[ "$info" == *arm64* || "$info" == *aarch64* ]] || return 1
+            ;;
+    esac
+
+    return 0
+}
+
+binary_dynamic_links_resolve() {
+    local binary="$1"
+    local info
+    local output
+
+    info="$(binary_file_info "$binary")"
+    if [[ -z "$info" ]] || [[ "$info" == *"script"* ]] || [[ "$info" == *"text executable"* ]]; then
+        return 0
+    fi
+
+    case "$SELECTED_LLAMA_SERVER_HOST_OS" in
+        linux)
+            if command_available ldd; then
+                output="$(ldd "$binary" 2>&1 || true)"
+                [[ "$output" != *"not found"* ]] || return 1
+            fi
+            ;;
+        darwin)
+            if command_available otool; then
+                output="$(otool -L "$binary" 2>&1 || true)"
+                [[ "$output" != *"not found"* ]] || return 1
+            fi
+            ;;
+    esac
+
+    return 0
+}
+
+bundle_manifest_for_binary() {
+    printf '%s.compat.env\n' "$1"
+}
+
+validate_cuda_bundle() {
+    local manifest="$1"
+    local exact_cc
+    local min_cc
+    local max_cc
+    local host_cc
+    local host_cc_int
+    local candidate
+
+    exact_cc="$(manifest_value "$manifest" LLAMA_BUNDLE_CUDA_CC || true)"
+    min_cc="$(manifest_value "$manifest" LLAMA_BUNDLE_CUDA_CC_MIN || true)"
+    max_cc="$(manifest_value "$manifest" LLAMA_BUNDLE_CUDA_CC_MAX || true)"
+
+    if [[ -z "$exact_cc" && -z "$min_cc" && -z "$max_cc" ]]; then
+        BUNDLE_VALIDATE_REASON="bundled CUDA binary is missing compute-capability metadata"
+        return 1
+    fi
+
+    host_cc="$(detect_host_cuda_cc || true)"
+    if [[ -z "$host_cc" ]]; then
+        BUNDLE_VALIDATE_REASON="host CUDA compute capability could not be detected"
+        return 1
+    fi
+
+    host_cc_int="$(cc_to_int "$host_cc")"
+    if [[ -n "$exact_cc" ]]; then
+        for candidate in ${exact_cc//,/ }; do
+            if [[ "$(cc_to_int "$candidate")" == "$host_cc_int" ]]; then
+                return 0
+            fi
+        done
+        BUNDLE_VALIDATE_REASON="bundled CUDA binary targets compute capability ${exact_cc}, host reports ${host_cc}"
+        return 1
+    fi
+
+    if [[ -n "$min_cc" ]] && (( host_cc_int < $(cc_to_int "$min_cc") )); then
+        BUNDLE_VALIDATE_REASON="bundled CUDA binary requires compute capability >= ${min_cc}, host reports ${host_cc}"
+        return 1
+    fi
+    if [[ -n "$max_cc" ]] && (( host_cc_int > $(cc_to_int "$max_cc") )); then
+        BUNDLE_VALIDATE_REASON="bundled CUDA binary requires compute capability <= ${max_cc}, host reports ${host_cc}"
+        return 1
+    fi
+
+    return 0
+}
+
+validate_bundled_binary() {
+    local binary="$1"
+    local manifest
+    local bundle_os
+    local bundle_arch
+    local bundle_backend
+    local bundle_label
+
+    BUNDLE_VALIDATE_REASON=""
+    BUNDLE_VALIDATE_BACKEND=""
+    BUNDLE_VALIDATE_LABEL=""
+    BUNDLE_VALIDATE_MANIFEST=""
+
+    [[ -x "$binary" ]] || {
+        BUNDLE_VALIDATE_REASON="bundled binary not executable: $binary"
+        return 1
+    }
+
+    manifest="$(bundle_manifest_for_binary "$binary")"
+    [[ -f "$manifest" ]] || {
+        BUNDLE_VALIDATE_REASON="bundled binary is missing ${manifest##*/}"
+        return 1
+    }
+
+    bundle_os="$(normalize_os "$(manifest_value "$manifest" LLAMA_BUNDLE_OS || true)")"
+    bundle_arch="$(normalize_arch "$(manifest_value "$manifest" LLAMA_BUNDLE_ARCH || true)")"
+    bundle_backend="$(trim_whitespace "$(manifest_value "$manifest" LLAMA_BUNDLE_BACKEND || true)")"
+    bundle_label="$(trim_whitespace "$(manifest_value "$manifest" LLAMA_BUNDLE_LABEL || true)")"
+
+    [[ -n "$bundle_os" && -n "$bundle_arch" && -n "$bundle_backend" ]] || {
+        BUNDLE_VALIDATE_REASON="bundled manifest is missing required OS/arch/backend fields"
+        return 1
+    }
+
+    [[ "$bundle_os" == "$SELECTED_LLAMA_SERVER_HOST_OS" ]] || {
+        BUNDLE_VALIDATE_REASON="bundled binary targets ${bundle_os}, host is ${SELECTED_LLAMA_SERVER_HOST_OS}"
+        return 1
+    }
+    [[ "$bundle_arch" == "$SELECTED_LLAMA_SERVER_HOST_ARCH" ]] || {
+        BUNDLE_VALIDATE_REASON="bundled binary targets ${bundle_arch}, host is ${SELECTED_LLAMA_SERVER_HOST_ARCH}"
+        return 1
+    }
+
+    case "$bundle_backend" in
+        cpu|cuda|vulkan|metal) ;;
+        *)
+            BUNDLE_VALIDATE_REASON="bundled binary declares unsupported backend: ${bundle_backend}"
+            return 1
+            ;;
+    esac
+
+    if [[ "$bundle_backend" != "cpu" ]] && ! host_has_backend "$bundle_backend"; then
+        BUNDLE_VALIDATE_REASON="host does not expose the required ${bundle_backend} runtime"
+        return 1
+    fi
+
+    binary_platform_matches_host "$binary" || {
+        BUNDLE_VALIDATE_REASON="bundled binary format does not match this host"
+        return 1
+    }
+    binary_dynamic_links_resolve "$binary" || {
+        BUNDLE_VALIDATE_REASON="bundled binary has unresolved dynamic library dependencies"
+        return 1
+    }
+
+    if [[ "$bundle_backend" == "cuda" ]]; then
+        validate_cuda_bundle "$manifest" || return 1
+    fi
+
+    BUNDLE_VALIDATE_BACKEND="$bundle_backend"
+    BUNDLE_VALIDATE_LABEL="${bundle_label:-$bundle_backend}"
+    BUNDLE_VALIDATE_MANIFEST="$manifest"
+    return 0
+}
+
+validate_external_binary() {
+    local binary="$1"
+
+    EXTERNAL_VALIDATE_REASON=""
+    [[ -x "$binary" ]] || {
+        EXTERNAL_VALIDATE_REASON="binary not executable: $binary"
+        return 1
+    }
+    binary_platform_matches_host "$binary" || {
+        EXTERNAL_VALIDATE_REASON="binary format does not match host ${SELECTED_LLAMA_SERVER_HOST_OS}/${SELECTED_LLAMA_SERVER_HOST_ARCH}"
+        return 1
+    }
+    binary_dynamic_links_resolve "$binary" || {
+        EXTERNAL_VALIDATE_REASON="binary has unresolved dynamic library dependencies"
+        return 1
+    }
+    return 0
+}
+
+runtime_build_guidance() {
+    cat <<EOF
+Run \`llama-model build-runtime\` to fetch ${LLAMA_CPP_REPO_URL} and compile a host-specific llama-server build. Bundled binaries are backend-, platform-, and architecture-specific. If you need CUDA, Vulkan, or Metal, build that backend locally or point LLAMA_SERVER_BIN at your own compatible install.
+EOF
+}
+
+select_binary_record() {
+    SELECTED_LLAMA_SERVER_BIN="$1"
+    SELECTED_LLAMA_SERVER_SOURCE="$2"
+    SELECTED_LLAMA_SERVER_BACKEND="$3"
+    SELECTED_LLAMA_SERVER_STATUS="$4"
+    SELECTED_LLAMA_SERVER_MESSAGE="$5"
+    SELECTED_LLAMA_SERVER_GUIDANCE="$6"
+    SELECTED_LLAMA_SERVER_LABEL="${7:-}"
+    SELECTED_LLAMA_SERVER_BUNDLE_MANIFEST="${8:-}"
+}
+
+list_bundled_binaries() {
+    local runtime_root="$LLAMA_SERVER_RUNTIME_DIR/llama-server"
+    [[ -d "$runtime_root" ]] || return 0
+    find "$runtime_root" -mindepth 2 -maxdepth 2 -type f -name 'llama-server' -print0 | sort -z
+}
+
+bundled_binary_preference_order() {
+    local requested_backend="$1"
+    local order=""
+    local backend
+
+    for backend in "$requested_backend" metal cuda vulkan cpu; do
+        [[ -n "$backend" ]] || continue
+        if [[ ",$order," != *",$backend,"* ]]; then
+            order="${order:+$order,}$backend"
+        fi
+    done
+    printf '%s\n' "$order"
+}
+
+select_compatible_bundled_binary() {
+    local requested_backend="$1"
+    local order
+    local backend
+    local candidate
+
+    BUNDLED_SELECTION_FAILURE_REASON=""
+    order="$(bundled_binary_preference_order "$requested_backend")"
+    for backend in ${order//,/ }; do
+        while IFS= read -r -d '' candidate; do
+            if validate_bundled_binary "$candidate" && [[ "$BUNDLE_VALIDATE_BACKEND" == "$backend" ]]; then
+                select_binary_record \
+                    "$candidate" \
+                    "bundled" \
+                    "$BUNDLE_VALIDATE_BACKEND" \
+                    "compatible" \
+                    "validated bundled ${BUNDLE_VALIDATE_LABEL} binary" \
+                    "" \
+                    "$BUNDLE_VALIDATE_LABEL" \
+                    "$BUNDLE_VALIDATE_MANIFEST"
+                if [[ "$BUNDLE_VALIDATE_BACKEND" == "cpu" && -n "$BUNDLED_SELECTION_FAILURE_REASON" ]]; then
+                    SELECTED_LLAMA_SERVER_SOURCE="bundled-cpu-fallback"
+                    SELECTED_LLAMA_SERVER_STATUS="fallback"
+                    SELECTED_LLAMA_SERVER_MESSAGE="${BUNDLED_SELECTION_FAILURE_REASON}; using validated bundled CPU fallback instead"
+                fi
+                return 0
+            elif [[ -z "$BUNDLED_SELECTION_FAILURE_REASON" && -n "$BUNDLE_VALIDATE_REASON" ]]; then
+                BUNDLED_SELECTION_FAILURE_REASON="$BUNDLE_VALIDATE_REASON"
+            fi
+        done < <(list_bundled_binaries)
+    done
+
+    return 1
+}
+
+probe_server_binary() {
+    local requested_backend
+    local fallback_note=""
+    local configured_path="${REQUESTED_LLAMA_SERVER_BIN:-}"
+    local default_path="$DEFAULT_LLAMA_SERVER_BIN"
+    local runtime_root
+
+    SELECTED_LLAMA_SERVER_HOST_OS="$(detect_host_os)"
+    SELECTED_LLAMA_SERVER_HOST_ARCH="$(detect_host_arch)"
+    SELECTED_LLAMA_SERVER_HOST_BACKENDS="$(detect_host_backends)"
+    SELECTED_LLAMA_SERVER_BIN=""
+    SELECTED_LLAMA_SERVER_SOURCE=""
+    SELECTED_LLAMA_SERVER_BACKEND=""
+    SELECTED_LLAMA_SERVER_STATUS=""
+    SELECTED_LLAMA_SERVER_MESSAGE=""
+    SELECTED_LLAMA_SERVER_GUIDANCE=""
+    SELECTED_LLAMA_SERVER_LABEL=""
+    SELECTED_LLAMA_SERVER_BUNDLE_MANIFEST=""
+    SELECTED_LLAMA_SERVER_PATH_KIND=""
+
+    requested_backend="$(infer_backend_from_device "${LLAMA_SERVER_DEVICE:-}")"
+    runtime_root="$(canonicalize_path "$LLAMA_SERVER_RUNTIME_DIR" 2>/dev/null || printf '%s\n' "$LLAMA_SERVER_RUNTIME_DIR")"
+
+    if [[ -n "$configured_path" ]]; then
+        SELECTED_LLAMA_SERVER_PATH_KIND="configured"
+        if [[ -x "$configured_path" ]]; then
+            if [[ -n "$runtime_root" ]] && [[ "$(canonicalize_path "$configured_path" 2>/dev/null || printf '%s\n' "$configured_path")" == "$runtime_root"* ]]; then
+                if validate_bundled_binary "$configured_path"; then
+                    select_binary_record \
+                        "$configured_path" \
+                        "bundled" \
+                        "$BUNDLE_VALIDATE_BACKEND" \
+                        "compatible" \
+                        "validated configured bundled ${BUNDLE_VALIDATE_LABEL} binary" \
+                        "" \
+                        "$BUNDLE_VALIDATE_LABEL" \
+                        "$BUNDLE_VALIDATE_MANIFEST"
+                    return 0
+                fi
+                fallback_note="configured bundled binary rejected: ${BUNDLE_VALIDATE_REASON}"
+            else
+                if validate_external_binary "$configured_path"; then
+                    select_binary_record \
+                        "$configured_path" \
+                        "external" \
+                        "external" \
+                        "external-unvalidated" \
+                        "using external llama-server binary; backend compatibility must be managed by the installer" \
+                        "" \
+                        "external install"
+                    return 0
+                fi
+                fallback_note="configured binary rejected: ${EXTERNAL_VALIDATE_REASON}"
+            fi
+        else
+            fallback_note="configured binary not found: ${configured_path}"
+        fi
+    elif [[ -x "$default_path" ]]; then
+        SELECTED_LLAMA_SERVER_PATH_KIND="default"
+        if validate_external_binary "$default_path"; then
+            select_binary_record \
+                "$default_path" \
+                "external" \
+                "external" \
+                "external-unvalidated" \
+                "using installed llama-server from PATH; backend compatibility must be managed by the installer" \
+                "" \
+                "external install"
+            return 0
+        fi
+        fallback_note="default installed binary rejected: ${EXTERNAL_VALIDATE_REASON}"
+    fi
+
+    if select_compatible_bundled_binary "$requested_backend"; then
+        if [[ -n "$fallback_note" && "$SELECTED_LLAMA_SERVER_BACKEND" == "cpu" ]]; then
+            SELECTED_LLAMA_SERVER_SOURCE="bundled-cpu-fallback"
+            SELECTED_LLAMA_SERVER_STATUS="fallback"
+            SELECTED_LLAMA_SERVER_MESSAGE="${fallback_note}; using validated bundled CPU fallback instead"
+        elif [[ -n "$fallback_note" ]]; then
+            SELECTED_LLAMA_SERVER_MESSAGE="${fallback_note}; using validated bundled ${SELECTED_LLAMA_SERVER_BACKEND} binary instead"
+        fi
+        return 0
+    fi
+
+    select_binary_record \
+        "" \
+        "none" \
+        "none" \
+        "unavailable" \
+        "${fallback_note:-${BUNDLED_SELECTION_FAILURE_REASON:-no compatible llama-server binary found}}" \
+        "$(runtime_build_guidance)"
+    return 1
+}
+
+detect_primary_build_backend() {
+    local requested="${1:-auto}"
+
+    if [[ "$requested" != "auto" ]]; then
+        printf '%s\n' "$requested"
+        return 0
+    fi
+
+    if [[ ",$SELECTED_LLAMA_SERVER_HOST_BACKENDS," == *",metal,"* ]]; then
+        printf 'metal\n'
+    elif [[ ",$SELECTED_LLAMA_SERVER_HOST_BACKENDS," == *",cuda,"* ]]; then
+        printf 'cuda\n'
+    elif [[ ",$SELECTED_LLAMA_SERVER_HOST_BACKENDS," == *",vulkan,"* ]]; then
+        printf 'vulkan\n'
+    else
+        printf 'cpu\n'
+    fi
+}
+
+build_job_count() {
+    if command_available nproc; then
+        nproc
+    elif command_available sysctl; then
+        sysctl -n hw.logicalcpu 2>/dev/null || printf '4\n'
+    else
+        printf '4\n'
+    fi
+}
+
+is_interactive_session() {
+    [[ -t 0 && -t 1 ]]
+}
+
+confirm_prompt() {
+    local prompt="$1"
+    local default="${2:-Y}"
+    local reply
+
+    if ! is_interactive_session; then
+        return 1
+    fi
+
+    if [[ "$default" == "Y" ]]; then
+        printf '%s [Y/n] ' "$prompt"
+    else
+        printf '%s [y/N] ' "$prompt"
+    fi
+
+    read -r reply || return 1
+    reply="${reply,,}"
+    if [[ -z "$reply" ]]; then
+        [[ "$default" == "Y" ]]
+        return
+    fi
+    [[ "$reply" == "y" || "$reply" == "yes" ]]
+}
+
+detect_package_manager() {
+    if command_available apt-get; then
+        printf 'apt-get\n'
+    elif command_available dnf; then
+        printf 'dnf\n'
+    elif command_available pacman; then
+        printf 'pacman\n'
+    elif command_available zypper; then
+        printf 'zypper\n'
+    elif command_available brew; then
+        printf 'brew\n'
+    else
+        printf 'none\n'
+    fi
+}
+
+dependency_key_label() {
+    case "$1" in
+        git) printf 'git\n' ;;
+        cmake) printf 'cmake\n' ;;
+        compiler) printf 'C++ compiler\n' ;;
+        cuda_toolkit) printf 'CUDA toolkit (nvcc)\n' ;;
+        vulkan_sdk) printf 'Vulkan SDK tools\n' ;;
+        xcode_tools) printf 'Xcode Command Line Tools\n' ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+
+missing_build_dependencies() {
+    local backend="$1"
+    local host_os="${SELECTED_LLAMA_SERVER_HOST_OS:-$(detect_host_os)}"
+
+    if ! command_available git; then
+        printf 'git\n'
+    fi
+    if ! command_available cmake; then
+        printf 'cmake\n'
+    fi
+
+    if [[ "$host_os" == "darwin" ]]; then
+        if ! command_available xcrun; then
+            printf 'xcode_tools\n'
+        fi
+    elif ! command_available c++ && ! command_available clang++ && ! command_available g++; then
+        printf 'compiler\n'
+    fi
+
+    case "$backend" in
+        cuda)
+            command_available nvcc || printf 'cuda_toolkit\n'
+            ;;
+        vulkan)
+            if ! command_available glslc && ! command_available glslangValidator; then
+                printf 'vulkan_sdk\n'
+            fi
+            ;;
+        metal)
+            command_available xcrun || printf 'xcode_tools\n'
+            ;;
+    esac
+}
+
+append_unique_words() {
+    local package_string="$1"
+    shift
+    local item
+    local existing
+
+    for item in $package_string; do
+        [[ -n "$item" ]] || continue
+        existing=0
+        for word in "$@"; do
+            if [[ "$word" == "$item" ]]; then
+                existing=1
+                break
+            fi
+        done
+        if [[ "$existing" -eq 0 ]]; then
+            printf '%s\n' "$item"
+        fi
+    done
+}
+
+packages_for_manager_key() {
+    local manager="$1"
+    local key="$2"
+
+    case "$manager:$key" in
+        apt-get:git|dnf:git|pacman:git|zypper:git|brew:git)
+            printf 'git\n'
+            ;;
+        apt-get:cmake|dnf:cmake|pacman:cmake|zypper:cmake|brew:cmake)
+            printf 'cmake\n'
+            ;;
+        apt-get:compiler)
+            printf 'build-essential\n'
+            ;;
+        dnf:compiler|zypper:compiler)
+            printf 'gcc-c++ make\n'
+            ;;
+        pacman:compiler)
+            printf 'base-devel\n'
+            ;;
+        apt-get:cuda_toolkit)
+            printf 'nvidia-cuda-toolkit\n'
+            ;;
+        dnf:cuda_toolkit|zypper:cuda_toolkit)
+            printf 'cuda-toolkit\n'
+            ;;
+        pacman:cuda_toolkit)
+            printf 'cuda\n'
+            ;;
+        apt-get:vulkan_sdk)
+            printf 'vulkan-tools glslang-tools libvulkan-dev\n'
+            ;;
+        dnf:vulkan_sdk)
+            printf 'vulkan-tools glslang\n'
+            ;;
+        pacman:vulkan_sdk)
+            printf 'vulkan-tools shaderc\n'
+            ;;
+        zypper:vulkan_sdk)
+            printf 'vulkan-tools glslang\n'
+            ;;
+        brew:vulkan_sdk)
+            printf 'vulkan-tools shaderc\n'
+            ;;
+        *)
+            printf '\n'
+            ;;
+    esac
+}
+
+preview_dependency_install_commands() {
+    local manager="$1"
+    shift
+    local key
+    local package_string
+    local -a packages=()
+    local pkg
+    local prefix=""
+
+    if [[ "$manager" == "none" ]]; then
+        return 1
+    fi
+
+    for key in "$@"; do
+        if [[ "$key" == "xcode_tools" ]]; then
+            printf 'xcode-select --install\n'
+            continue
+        fi
+
+        package_string="$(packages_for_manager_key "$manager" "$key")"
+        if [[ -z "$package_string" ]]; then
+            continue
+        fi
+        while IFS= read -r pkg; do
+            [[ -n "$pkg" ]] || continue
+            packages+=("$pkg")
+        done < <(append_unique_words "$package_string" "${packages[@]}")
+    done
+
+    if ((${#packages[@]} == 0)); then
+        return 0
+    fi
+
+    case "$manager" in
+        apt-get)
+            prefix="$( [[ "$EUID" -eq 0 ]] && printf '' || printf 'sudo ' )"
+            printf '%sapt-get update\n' "$prefix"
+            printf '%sapt-get install -y %s\n' "$prefix" "${packages[*]}"
+            ;;
+        dnf)
+            prefix="$( [[ "$EUID" -eq 0 ]] && printf '' || printf 'sudo ' )"
+            printf '%sdnf install -y %s\n' "$prefix" "${packages[*]}"
+            ;;
+        pacman)
+            prefix="$( [[ "$EUID" -eq 0 ]] && printf '' || printf 'sudo ' )"
+            printf '%spacman -Sy --needed --noconfirm %s\n' "$prefix" "${packages[*]}"
+            ;;
+        zypper)
+            prefix="$( [[ "$EUID" -eq 0 ]] && printf '' || printf 'sudo ' )"
+            printf '%szypper --non-interactive install %s\n' "$prefix" "${packages[*]}"
+            ;;
+        brew)
+            printf 'brew install %s\n' "${packages[*]}"
+            ;;
+    esac
+}
+
+ensure_sudo_if_needed() {
+    local manager="$1"
+
+    case "$manager" in
+        apt-get|dnf|pacman|zypper)
+            if [[ "$EUID" -ne 0 ]] && ! command_available sudo; then
+                die "sudo is required to install build dependencies with ${manager}"
+            fi
+            ;;
+    esac
+}
+
+run_dependency_install_commands() {
+    local manager="$1"
+    shift
+    local key
+    local package_string
+    local -a packages=()
+    local pkg
+
+    ensure_sudo_if_needed "$manager"
+
+    for key in "$@"; do
+        if [[ "$key" == "xcode_tools" ]]; then
+            if command_available xcode-select && xcode-select -p >/dev/null 2>&1; then
+                continue
+            fi
+            command_available xcode-select || die "xcode-select is not available on this host"
+            xcode-select --install || true
+            printf 'Complete the Xcode Command Line Tools installation, then rerun llama-model build-runtime.\n'
+            return 1
+        fi
+
+        package_string="$(packages_for_manager_key "$manager" "$key")"
+        if [[ -z "$package_string" ]]; then
+            continue
+        fi
+        while IFS= read -r pkg; do
+            [[ -n "$pkg" ]] || continue
+            packages+=("$pkg")
+        done < <(append_unique_words "$package_string" "${packages[@]}")
+    done
+
+    if ((${#packages[@]} == 0)); then
+        return 0
+    fi
+
+    case "$manager" in
+        apt-get)
+            if [[ "$EUID" -eq 0 ]]; then
+                apt-get update
+                apt-get install -y "${packages[@]}"
+            else
+                sudo apt-get update
+                sudo apt-get install -y "${packages[@]}"
+            fi
+            ;;
+        dnf)
+            if [[ "$EUID" -eq 0 ]]; then
+                dnf install -y "${packages[@]}"
+            else
+                sudo dnf install -y "${packages[@]}"
+            fi
+            ;;
+        pacman)
+            if [[ "$EUID" -eq 0 ]]; then
+                pacman -Sy --needed --noconfirm "${packages[@]}"
+            else
+                sudo pacman -Sy --needed --noconfirm "${packages[@]}"
+            fi
+            ;;
+        zypper)
+            if [[ "$EUID" -eq 0 ]]; then
+                zypper --non-interactive install "${packages[@]}"
+            else
+                sudo zypper --non-interactive install "${packages[@]}"
+            fi
+            ;;
+        brew)
+            brew install "${packages[@]}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+install_missing_build_dependencies() {
+    local backend="$1"
+    shift
+    local -a missing=("$@")
+    local manager
+    local preview=""
+    local key
+
+    manager="$(detect_package_manager)"
+    if [[ "$manager" == "none" ]]; then
+        return 1
+    fi
+
+    preview="$(preview_dependency_install_commands "$manager" "${missing[@]}" || true)"
+    if [[ -z "$preview" ]]; then
+        return 1
+    fi
+
+    printf 'Missing build dependencies for backend %s:\n' "$backend"
+    for key in "${missing[@]}"; do
+        printf '  - %s\n' "$(dependency_key_label "$key")"
+    done
+    printf '\nProposed install commands:\n%s\n' "$preview"
+
+    case "${LLAMA_AUTO_INSTALL_DEPS:-prompt}" in
+        1|true|yes)
+            ;;
+        0|false|no)
+            return 1
+            ;;
+        *)
+            confirm_prompt "Install the missing build dependencies now?" "Y" || return 1
+            ;;
+    esac
+
+    run_dependency_install_commands "$manager" "${missing[@]}"
+}
+
+ensure_build_dependencies() {
+    local backend="$1"
+    local -a missing=()
+    local summary=""
+    local key
+
+    mapfile -t missing < <(missing_build_dependencies "$backend")
+    if ((${#missing[@]} == 0)); then
+        return 0
+    fi
+
+    install_missing_build_dependencies "$backend" "${missing[@]}" || true
+    mapfile -t missing < <(missing_build_dependencies "$backend")
+    if ((${#missing[@]} == 0)); then
+        return 0
+    fi
+
+    for key in "${missing[@]}"; do
+        summary="${summary:+$summary, }$(dependency_key_label "$key")"
+    done
+    die "missing build dependencies for backend ${backend}: ${summary}. Install them and rerun llama-model build-runtime --backend ${backend}."
+}
+
+sync_llama_cpp_source() {
+    local ref="$1"
+    local src_root="$LLAMA_SERVER_RUNTIME_DIR/src"
+    local src_dir="$src_root/llama.cpp"
+
+    mkdir -p "$src_root"
+    if [[ ! -d "$src_dir/.git" ]]; then
+        git clone "$LLAMA_CPP_REPO_URL" "$src_dir" >/dev/null
+    fi
+
+    git -C "$src_dir" fetch --tags origin >/dev/null
+    if git -C "$src_dir" rev-parse --verify "$ref^{commit}" >/dev/null 2>&1; then
+        git -C "$src_dir" checkout --detach "$ref" >/dev/null
+    else
+        git -C "$src_dir" checkout --detach "origin/$ref" >/dev/null 2>&1 \
+            || die "unable to resolve llama.cpp ref: $ref"
+    fi
+
+    printf '%s\n' "$src_dir"
+}
+
+write_bundle_manifest() {
+    local binary="$1"
+    local backend="$2"
+    local ref="$3"
+    local manifest
+    local label
+    local cuda_cc=""
+
+    case "$backend" in
+        cpu) label="CPU" ;;
+        cuda) label="NVIDIA CUDA" ;;
+        vulkan) label="Vulkan" ;;
+        metal) label="Apple Metal" ;;
+        *) label="$backend" ;;
+    esac
+
+    if [[ "$backend" == "cuda" ]]; then
+        cuda_cc="$(detect_host_cuda_cc || true)"
+        [[ -n "$cuda_cc" ]] || die "unable to detect CUDA compute capability for this host; set LLAMA_HOST_CUDA_CC or build cpu instead"
+    fi
+
+    manifest="$(bundle_manifest_for_binary "$binary")"
+    {
+        printf 'LLAMA_BUNDLE_OS=%s\n' "$SELECTED_LLAMA_SERVER_HOST_OS"
+        printf 'LLAMA_BUNDLE_ARCH=%s\n' "$SELECTED_LLAMA_SERVER_HOST_ARCH"
+        printf 'LLAMA_BUNDLE_BACKEND=%s\n' "$backend"
+        printf 'LLAMA_BUNDLE_LABEL=%s\n' "$label"
+        printf 'LLAMA_BUNDLE_SOURCE_REF=%s\n' "$ref"
+        printf 'LLAMA_BUNDLE_BUILT_AT=%s\n' "$(date --iso-8601=seconds)"
+        if [[ -n "$cuda_cc" ]]; then
+            printf 'LLAMA_BUNDLE_CUDA_CC=%s\n' "$cuda_cc"
+        fi
+    } >"$manifest"
+}
+
+locate_built_llama_server() {
+    local build_dir="$1"
+    find "$build_dir" -type f -name 'llama-server' -perm -u+x | sort | head -n 1
+}
+
+build_runtime_backend() {
+    local src_dir="$1"
+    local backend="$2"
+    local ref="$3"
+    local jobs="$4"
+    local build_dir="$LLAMA_SERVER_RUNTIME_DIR/build/${SELECTED_LLAMA_SERVER_HOST_OS}-${SELECTED_LLAMA_SERVER_HOST_ARCH}-${backend}"
+    local install_dir="$LLAMA_SERVER_RUNTIME_DIR/llama-server/${SELECTED_LLAMA_SERVER_HOST_OS}-${SELECTED_LLAMA_SERVER_HOST_ARCH}-${backend}"
+    local -a cmake_args=()
+    local binary=""
+
+    rm -rf "$build_dir"
+    mkdir -p "$build_dir" "$install_dir"
+
+    if command_available ninja; then
+        cmake_args+=(-G Ninja)
+    fi
+
+    cmake_args+=(-DCMAKE_BUILD_TYPE=Release)
+    case "$backend" in
+        cpu)
+            cmake_args+=(-DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DGGML_METAL=OFF)
+            ;;
+        cuda)
+            cmake_args+=(-DGGML_CUDA=ON -DGGML_VULKAN=OFF -DGGML_METAL=OFF)
+            ;;
+        vulkan)
+            cmake_args+=(-DGGML_CUDA=OFF -DGGML_VULKAN=ON -DGGML_METAL=OFF)
+            ;;
+        metal)
+            cmake_args+=(-DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DGGML_METAL=ON)
+            ;;
+        *)
+            die "unsupported build backend: $backend"
+            ;;
+    esac
+
+    cmake -S "$src_dir" -B "$build_dir" "${cmake_args[@]}" >/dev/null
+    cmake --build "$build_dir" --target llama-server -j "$jobs" >/dev/null
+
+    binary="$(locate_built_llama_server "$build_dir")"
+    [[ -n "$binary" ]] || die "llama-server binary was not produced for backend ${backend}"
+
+    install -m 0755 "$binary" "$install_dir/llama-server"
+    write_bundle_manifest "$install_dir/llama-server" "$backend" "$ref"
+    printf 'built %s runtime at %s\n' "$backend" "$install_dir/llama-server"
+}
+
+build_runtime() {
+    local backend="auto"
+    local ref="$LLAMA_CPP_REF"
+    local primary_backend
+    local src_dir
+    local jobs
+    local target
+    local built_any=0
+    local targets=""
+
+    while (($#)); do
+        case "$1" in
+            --backend)
+                [[ $# -ge 2 ]] || die "--backend requires a value"
+                backend="$2"
+                shift 2
+                ;;
+            --ref)
+                [[ $# -ge 2 ]] || die "--ref requires a value"
+                ref="$2"
+                shift 2
+                ;;
+            *)
+                die "unknown build-runtime option: $1"
+                ;;
+        esac
+    done
+
+    case "$backend" in
+        auto|cpu|cuda|vulkan|metal) ;;
+        *)
+            die "unsupported backend: $backend (expected auto, cpu, cuda, vulkan, or metal)"
+            ;;
+    esac
+
+    SELECTED_LLAMA_SERVER_HOST_OS="$(detect_host_os)"
+    SELECTED_LLAMA_SERVER_HOST_ARCH="$(detect_host_arch)"
+    SELECTED_LLAMA_SERVER_HOST_BACKENDS="$(detect_host_backends)"
+    primary_backend="$(detect_primary_build_backend "$backend")"
+    jobs="${LLAMA_BUILD_JOBS:-$(build_job_count)}"
+
+    ensure_build_dependencies "$primary_backend"
+    ensure_build_dependencies cpu
+    mkdir -p "$LLAMA_SERVER_RUNTIME_DIR"
+    src_dir="$(sync_llama_cpp_source "$ref")"
+
+    for target in "$primary_backend" cpu; do
+        if [[ ",$targets," == *",$target,"* ]]; then
+            continue
+        fi
+        targets="${targets:+$targets,}$target"
+        build_runtime_backend "$src_dir" "$target" "$ref" "$jobs"
+        built_any=1
+    done
+
+    [[ "$built_any" -eq 1 ]] || die "no runtime builds were produced"
+    printf 'runtime_dir: %s\n' "$LLAMA_SERVER_RUNTIME_DIR"
+    printf 'host: %s/%s (%s)\n' "$SELECTED_LLAMA_SERVER_HOST_OS" "$SELECTED_LLAMA_SERVER_HOST_ARCH" "$SELECTED_LLAMA_SERVER_HOST_BACKENDS"
+}
+
+sanitize_alias() {
+    local raw="$1"
+    raw="${raw##*/}"
+    raw="${raw%.gguf}"
+    raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-+/-/g')"
+    printf '%s\n' "$raw"
+}
+
+find_pid() {
+    local pid
+    local pattern="${LLAMA_SERVER_BIN:-}"
+
+    if [[ -z "$pattern" ]]; then
+        pattern='(^|/)llama-server([[:space:]]|$)'
+    fi
+
+    pid="$(
+        pgrep -af "$pattern" 2>/dev/null \
+            | awk -v port="$LLAMA_SERVER_PORT" '$0 ~ ("--port " port "([[:space:]]|$)") { print $1; exit }' \
+            || true
+    )"
+    printf '%s\n' "$pid"
+}
+
+cmd_arg_from_pid() {
+    local pid="$1"
+    local key="$2"
+    local -a args=()
+    local i
+
+    [[ -r "/proc/$pid/cmdline" ]] || return 1
+    mapfile -d '' -t args <"/proc/$pid/cmdline"
+
+    for ((i = 0; i < ${#args[@]}; i++)); do
+        if [[ "${args[i]}" == "$key" ]] && (( i + 1 < ${#args[@]} )); then
+            printf '%s\n' "${args[i + 1]}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+lookup_model() {
+    local needle="$1"
+    local alias
+    local path
+    local extra
+    local context
+    local ngl
+    local batch
+    local threads
+    local parallel
+    local device
+    local notes
+
+    [[ -f "$MODELS_FILE" ]] || die "model registry not found: $MODELS_FILE"
+
+    while IFS=$'\t' read -r alias path extra context ngl batch threads parallel device notes; do
+        [[ -n "$alias" ]] || continue
+        [[ "${alias:0:1}" == "#" ]] && continue
+        if [[ "$alias" == "$needle" ]]; then
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$alias" "$path" "${extra:-}" "${context:-}" "${ngl:-}" "${batch:-}" "${threads:-}" "${parallel:-}" "${device:-}" "${notes:-}"
+            return 0
+        fi
+    done <"$MODELS_FILE"
+
+    return 1
+}
+
+lookup_alias_for_path() {
+    local needle="$1"
+    local alias
+    local path
+    local extra
+    local context
+    local ngl
+    local batch
+    local threads
+    local parallel
+    local device
+    local notes
+
+    [[ -f "$MODELS_FILE" ]] || return 1
+
+    while IFS=$'\t' read -r alias path extra context ngl batch threads parallel device notes; do
+        [[ -n "$alias" ]] || continue
+        [[ "${alias:0:1}" == "#" ]] && continue
+        if [[ "$path" == "$needle" ]]; then
+            printf '%s\n' "$alias"
+            return 0
+        fi
+    done <"$MODELS_FILE"
+
+    return 1
+}
+
+configured_mode_name() {
+    if [[ "${LLAMA_SERVER_PARALLEL:-}" == "1" ]]; then
+        printf 'single-client\n'
+    else
+        printf 'multi-client\n'
+    fi
+}
+
+active_parallel_value() {
+    local pid="$1"
+    local active_parallel
+
+    active_parallel="$(cmd_arg_from_pid "$pid" -np || true)"
+    if [[ -n "$active_parallel" ]]; then
+        printf '%s\n' "$active_parallel"
+    else
+        printf 'auto\n'
+    fi
+}
+
+active_mode_name() {
+    local active_parallel="$1"
+
+    if [[ "$active_parallel" == "1" ]]; then
+        printf 'single-client\n'
+    else
+        printf 'multi-client\n'
+    fi
+}
+
+ensure_defaults_file() {
+    mkdir -p "$CONFIG_DIR"
+    [[ -f "$DEFAULTS_FILE" ]] || : >"$DEFAULTS_FILE"
+}
+
+set_default_value() {
+    local key="$1"
+    local value="$2"
+    local tmp
+
+    ensure_defaults_file
+    tmp="$(mktemp)"
+    awk -v key="$key" -v value="$value" '
+        BEGIN { updated = 0 }
+        $0 ~ ("^" key "=") {
+            print key "=" value
+            updated = 1
+            next
+        }
+        { print }
+        END {
+            if (!updated) {
+                print key "=" value
+            }
+        }
+    ' "$DEFAULTS_FILE" >"$tmp"
+    mv "$tmp" "$DEFAULTS_FILE"
+}
+
+resolve_model() {
+    local spec="$1"
+    local resolved
+
+    if [[ -f "$spec" ]]; then
+        printf 'custom\t%s\t\t\t\t\t\t\t\t\n' "$(canonicalize_path "$spec")"
+        return 0
+    fi
+
+    if resolved="$(lookup_model "$spec")"; then
+        printf '%s\n' "$resolved"
+        return 0
+    fi
+
+    die "unknown model alias or path: $spec"
+}
+
+backup_log() {
+    local backup_path
+
+    [[ -s "$LLAMA_SERVER_LOG" ]] || return 0
+    backup_path="${LLAMA_SERVER_LOG}.pre-switch-$(timestamp)"
+    cp -a "$LLAMA_SERVER_LOG" "$backup_path"
+    printf 'backed up log to %s\n' "$backup_path"
+}
+
+stop_server() {
+    local pid
+    local waited
+
+    pid="$(find_pid)"
+    [[ -n "$pid" ]] || return 0
+
+    kill -INT "$pid" 2>/dev/null || true
+    for waited in $(seq 1 30); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            wait_for_port_release
+            return 0
+        fi
+        sleep 1
+    done
+
+    kill -TERM "$pid" 2>/dev/null || true
+    for waited in $(seq 1 10); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            wait_for_port_release
+            return 0
+        fi
+        sleep 1
+    done
+
+    die "server pid $pid did not stop"
+}
+
+wait_for_port_release() {
+    local waited
+
+    for waited in $(seq 1 30); do
+        if ! ss -ltn "( sport = :$LLAMA_SERVER_PORT )" | grep -q LISTEN; then
+            return 0
+        fi
+        sleep 1
+    done
+
+    die "port $LLAMA_SERVER_PORT did not become free"
+}
+
+wait_for_health() {
+    local pid="$1"
+    local waited
+    local url="http://${LLAMA_SERVER_HOST}:${LLAMA_SERVER_PORT}/health"
+
+    for ((waited = 0; waited < LLAMA_SERVER_WAIT_SECONDS; waited++)); do
+        if curl -fsS "$url" >/dev/null 2>&1; then
+            return 0
+        fi
+
+        if ! kill -0 "$pid" 2>/dev/null; then
+            tail -n 60 "$LLAMA_SERVER_LOG" >&2 || true
+            die "llama-server exited during startup"
+        fi
+
+        sleep 1
+    done
+
+    tail -n 60 "$LLAMA_SERVER_LOG" >&2 || true
+    die "timed out waiting for $url"
+}
+
+write_state() {
+    local alias="$1"
+    local model_path="$2"
+    local pid="$3"
+    local context="$4"
+    local ngl="$5"
+    local batch="$6"
+    local threads="$7"
+    local parallel="$8"
+    local device="$9"
+
+    {
+        printf 'CURRENT_ALIAS=%q\n' "$alias"
+        printf 'CURRENT_MODEL=%q\n' "$model_path"
+        printf 'CURRENT_PID=%q\n' "$pid"
+        printf 'CURRENT_PORT=%q\n' "$LLAMA_SERVER_PORT"
+        printf 'CURRENT_LOG=%q\n' "$LLAMA_SERVER_LOG"
+        printf 'CURRENT_CONTEXT=%q\n' "$context"
+        printf 'CURRENT_NGL=%q\n' "$ngl"
+        printf 'CURRENT_BATCH=%q\n' "$batch"
+        printf 'CURRENT_THREADS=%q\n' "$threads"
+        printf 'CURRENT_PARALLEL=%q\n' "$parallel"
+        printf 'CURRENT_DEVICE=%q\n' "$device"
+        printf 'CURRENT_STARTED_AT=%q\n' "$(date --iso-8601=seconds)"
+    } >"$STATE_FILE"
+}
+
+start_server() {
+    local alias="$1"
+    local model_path="$2"
+    local model_extra="${3:-}"
+    local model_context="${4:-}"
+    local model_ngl="${5:-}"
+    local model_batch="${6:-}"
+    local model_threads="${7:-}"
+    local model_parallel="${8:-}"
+    local model_device="${9:-}"
+    shift 9 || true
+    local -a cmd=()
+    local -a extra_args=()
+    local -a runtime_extra_args=()
+    local pid
+    local context="${model_context:-$LLAMA_SERVER_CONTEXT}"
+    local ngl="${model_ngl:-$LLAMA_SERVER_NGL}"
+    local batch="${model_batch:-$LLAMA_SERVER_BATCH}"
+    local threads="${model_threads:-$LLAMA_SERVER_THREADS}"
+    local device="${model_device:-$LLAMA_SERVER_DEVICE}"
+    local parallel="${model_parallel:-$LLAMA_SERVER_PARALLEL}"
+    local expected_device_backend
+
+    probe_server_binary || die "${SELECTED_LLAMA_SERVER_MESSAGE}
+
+${SELECTED_LLAMA_SERVER_GUIDANCE}"
+    [[ -f "$model_path" ]] || die "model not found: $model_path"
+
+    LLAMA_SERVER_BIN="$SELECTED_LLAMA_SERVER_BIN"
+    expected_device_backend="$(infer_backend_from_device "$device")"
+    if [[ "$SELECTED_LLAMA_SERVER_BACKEND" == "cpu" ]]; then
+        ngl="0"
+        device=""
+    elif [[ "$SELECTED_LLAMA_SERVER_BACKEND" != "external" && -n "$expected_device_backend" && "$expected_device_backend" != "$SELECTED_LLAMA_SERVER_BACKEND" ]]; then
+        die "configured device ${device} expects backend ${expected_device_backend}, but selected llama-server binary uses ${SELECTED_LLAMA_SERVER_BACKEND}. Clear the device override or build a matching runtime."
+    fi
+
+    if [[ -n "$model_extra" ]]; then
+        read -r -a extra_args <<<"$model_extra"
+    fi
+    if [[ -n "$LLAMA_SERVER_EXTRA_ARGS" ]]; then
+        read -r -a runtime_extra_args <<<"$LLAMA_SERVER_EXTRA_ARGS"
+    fi
+
+    cmd=(
+        "$LLAMA_SERVER_BIN"
+        -m "$model_path"
+        -c "$context"
+        -ngl "$ngl"
+        -b "$batch"
+        --threads "$threads"
+        --port "$LLAMA_SERVER_PORT"
+    )
+
+    if [[ -n "$device" ]]; then
+        cmd+=(--device "$device")
+    fi
+
+    if [[ -n "$parallel" ]] && [[ "$parallel" != "auto" ]]; then
+        cmd+=(-np "$parallel")
+    fi
+
+    if ((${#extra_args[@]})); then
+        cmd+=("${extra_args[@]}")
+    fi
+    if ((${#runtime_extra_args[@]})); then
+        cmd+=("${runtime_extra_args[@]}")
+    fi
+    if (($#)); then
+        cmd+=("$@")
+    fi
+
+    setsid "${cmd[@]}" >"$LLAMA_SERVER_LOG" 2>&1 < /dev/null &
+    pid=$!
+    disown "$pid" 2>/dev/null || true
+
+    wait_for_health "$pid"
+    write_state "$alias" "$model_path" "$pid" "$context" "$ngl" "$batch" "$threads" "${parallel:-auto}" "$device"
+
+    if [[ -n "$SELECTED_LLAMA_SERVER_MESSAGE" ]]; then
+        printf 'note: %s\n' "$SELECTED_LLAMA_SERVER_MESSAGE"
+    fi
+    printf 'started %s on port %s with pid %s\n' "$alias" "$LLAMA_SERVER_PORT" "$pid"
+}
+
+list_models() {
+    local pid
+    local current_model=""
+    local alias
+    local path
+    local extra
+    local context
+    local ngl
+    local batch
+    local threads
+    local parallel
+    local device
+    local notes
+    local marker
+    local status
+    local preset
+
+    [[ -f "$MODELS_FILE" ]] || die "model registry not found: $MODELS_FILE"
+
+    pid="$(find_pid)"
+    if [[ -n "$pid" ]]; then
+        current_model="$(cmd_arg_from_pid "$pid" -m || true)"
+    fi
+
+    printf '  %-18s %-8s %-8s %s\n' "ALIAS" "STATUS" "PRESET" "MODEL"
+    while IFS=$'\t' read -r alias path extra context ngl batch threads parallel device notes; do
+        [[ -n "$alias" ]] || continue
+        [[ "${alias:0:1}" == "#" ]] && continue
+        marker=" "
+        status="ok"
+        preset="default"
+        [[ -f "$path" ]] || status="missing"
+        [[ "$path" == "$current_model" ]] && marker="*"
+        if [[ -n "${extra:-}${context:-}${ngl:-}${batch:-}${threads:-}${parallel:-}${device:-}${notes:-}" ]]; then
+            preset="custom"
+        fi
+        printf '%s %-18s %-8s %-8s %s\n' "$marker" "$alias" "$status" "$preset" "$path"
+    done <"$MODELS_FILE"
+}
+
+show_model() {
+    local resolved
+    local alias
+    local model_path
+    local model_extra
+    local model_context
+    local model_ngl
+    local model_batch
+    local model_threads
+    local model_parallel
+    local model_device
+    local model_notes
+
+    resolved="$(lookup_model "$1")" || die "unknown model alias: $1"
+    IFS=$'\t' read -r alias model_path model_extra model_context model_ngl model_batch model_threads model_parallel model_device model_notes <<<"$resolved"
+
+    printf 'alias: %s\n' "$alias"
+    printf 'model: %s\n' "$model_path"
+    printf 'exists: %s\n' "$([[ -f "$model_path" ]] && printf yes || printf no)"
+    printf 'extra_args: %s\n' "${model_extra:-}"
+    printf 'context: %s\n' "${model_context:-default ($LLAMA_SERVER_CONTEXT)}"
+    printf 'ngl: %s\n' "${model_ngl:-default ($LLAMA_SERVER_NGL)}"
+    printf 'batch: %s\n' "${model_batch:-default ($LLAMA_SERVER_BATCH)}"
+    printf 'threads: %s\n' "${model_threads:-default ($LLAMA_SERVER_THREADS)}"
+    printf 'parallel: %s\n' "${model_parallel:-default (${LLAMA_SERVER_PARALLEL:-auto})}"
+    printf 'device: %s\n' "${model_device:-default ($LLAMA_SERVER_DEVICE)}"
+    printf 'notes: %s\n' "${model_notes:-}"
+}
+
+show_current() {
+    local pid
+    local model_path
+    local alias
+    local url="http://${LLAMA_SERVER_HOST}:${LLAMA_SERVER_PORT}/health"
+    local active_parallel
+    local active_mode
+
+    pid="$(find_pid)"
+    if [[ -z "$pid" ]]; then
+        printf 'llama-server is not running on port %s\n' "$LLAMA_SERVER_PORT"
+        printf 'configured_mode: %s\n' "$(configured_mode_name)"
+        if [[ -n "${LLAMA_SERVER_PARALLEL:-}" ]]; then
+            printf 'configured_parallel: %s\n' "$LLAMA_SERVER_PARALLEL"
+        else
+            printf 'configured_parallel: auto\n'
+        fi
+        return 0
+    fi
+
+    model_path="$(cmd_arg_from_pid "$pid" -m || true)"
+    alias="$(lookup_alias_for_path "$model_path" || true)"
+    [[ -n "$alias" ]] || alias="custom"
+    active_parallel="$(active_parallel_value "$pid")"
+    active_mode="$(active_mode_name "$active_parallel")"
+
+    printf 'pid: %s\n' "$pid"
+    printf 'alias: %s\n' "$alias"
+    printf 'model: %s\n' "$model_path"
+    printf 'log: %s\n' "$LLAMA_SERVER_LOG"
+    printf 'configured_mode: %s\n' "$(configured_mode_name)"
+    if [[ -n "${LLAMA_SERVER_PARALLEL:-}" ]]; then
+        printf 'configured_parallel: %s\n' "$LLAMA_SERVER_PARALLEL"
+    else
+        printf 'configured_parallel: auto\n'
+    fi
+    printf 'active_mode: %s\n' "$active_mode"
+    printf 'active_parallel: %s\n' "$active_parallel"
+    printf 'active_context: %s\n' "$(cmd_arg_from_pid "$pid" -c || printf unknown)"
+    printf 'active_ngl: %s\n' "$(cmd_arg_from_pid "$pid" -ngl || printf unknown)"
+    printf 'active_batch: %s\n' "$(cmd_arg_from_pid "$pid" -b || printf unknown)"
+    printf 'active_threads: %s\n' "$(cmd_arg_from_pid "$pid" --threads || printf unknown)"
+    printf 'active_device: %s\n' "$(cmd_arg_from_pid "$pid" --device || printf unknown)"
+    if curl -fsS "$url" >/dev/null 2>&1; then
+        printf 'health: ok (%s)\n' "$url"
+    else
+        printf 'health: unavailable (%s)\n' "$url"
+    fi
+}
+
+show_doctor() {
+    local pid
+    local model_path=""
+    local alias="stopped"
+    local url="http://${LLAMA_SERVER_HOST}:${LLAMA_SERVER_PORT}/health"
+    local health="unavailable"
+    local build_info=""
+    local offload=""
+    local kv_buffer=""
+    local graph_splits=""
+    local listening=""
+    local binary_ok="no"
+
+    pid="$(find_pid)"
+    if [[ -n "$pid" ]]; then
+        model_path="$(cmd_arg_from_pid "$pid" -m || true)"
+        alias="$(lookup_alias_for_path "$model_path" || true)"
+        [[ -n "$alias" ]] || alias="custom"
+        if curl -fsS "$url" >/dev/null 2>&1; then
+            health="ok"
+        fi
+    fi
+
+    if [[ -f "$LLAMA_SERVER_LOG" ]]; then
+        build_info="$(grep -F 'build_info:' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*build_info: //')"
+        offload="$(grep -E 'offloaded [0-9]+/[0-9]+ layers to GPU' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*offloaded /offloaded /')"
+        kv_buffer="$(grep -E 'KV buffer size = ' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*KV buffer size = //')"
+        graph_splits="$(grep -E 'graph splits = ' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*graph splits = //')"
+        listening="$(grep -F 'server is listening on' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*server is listening on //')"
+    fi
+
+    if probe_server_binary; then
+        binary_ok="yes"
+    fi
+
+    printf 'pid: %s\n' "${pid:-stopped}"
+    printf 'alias: %s\n' "$alias"
+    printf 'model: %s\n' "${model_path:-}"
+    printf 'health: %s\n' "$health"
+    printf 'host_os: %s\n' "$SELECTED_LLAMA_SERVER_HOST_OS"
+    printf 'host_arch: %s\n' "$SELECTED_LLAMA_SERVER_HOST_ARCH"
+    printf 'host_backends: %s\n' "$SELECTED_LLAMA_SERVER_HOST_BACKENDS"
+    printf 'defaults_file: %s\n' "$DEFAULTS_FILE"
+    printf 'registry_file: %s\n' "$MODELS_FILE"
+    printf 'log: %s\n' "$LLAMA_SERVER_LOG"
+    printf 'binary_ok: %s\n' "$binary_ok"
+    printf 'binary: %s\n' "${SELECTED_LLAMA_SERVER_BIN:-}"
+    printf 'binary_source: %s\n' "${SELECTED_LLAMA_SERVER_SOURCE:-none}"
+    printf 'binary_backend: %s\n' "${SELECTED_LLAMA_SERVER_BACKEND:-none}"
+    printf 'binary_status: %s\n' "${SELECTED_LLAMA_SERVER_STATUS:-unavailable}"
+    printf 'binary_message: %s\n' "${SELECTED_LLAMA_SERVER_MESSAGE:-}"
+    [[ -n "${SELECTED_LLAMA_SERVER_GUIDANCE:-}" ]] && printf 'binary_guidance: %s\n' "$SELECTED_LLAMA_SERVER_GUIDANCE"
+    [[ -n "${SELECTED_LLAMA_SERVER_LABEL:-}" ]] && printf 'binary_label: %s\n' "$SELECTED_LLAMA_SERVER_LABEL"
+    printf 'endpoint: http://%s:%s/v1\n' "$LLAMA_SERVER_HOST" "$LLAMA_SERVER_PORT"
+    [[ -n "$build_info" ]] && printf 'build_info: %s\n' "$build_info"
+    [[ -n "$offload" ]] && printf 'offload: %s\n' "$offload"
+    [[ -n "$kv_buffer" ]] && printf 'kv_buffer: %s\n' "$kv_buffer"
+    [[ -n "$graph_splits" ]] && printf 'graph_splits: %s\n' "$graph_splits"
+    [[ -n "$listening" ]] && printf 'server: %s\n' "$listening"
+    return 0
+}
+
+show_mode() {
+    local pid
+    local active_parallel="stopped"
+
+    pid="$(find_pid)"
+    if [[ -n "$pid" ]]; then
+        active_parallel="$(active_parallel_value "$pid")"
+    fi
+
+    printf 'configured_mode: %s\n' "$(configured_mode_name)"
+    if [[ -n "${LLAMA_SERVER_PARALLEL:-}" ]]; then
+        printf 'configured_parallel: %s\n' "$LLAMA_SERVER_PARALLEL"
+    else
+        printf 'configured_parallel: auto\n'
+    fi
+    printf 'active_parallel: %s\n' "$active_parallel"
+    if [[ "$active_parallel" == "stopped" ]]; then
+        printf 'active_mode: stopped\n'
+    else
+        printf 'active_mode: %s\n' "$(active_mode_name "$active_parallel")"
+    fi
+}
+
+set_mode() {
+    local mode="$1"
+    local restart_after="${2:-}"
+
+    case "$mode" in
+        single)
+            set_default_value "LLAMA_SERVER_PARALLEL" "1"
+            LLAMA_SERVER_PARALLEL="1"
+            ;;
+        multi)
+            set_default_value "LLAMA_SERVER_PARALLEL" ""
+            LLAMA_SERVER_PARALLEL=""
+            ;;
+        *)
+            die "unknown mode: $mode (expected single or multi)"
+            ;;
+    esac
+
+    printf 'configured_mode: %s\n' "$(configured_mode_name)"
+    if [[ -n "${LLAMA_SERVER_PARALLEL:-}" ]]; then
+        printf 'configured_parallel: %s\n' "$LLAMA_SERVER_PARALLEL"
+    else
+        printf 'configured_parallel: auto\n'
+    fi
+
+    if [[ "$restart_after" == "--restart" ]]; then
+        restart_model
+    else
+        printf 'note: restart the server to apply this mode\n'
+    fi
+}
+
+switch_model() {
+    local spec="$1"
+    shift || true
+    local resolved
+    local alias
+    local model_path
+    local model_extra
+    local model_context
+    local model_ngl
+    local model_batch
+    local model_threads
+    local model_parallel
+    local model_device
+    local model_notes
+
+    resolved="$(resolve_model "$spec")"
+    IFS=$'\t' read -r alias model_path model_extra model_context model_ngl model_batch model_threads model_parallel model_device model_notes <<<"$resolved"
+
+    stop_server
+    backup_log
+    start_server "$alias" "$model_path" "$model_extra" "$model_context" "$model_ngl" "$model_batch" "$model_threads" "$model_parallel" "$model_device" "$@"
+}
+
+restart_model() {
+    local spec="${1:-}"
+    local pid
+    local model_path
+    local alias
+
+    if [[ -n "$spec" ]]; then
+        switch_model "$@"
+        return 0
+    fi
+
+    pid="$(find_pid)"
+    [[ -n "$pid" ]] || die "no running server and no model specified"
+
+    model_path="$(cmd_arg_from_pid "$pid" -m || true)"
+    alias="$(lookup_alias_for_path "$model_path" || true)"
+    [[ -n "$alias" ]] || alias="$model_path"
+
+    switch_model "$alias"
+}
+
+show_logs() {
+    local lines="${1:-40}"
+    tail -n "$lines" "$LLAMA_SERVER_LOG"
+}
+
+parse_add_options() {
+    local alias="$1"
+    local model_path="$2"
+    shift 2 || true
+    local extra=""
+    local context=""
+    local ngl=""
+    local batch=""
+    local threads=""
+    local parallel=""
+    local device=""
+    local notes=""
+
+    while (($#)); do
+        case "$1" in
+            --mmproj)
+                [[ $# -ge 2 ]] || die "--mmproj requires a path"
+                extra="$(trim_whitespace "${extra} --mmproj $2")"
+                shift 2
+                ;;
+            --extra)
+                [[ $# -ge 2 ]] || die "--extra requires a value"
+                extra="$(trim_whitespace "${extra} $2")"
+                shift 2
+                ;;
+            --context)
+                [[ $# -ge 2 ]] || die "--context requires a value"
+                context="$2"
+                shift 2
+                ;;
+            --ngl)
+                [[ $# -ge 2 ]] || die "--ngl requires a value"
+                ngl="$2"
+                shift 2
+                ;;
+            --batch)
+                [[ $# -ge 2 ]] || die "--batch requires a value"
+                batch="$2"
+                shift 2
+                ;;
+            --threads)
+                [[ $# -ge 2 ]] || die "--threads requires a value"
+                threads="$2"
+                shift 2
+                ;;
+            --parallel)
+                [[ $# -ge 2 ]] || die "--parallel requires a value"
+                parallel="$2"
+                shift 2
+                ;;
+            --device)
+                [[ $# -ge 2 ]] || die "--device requires a value"
+                device="$2"
+                shift 2
+                ;;
+            --notes)
+                [[ $# -ge 2 ]] || die "--notes requires a value"
+                notes="$2"
+                shift 2
+                ;;
+            --)
+                shift
+                extra="$(trim_whitespace "${extra} $*")"
+                break
+                ;;
+            *)
+                die "unknown add option: $1"
+                ;;
+        esac
+    done
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$alias" "$model_path" "$extra" "$context" "$ngl" "$batch" "$threads" "$parallel" "$device" "$notes"
+}
+
+write_registry_line() {
+    local alias="$1"
+    local model_path="$2"
+    local extra="$3"
+    local context="$4"
+    local ngl="$5"
+    local batch="$6"
+    local threads="$7"
+    local parallel="$8"
+    local device="$9"
+    local notes="${10:-}"
+    local -a fields=("$alias" "$model_path" "$extra" "$context" "$ngl" "$batch" "$threads" "$parallel" "$device" "$notes")
+
+    while ((${#fields[@]} > 3)); do
+        local last_index=$(( ${#fields[@]} - 1 ))
+        if [[ -n "${fields[$last_index]}" ]]; then
+            break
+        fi
+        unset 'fields[$last_index]'
+    done
+
+    local joined=""
+    local field
+    for field in "${fields[@]}"; do
+        if [[ -n "$joined" ]]; then
+            joined+=$'\t'
+        fi
+        joined+="$field"
+    done
+    printf '%s\n' "$joined"
+}
+
+add_model() {
+    local alias="$1"
+    local model_path="$2"
+    shift 2 || true
+    local parsed
+    local extra
+    local context
+    local ngl
+    local batch
+    local threads
+    local parallel
+    local device
+    local notes
+    local tmp
+    local existing_alias
+    local line_alias
+    local line_path
+    local line_extra
+    local line_context
+    local line_ngl
+    local line_batch
+    local line_threads
+    local line_parallel
+    local line_device
+    local line_notes
+    local replaced=0
+
+    alias="$(sanitize_alias "$alias")"
+    [[ -n "$alias" ]] || die "alias resolved to empty value"
+
+    model_path="$(canonicalize_path "$model_path")"
+    [[ -f "$model_path" ]] || die "model not found: $model_path"
+
+    parsed="$(parse_add_options "$alias" "$model_path" "$@")"
+    IFS=$'\t' read -r existing_alias model_path extra context ngl batch threads parallel device notes <<<"$parsed"
+
+    ensure_models_file
+    tmp="$(mktemp)"
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ -z "$line" ]] || [[ "${line:0:1}" == "#" ]]; then
+            printf '%s\n' "$line" >>"$tmp"
+            continue
+        fi
+
+        IFS=$'\t' read -r line_alias line_path line_extra line_context line_ngl line_batch line_threads line_parallel line_device line_notes <<<"$line"
+        if [[ "$line_alias" == "$alias" ]]; then
+            write_registry_line "$alias" "$model_path" "$extra" "$context" "$ngl" "$batch" "$threads" "$parallel" "$device" "$notes" >>"$tmp"
+            replaced=1
+        else
+            printf '%s\n' "$line" >>"$tmp"
+        fi
+    done <"$MODELS_FILE"
+
+    if [[ "$replaced" -eq 0 ]]; then
+        write_registry_line "$alias" "$model_path" "$extra" "$context" "$ngl" "$batch" "$threads" "$parallel" "$device" "$notes" >>"$tmp"
+    fi
+
+    mv "$tmp" "$MODELS_FILE"
+    if [[ "$replaced" -eq 1 ]]; then
+        printf 'updated %s in %s\n' "$alias" "$MODELS_FILE"
+    else
+        printf 'added %s to %s\n' "$alias" "$MODELS_FILE"
+    fi
+}
+
+remove_model() {
+    local alias="$1"
+    local tmp
+    local found=0
+    local line_alias
+    local line
+
+    ensure_models_file
+    tmp="$(mktemp)"
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ -z "$line" ]] || [[ "${line:0:1}" == "#" ]]; then
+            printf '%s\n' "$line" >>"$tmp"
+            continue
+        fi
+
+        line_alias="${line%%$'\t'*}"
+        if [[ "$line_alias" == "$alias" ]]; then
+            found=1
+            continue
+        fi
+        printf '%s\n' "$line" >>"$tmp"
+    done <"$MODELS_FILE"
+
+    [[ "$found" -eq 1 ]] || die "unknown model alias: $alias"
+    mv "$tmp" "$MODELS_FILE"
+    printf 'removed %s from %s\n' "$alias" "$MODELS_FILE"
+}
+
+guess_mmproj_for_model() {
+    local model_path="$1"
+    local dir
+    local mmproj
+
+    dir="$(dirname "$model_path")"
+    mmproj="$(find "$dir" -maxdepth 1 -type f -iname '*mmproj*.gguf' | sort | head -n 1 || true)"
+    if [[ -n "$mmproj" ]]; then
+        printf '%s\n' "$mmproj"
+    fi
+}
+
+discover_models() {
+    local root="${1:-$HOME/models}"
+    local model_path
+    local basename
+    local alias
+    local imported
+    local mmproj
+    local extra
+
+    [[ -d "$root" ]] || die "discover root not found: $root"
+
+    printf '%-10s %-24s %-8s %s\n' "IMPORTED" "ALIAS" "MMPROJ" "MODEL"
+    while IFS= read -r -d '' model_path; do
+        basename="$(basename "$model_path")"
+        if [[ "${basename,,}" == *mmproj* ]]; then
+            continue
+        fi
+
+        alias="$(sanitize_alias "$basename")"
+        imported="no"
+        if lookup_alias_for_path "$(canonicalize_path "$model_path")" >/dev/null 2>&1; then
+            imported="yes"
+        fi
+
+        mmproj="$(guess_mmproj_for_model "$model_path" || true)"
+        extra="no"
+        if [[ -n "$mmproj" ]]; then
+            extra="yes"
+        fi
+
+        printf '%-10s %-24s %-8s %s\n' "$imported" "$alias" "$extra" "$(canonicalize_path "$model_path")"
+    done < <(find "$root" -type f -name '*.gguf' -print0 | sort -z)
+}
+
+main() {
+    local cmd="${1:-}"
+
+    case "$cmd" in
+        list)
+            shift
+            list_models "$@"
+            ;;
+        show)
+            shift
+            [[ $# -ge 1 ]] || die "show requires a model alias"
+            show_model "$@"
+            ;;
+        add)
+            shift
+            [[ $# -ge 2 ]] || die "add requires an alias and model path"
+            add_model "$@"
+            ;;
+        remove)
+            shift
+            [[ $# -ge 1 ]] || die "remove requires a model alias"
+            remove_model "$@"
+            ;;
+        discover)
+            shift
+            discover_models "$@"
+            ;;
+        current)
+            shift
+            show_current "$@"
+            ;;
+        doctor)
+            shift
+            show_doctor "$@"
+            ;;
+        build-runtime)
+            shift
+            build_runtime "$@"
+            ;;
+        mode)
+            shift
+            show_mode "$@"
+            ;;
+        set-mode)
+            shift
+            [[ $# -ge 1 ]] || die "set-mode requires single or multi"
+            set_mode "$@"
+            ;;
+        switch)
+            shift
+            [[ $# -ge 1 ]] || die "switch requires a model alias or path"
+            switch_model "$@"
+            ;;
+        restart)
+            shift
+            restart_model "$@"
+            ;;
+        stop)
+            shift
+            stop_server
+            printf 'stopped llama-server on port %s\n' "$LLAMA_SERVER_PORT"
+            ;;
+        logs)
+            shift
+            show_logs "$@"
+            ;;
+        help|-h|--help|"")
+            usage
+            ;;
+        *)
+            die "unknown command: $cmd"
+            ;;
+    esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
