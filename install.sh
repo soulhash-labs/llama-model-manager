@@ -23,7 +23,7 @@ if [[ -d "$ROOT_DIR/runtime" ]]; then
     cp -a "$ROOT_DIR/runtime" "$APP_SHARE_DIR/runtime"
 fi
 mkdir -p "$APP_SHARE_DIR/branding"
-install -m 0644 "$ROOT_DIR/docs/branding/llama-model-manager-icon.svg" \
+install -m 0644 "$ROOT_DIR/desktop/llama-model-manager-icon.svg" \
     "$APP_SHARE_DIR/branding/llama-model-manager-icon.svg"
 
 if [[ ! -f "$CONFIG_DIR/defaults.env" ]]; then

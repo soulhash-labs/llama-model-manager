@@ -4,8 +4,6 @@
 
 llama-model-manager is a browser-first control surface for local llama.cpp setups. Switch models, scan GGUFs, tune runtime defaults, inspect live health, and manage single- or multi-client mode from one clean dashboard, with CLI and desktop launchers included.
 
-![Dashboard overview](docs/screenshots/dashboard-overview.png)
-
 ## What You Get
 
 - `bin/llama-model`: CLI wrapper for registry management, switching, restart/stop, discovery, and diagnostics
@@ -15,6 +13,7 @@ llama-model-manager is a browser-first control surface for local llama.cpp setup
 - `config/models.tsv.example`: model registry template
 - `config/HELP.txt`: end-user help text
 - `desktop/llama-model-manager.desktop`: desktop launcher
+- `desktop/llama-model-manager-icon.svg`: desktop icon asset used by the installer
 - `scripts/build-llama-server.sh`: wrapper for fetching and compiling a host-specific llama.cpp runtime
 - `web/`: browser dashboard assets and Python server
 - `LICENSE`: Apache License 2.0
@@ -97,25 +96,6 @@ If `doctor` reports `binary_status: unavailable`, install the missing build depe
 - local `llama.cpp` bootstrap via `llama-model build-runtime`
 - OpenAI-compatible endpoint summary for local harnesses such as `opencode`
 - Modern Operator dashboard treatment with toasts, busy states, and first-run empty states
-- built-in sanitized `--demo` mode for public screenshots and demo captures
-
-## Public Demo Assets
-
-- screenshots live under `docs/screenshots/`
-- a short product demo GIF lives at `docs/demo/llama-model-manager-demo.gif`
-- branding assets live under `docs/branding/`
-- the browser favicon source lives at `web/branding/favicon.svg`
-
-Generate assets from sanitized data with:
-
-```bash
-python3 scripts/render_public_assets.py
-```
-
-This uses the built-in demo mode and writes:
-- overview, serve-feedback, scan-feedback, and empty-state screenshots
-- a small public demo GIF
-- a social preview card at `docs/branding/llama-model-manager-social-card.png`
 
 ## Dependencies
 
