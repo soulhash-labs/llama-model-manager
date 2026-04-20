@@ -4,6 +4,8 @@
 
 llama-model-manager is a browser-first control surface for local llama.cpp setups. Switch models, scan GGUFs, tune runtime defaults, inspect live health, and manage single- or multi-client mode from one clean dashboard, with CLI and desktop launchers included.
 
+![Dashboard overview](docs/screenshots/dashboard-overview.png)
+
 ## What You Get
 
 - `bin/llama-model`: CLI wrapper for registry management, switching, restart/stop, discovery, and diagnostics
