@@ -204,6 +204,51 @@ test_installers_support_bootstrap_tty_handoff_and_empty_registry_seed() {
     assert_contains "$app_js" 'return `~/${value.slice(homeDir.length + 1)}`;'
 }
 
+
+test_install_migrates_placeholder_seed_registry() {
+    local tmp
+    local models
+
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/home/Desktop" "$tmp/config/llama-server" "$tmp/data"
+    cp "$ROOT_DIR/config/models.tsv.example" "$tmp/config/llama-server/models.tsv"
+
+    env \
+        HOME="$tmp/home" \
+        XDG_CONFIG_HOME="$tmp/config" \
+        XDG_DATA_HOME="$tmp/data" \
+        bash "$ROOT_DIR/install.sh" >/dev/null
+
+    models="$(cat "$tmp/config/llama-server/models.tsv")"
+    assert_contains "$models" "# alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes"
+    assert_not_contains "$models" "qwen36-35b-q2"
+    assert_not_contains "$models" "qwen35-9b-q8"
+    assert_not_contains "$models" "gemma4-e4b-q8"
+}
+
+test_install_preserves_real_registry_entries() {
+    local tmp
+    local models
+
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/home/Desktop" "$tmp/config/llama-server" "$tmp/data"
+    cat >"$tmp/config/llama-server/models.tsv" <<'EOF_MODELS'
+# alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes
+my-model	/home/test/models/my-model.gguf		8192	0	512	8	1	cpu	local entry
+EOF_MODELS
+
+    env \
+        HOME="$tmp/home" \
+        XDG_CONFIG_HOME="$tmp/config" \
+        XDG_DATA_HOME="$tmp/data" \
+        bash "$ROOT_DIR/install.sh" >/dev/null
+
+    models="$(cat "$tmp/config/llama-server/models.tsv")"
+    assert_contains "$models" "my-model"
+    assert_contains "$models" "/home/test/models/my-model.gguf"
+    assert_not_contains "$models" "qwen36-35b-q2"
+}
+
 test_dependency_install_preview_exists() {
     local preview
 
@@ -280,6 +325,8 @@ main() {
     test_no_safe_binary_path_reports_build_guidance
     test_docs_no_longer_imply_universal_gpu_binary
     test_installers_support_bootstrap_tty_handoff_and_empty_registry_seed
+    test_install_migrates_placeholder_seed_registry
+    test_install_preserves_real_registry_entries
     test_dependency_install_preview_exists
     test_state_and_shell_split_helpers
     test_web_round_trip_for_quoted_values

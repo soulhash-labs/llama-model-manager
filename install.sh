@@ -9,6 +9,23 @@ APP_DIR="${HOME}/.local/share/applications"
 APP_SHARE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/llama-model-manager"
 DESKTOP_DIR="${HOME}/Desktop"
 
+write_empty_registry() {
+    local target="$1"
+    cat >"$target" <<'EOF_MODELS'
+# alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes
+EOF_MODELS
+}
+
+is_placeholder_seed_registry() {
+    local target="$1"
+    [[ -f "$target" ]] || return 1
+
+    local current_seed expected_seed
+    current_seed="$(tr -d '\r' <"$target" | sed '/^[[:space:]]*$/d')"
+    expected_seed="$(tr -d '\r' <"$ROOT_DIR/config/models.tsv.example" | sed '/^[[:space:]]*$/d')"
+    [[ "$current_seed" == "$expected_seed" ]]
+}
+
 mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$APP_DIR" "$APP_SHARE_DIR"
 
 install -m 0755 "$ROOT_DIR/bin/llama-model" "$BIN_DIR/llama-model"
@@ -35,14 +52,14 @@ else
 fi
 
 if [[ ! -f "$CONFIG_DIR/models.tsv" ]]; then
-    cat >"$CONFIG_DIR/models.tsv" <<'EOF_MODELS'
-# alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes
-EOF_MODELS
+    write_empty_registry "$CONFIG_DIR/models.tsv"
     printf 'installed %s\n' "$CONFIG_DIR/models.tsv"
+elif is_placeholder_seed_registry "$CONFIG_DIR/models.tsv"; then
+    write_empty_registry "$CONFIG_DIR/models.tsv"
+    printf 'migrated %s\n' "$CONFIG_DIR/models.tsv"
 else
     printf 'kept existing %s\n' "$CONFIG_DIR/models.tsv"
 fi
-
 sed -e "s|^Exec=.*$|Exec=$BIN_DIR/llama-model-gui|" \
     -e "s|^Icon=.*$|Icon=$APP_SHARE_DIR/branding/llama-model-manager-icon.svg|" \
     "$ROOT_DIR/desktop/llama-model-manager.desktop" >"$APP_DIR/llama-model-manager.desktop"
