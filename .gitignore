@@ -17,3 +17,10 @@ __pycache__/
 .local/
 state/
 runtime/
+
+# Local handoff artifacts
+._*
+AURORA_HANDOFF.md
+FIRST_RUN_SANITIZATION_FIX.md
+INSTALLER_FIXES.md
+WEB_MANAGER_HANDOFF.md
