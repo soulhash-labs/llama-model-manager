@@ -28,6 +28,28 @@ llama-model-manager is a browser-first control surface for local llama.cpp setup
 ./install.sh
 ```
 
+## One-Line Install
+
+Host `install-bootstrap.sh` at a stable URL such as `https://soulhash.ai/install_lmm.sh`, then users can install without cloning the repo first:
+
+```bash
+curl -fsSL https://soulhash.ai/install_lmm.sh | sh
+```
+
+What the bootstrap script does:
+
+- downloads the repo tarball from GitHub into a temporary directory
+- extracts it locally
+- hands off to the existing `install.sh`
+- cleans up the temporary download on exit
+
+Override knobs for testing or pinned installs:
+
+- `LLAMA_MODEL_MANAGER_REF=v1.2.3`
+- `LLAMA_MODEL_MANAGER_ARCHIVE_URL=https://.../custom.tar.gz`
+- `LLAMA_MODEL_MANAGER_REPO_OWNER=...`
+- `LLAMA_MODEL_MANAGER_REPO_NAME=...`
+
 ### What `install.sh` Does
 
 - installs the CLI, web UI, desktop launcher, help text, and example config files

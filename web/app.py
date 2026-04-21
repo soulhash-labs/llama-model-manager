@@ -18,7 +18,7 @@ from typing import Any
 
 
 APP_TITLE = "LLM Model Manager"
-APP_BRAND = "soulhash.ai"
+APP_BRAND = "Local Control Surface"
 HEADER_LINE = "# alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes"
 KNOWN_DEFAULT_KEYS = [
     "LLAMA_SERVER_BIN",
@@ -38,7 +38,6 @@ KNOWN_DEFAULT_KEYS = [
 DEMO_STATE = {
     "title": APP_TITLE,
     "brand": APP_BRAND,
-    "website": "https://soulhash.ai",
     "defaults": {
         "LLAMA_SERVER_HOST": "127.0.0.1",
         "LLAMA_SERVER_PORT": "8081",
@@ -242,7 +241,10 @@ class Manager:
                 continue
             try:
                 parsed = shlex.split(raw_value, posix=True)
-                data[key] = parsed[0] if parsed else ""
+                if len(parsed) <= 1:
+                    data[key] = parsed[0] if parsed else ""
+                else:
+                    data[key] = " ".join(shlex.quote(part) for part in parsed)
             except ValueError:
                 data[key] = raw_value.strip("\"'")
         return data
@@ -353,20 +355,32 @@ class Manager:
         if not extra:
             return {"mmproj": "", "extra_args": ""}
 
-        match = re.search(r"(?:^|\s)--mmproj\s+(\S+)", extra)
+        try:
+            tokens = shlex.split(extra, posix=True)
+        except ValueError:
+            return {"mmproj": "", "extra_args": extra}
+
         mmproj = ""
-        remaining = extra
-        if match:
-            mmproj = match.group(1)
-            start, end = match.span()
-            remaining = (extra[:start] + " " + extra[end:]).strip()
-        remaining = re.sub(r"\s{2,}", " ", remaining).strip()
-        return {"mmproj": mmproj, "extra_args": remaining}
+        remaining_tokens: list[str] = []
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            if token == "--mmproj" and index + 1 < len(tokens):
+                mmproj = tokens[index + 1]
+                index += 2
+                continue
+            remaining_tokens.append(token)
+            index += 1
+
+        return {
+            "mmproj": mmproj,
+            "extra_args": " ".join(shlex.quote(part) for part in remaining_tokens),
+        }
 
     def build_extra(self, mmproj: str, extra_args: str) -> str:
         parts = []
         if mmproj.strip():
-            parts.extend(["--mmproj", mmproj.strip()])
+            parts.extend(["--mmproj", shlex.quote(mmproj.strip())])
         if extra_args.strip():
             parts.append(extra_args.strip())
         return " ".join(parts).strip()
@@ -493,11 +507,16 @@ class Manager:
         if self.demo:
             return {
                 **DEMO_STATE,
+                "demo": True,
                 "defaults": dict(DEMO_STATE["defaults"]),
                 "current": dict(DEMO_STATE["current"]),
                 "doctor": dict(DEMO_STATE["doctor"]),
                 "mode": dict(DEMO_STATE["mode"]),
                 "models": [dict(model) for model in DEMO_STATE["models"]],
+                "registry_file": str(self.models_file),
+                "registry_exists": True,
+                "defaults_file": str(self.defaults_file),
+                "defaults_exists": True,
             }
         current = self.parse_key_values(self.run_cli("current"))
         doctor = self.parse_key_values(self.run_cli("doctor"))
@@ -509,7 +528,7 @@ class Manager:
         return {
             "title": APP_TITLE,
             "brand": APP_BRAND,
-            "website": "https://soulhash.ai",
+            "demo": False,
             "defaults": defaults,
             "current": current,
             "doctor": doctor,
@@ -518,6 +537,10 @@ class Manager:
             "discovery_root": self.discovery_root,
             "api_base": api_base,
             "opencode_model": f"llamacpp/{current_model_name}",
+            "registry_file": str(self.models_file),
+            "registry_exists": self.models_file.exists(),
+            "defaults_file": str(self.defaults_file),
+            "defaults_exists": self.defaults_file.exists(),
         }
 
 

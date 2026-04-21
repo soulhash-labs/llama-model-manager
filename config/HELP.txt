@@ -1,6 +1,6 @@
 Llama Model Manager
 
-by soulhash.ai
+Local Runtime Control
 
 Commands:
   llama-model list
@@ -61,6 +61,7 @@ That does not increase context. It simply reduces slot count so the server is mo
 Dashboard:
   Run llama-model-web or launch "LLM Model Manager" from the desktop or app menu.
   The browser UI can switch models, scan/import new GGUFs, edit presets, save defaults, and inspect runtime/binary diagnostics.
+  It also tells you when the registry or defaults files do not exist yet, instead of showing an empty editor with no context.
 
 Legacy UI:
   Set LLAMA_MODEL_UI=zenity if you want to force the old Zenity launcher.

@@ -182,6 +182,65 @@ test_dependency_install_preview_exists() {
     assert_contains "$preview" "apt-get install -y git cmake build-essential nvidia-cuda-toolkit"
 }
 
+test_state_and_shell_split_helpers() {
+    local tmp
+    local parsed
+    local timestamp_value
+
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/state/llama-server"
+
+    # shellcheck disable=SC1090
+    source "$BIN"
+    STATE_FILE="$tmp/state/llama-server/current.env"
+
+    write_state "demo" "/tmp/My Models/model.gguf" "1234" "8192" "999" "128" "16" "1" "cuda0"
+    assert_contains "$(cmd_arg_from_pid $$ -m || true)" "/tmp/My Models/model.gguf"
+    assert_contains "$(cmd_arg_from_pid $$ --threads || true)" "16"
+
+    parsed="$(split_shell_words "--mmproj '/tmp/My Models/mmproj.gguf' --flag value" | tr '\0' '\n')"
+    assert_contains "$parsed" "--mmproj"
+    assert_contains "$parsed" "/tmp/My Models/mmproj.gguf"
+    assert_contains "$parsed" "--flag"
+
+    timestamp_value="$(iso_timestamp)"
+    assert_contains "$timestamp_value" "T"
+}
+
+test_web_round_trip_for_quoted_values() {
+    local output
+
+    output="$(
+        python3 - <<PY
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
+import tempfile
+
+spec = spec_from_file_location("llama_web_app", "$ROOT_DIR/web/app.py")
+module = module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+manager = module.Manager(Path("$ROOT_DIR/web"))
+
+with tempfile.TemporaryDirectory() as tmp:
+    defaults = Path(tmp) / "defaults.env"
+    defaults.write_text("LLAMA_SERVER_EXTRA_ARGS='--jinja --chat-template llama3'\\n", encoding="utf-8")
+    parsed = manager.parse_env_file(defaults)
+    print(parsed["LLAMA_SERVER_EXTRA_ARGS"])
+
+split = manager.split_extra("--mmproj '/tmp/My Models/mmproj.gguf' --flag 'two words'")
+print(split["mmproj"])
+print(split["extra_args"])
+print(manager.build_extra("/tmp/My Models/mmproj.gguf", "--flag 'two words'"))
+PY
+    )"
+
+    assert_contains "$output" "--jinja --chat-template llama3"
+    assert_contains "$output" "/tmp/My Models/mmproj.gguf"
+    assert_contains "$output" "--flag 'two words'"
+    assert_contains "$output" "--mmproj '/tmp/My Models/mmproj.gguf'"
+}
+
 main() {
     test_host_match_accepts_bundled_backend
     test_host_mismatch_rejects_bundled_backend
@@ -189,6 +248,8 @@ main() {
     test_no_safe_binary_path_reports_build_guidance
     test_docs_no_longer_imply_universal_gpu_binary
     test_dependency_install_preview_exists
+    test_state_and_shell_split_helpers
+    test_web_round_trip_for_quoted_values
     printf 'All portability tests passed.\n'
 }
 

@@ -1,6 +1,7 @@
 const state = {
   data: null,
   discovery: [],
+  discoveryScanned: false,
   toastId: 0,
 };
 
@@ -83,10 +84,6 @@ function binarySummary(doctor) {
 
 function basename(path) {
   return String(path || "").split("/").filter(Boolean).pop() || "";
-}
-
-function scenario() {
-  return new URLSearchParams(window.location.search).get("scenario") || "";
 }
 
 async function api(path, options = {}) {
@@ -213,6 +210,31 @@ function focusModelForm() {
   $("#model-alias")?.focus();
 }
 
+function renderNotice(data) {
+  const notice = $("#top-notice");
+  if (!notice) return;
+
+  const messages = [];
+  if (data.demo) {
+    messages.push("Demo mode is active. Registry and runtime values are sample data, not your local machine.");
+  }
+  if (!data.registry_exists) {
+    messages.push(`No registry file exists yet at ${data.registry_file}. Save a model to create it, or scan a root and stage one from discovery.`);
+  }
+  if (!data.defaults_exists) {
+    messages.push(`Defaults file is missing at ${data.defaults_file}. The dashboard is using built-in fallbacks until you save defaults.`);
+  }
+
+  if (!messages.length) {
+    notice.classList.add("hidden");
+    notice.textContent = "";
+    return;
+  }
+
+  notice.textContent = messages.join(" ");
+  notice.classList.remove("hidden");
+}
+
 function renderHero(data) {
   const current = data.current || {};
   const doctor = data.doctor || {};
@@ -246,6 +268,7 @@ function renderStatus(data) {
   const mode = data.mode || {};
   const nextMode = mode.configured_mode === "single-client" ? "Switch To Multi Client" : "Switch To Single Client";
 
+  renderNotice(data);
   renderHero(data);
 
   setText("#metric-model", current.alias || "stopped");
@@ -301,12 +324,16 @@ function renderModels(models) {
   setText("#registry-count", String(models.length));
 
   if (!models.length) {
+    const registryPath = state.data?.registry_file || "~/.config/llama-server/models.tsv";
+    const registryHint = state.data?.registry_exists
+      ? "Use Scan Root to discover GGUF files or fill in the Model Editor below to create the first entry."
+      : `No registry file exists yet. Saving a model will create ${registryPath}.`;
     renderEmptyRow(
       tbody,
       4,
       "Registry Empty",
       "No models are registered yet.",
-      "Use Scan Root to discover GGUF files or fill in the Model Editor below to create the first entry.",
+      registryHint,
     );
     return;
   }
@@ -339,6 +366,18 @@ function renderDiscovery(items) {
   const template = $("#discovery-row-template");
   tbody.innerHTML = "";
   setText("#discovery-count", String(items.length));
+
+  if (!state.discoveryScanned) {
+    const root = $("#discovery-root")?.value.trim() || state.data?.discovery_root || "~/models";
+    renderEmptyRow(
+      tbody,
+      5,
+      "Scan Ready",
+      "Discovery has not run yet.",
+      `Press Scan Root to walk ${root} for GGUF files. This avoids a recursive scan every time the dashboard opens.`,
+    );
+    return;
+  }
 
   if (!items.length) {
     const root = $("#discovery-root")?.value.trim() || state.data?.discovery_root || "~/models";
@@ -438,6 +477,7 @@ async function scanModels() {
     method: "POST",
     body: JSON.stringify({ root }),
   });
+  state.discoveryScanned = true;
   state.discovery = payload.items || [];
   renderDiscovery(state.discovery);
   return payload.items || [];
@@ -563,23 +603,47 @@ async function onDiscoveryTableClick(event) {
 
   const row = button.closest("tr");
   if (!row) return;
+  const imported = row.querySelector(".status-cell")?.textContent === "already in registry";
+  const alias = row.dataset.alias || "";
 
-  pulseButton(button, row.querySelector(".status-cell")?.textContent === "already in registry" ? "Opening..." : "Staging...");
-  fillModelForm({
-    alias: row.dataset.alias || "",
-    path: row.dataset.path || "",
-    mmproj: row.dataset.mmproj || "",
-    extra_args: "",
-    context: "",
-    ngl: "",
-    batch: "",
-    threads: "",
-    parallel: "",
-    device: "",
-    notes: "",
-  });
+  pulseButton(button, imported ? "Opening..." : "Staging...");
+  if (imported) {
+    const model = findModel(alias);
+    if (model) {
+      fillModelForm(model);
+    } else {
+      fillModelForm({
+        alias,
+        path: row.dataset.path || "",
+        mmproj: row.dataset.mmproj || "",
+        extra_args: "",
+        context: "",
+        ngl: "",
+        batch: "",
+        threads: "",
+        parallel: "",
+        device: "",
+        notes: "",
+      });
+      showToast(`${alias} is marked as imported, but no matching registry entry is loaded.`, "error");
+    }
+  } else {
+    fillModelForm({
+      alias,
+      path: row.dataset.path || "",
+      mmproj: row.dataset.mmproj || "",
+      extra_args: "",
+      context: "",
+      ngl: "",
+      batch: "",
+      threads: "",
+      parallel: "",
+      device: "",
+      notes: "",
+    });
+  }
   focusModelForm();
-  showToast(`${row.dataset.alias || "Model"} loaded into the editor.`, "info", { timeout: 2200 });
+  showToast(`${alias || "Model"} loaded into the editor.`, "info", { timeout: 2200 });
 }
 
 function bindEvents() {
@@ -631,38 +695,6 @@ function showError(error) {
 async function main() {
   bindEvents();
   await refreshState();
-  await scanModels();
-  await applyScenario();
+  renderDiscovery(state.discovery);
 }
-
 main().catch(showError);
-
-async function applyScenario() {
-  const currentScenario = scenario();
-  if (!currentScenario) return;
-
-  if (currentScenario === "empty") {
-    renderModels([]);
-    renderDiscovery([]);
-    showToast("Demo mode: empty-state preview.", "info", { timeout: 5000 });
-    return;
-  }
-
-  if (currentScenario === "serve") {
-    const button = $("#models-table button[data-action='switch']");
-    holdButtonBusy(button, "Serving...");
-    showToast("Serving qwen35-9b-q8.", "success", { timeout: 5000 });
-    return;
-  }
-
-  if (currentScenario === "scan") {
-    const button = $("#scan-models");
-    holdButtonBusy(button, "Scanning...");
-    showToast("Found 2 model candidates.", "success", { timeout: 5000 });
-    return;
-  }
-
-  if (currentScenario === "saved") {
-    showToast("Saved qwen35-9b-q8 to the registry.", "success", { timeout: 5000 });
-  }
-}

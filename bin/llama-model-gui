@@ -3,8 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_TITLE="LLM Model Manager"
-APP_BYLINE="by soulhash.ai"
-APP_WEBSITE="https://soulhash.ai"
+APP_BYLINE="Local Runtime Control"
 DEFAULT_LLAMA_MODEL_WEB_BIN="$SCRIPT_DIR/llama-model-web"
 if [[ ! -x "$DEFAULT_LLAMA_MODEL_WEB_BIN" ]] && command -v llama-model-web >/dev/null 2>&1; then
     DEFAULT_LLAMA_MODEL_WEB_BIN="$(command -v llama-model-web)"
@@ -79,6 +78,15 @@ menu_status_text() {
 }
 
 show_list() {
+    if [[ ! -f "$MODELS_FILE" ]]; then
+        show_text "Registered Models" "No registry file exists yet at:
+
+$MODELS_FILE
+
+Save a model from the web dashboard or create entries with:
+  llama-model add <alias> <path>"
+        return 0
+    fi
     show_text "Registered Models" "$("$LLAMA_MODEL_BIN" list)"
 }
 
@@ -99,6 +107,10 @@ select_model() {
     local extra
     local selected
     local -a args
+
+    if [[ ! -f "$MODELS_FILE" ]]; then
+        die "No registry file exists yet: $MODELS_FILE"
+    fi
 
     current_alias="$("$LLAMA_MODEL_BIN" current 2>/dev/null | awk -F': ' '/^alias:/ {print $2}' || true)"
     args=(
@@ -185,16 +197,6 @@ open_file() {
     fi
 }
 
-open_website() {
-    if command -v xdg-open >/dev/null 2>&1; then
-        xdg-open "$APP_WEBSITE" >/dev/null 2>&1 &
-    elif command -v sensible-browser >/dev/null 2>&1; then
-        sensible-browser "$APP_WEBSITE" >/dev/null 2>&1 &
-    else
-        die "No browser launcher found for $APP_WEBSITE"
-    fi
-}
-
 show_help() {
     zenity --text-info --title="$APP_TITLE Help" --width=980 --height=720 --filename="$HELP_FILE"
 }
@@ -204,7 +206,7 @@ main_menu() {
         --title="$APP_TITLE" \
         --width=760 \
         --height=520 \
-        --text="$APP_BYLINE"$'\n'"$APP_WEBSITE"$'\n\n'"$(menu_status_text)" \
+        --text="$APP_BYLINE"$'\n\n'"$(menu_status_text)" \
         --column "Action" \
         --column "Description" \
         "Current" "Show the running model and health status" \
@@ -216,7 +218,6 @@ main_menu() {
         "Stop" "Stop the server on port 8081" \
         "Registry" "Open models.tsv for editing" \
         "Defaults" "Open defaults.env for runtime tuning" \
-        "Website" "Open soulhash.ai in the browser" \
         "Help" "Show commands and registry format" \
         "Exit" "Close the manager"
 }
@@ -233,7 +234,6 @@ while true; do
         Stop) stop_server ;;
         Registry) open_file "$MODELS_FILE" ;;
         Defaults) open_file "$DEFAULTS_FILE" ;;
-        Website) open_website ;;
         Help) show_help ;;
         Exit) exit 0 ;;
     esac
