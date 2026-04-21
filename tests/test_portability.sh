@@ -367,6 +367,35 @@ EOF
     assert_contains "$output" "binary_status: unavailable"
 }
 
+test_dashboard_service_unit_rendering() {
+    local unit
+
+    # shellcheck disable=SC1090
+    source "$BIN"
+    unit="$(dashboard_service_unit_text)"
+    assert_contains "$unit" "Description=LLM Model Manager Dashboard"
+    assert_contains "$unit" "ExecStart=%h/.local/bin/llama-model-web --no-browser --require-bind --host 127.0.0.1 --port 8765"
+    assert_contains "$unit" "Environment=LLAMA_MODEL_WEB_SERVICE=1"
+    assert_contains "$unit" "Restart=on-failure"
+    assert_contains "$unit" "WantedBy=default.target"
+}
+
+test_dashboard_service_status_reports_unsupported_without_systemctl() {
+    local tmp
+    local output
+
+    tmp="$(mktemp -d)"
+    output="$(env \
+        HOME="$tmp/home" \
+        XDG_CONFIG_HOME="$tmp/config" \
+        XDG_STATE_HOME="$tmp/state" \
+        LLAMA_MODEL_SYSTEMCTL_BIN="$tmp/not-a-real-systemctl" \
+        "$BIN" dashboard-service status)"
+
+    assert_contains "$output" "supported: no"
+    assert_contains "$output" "status: unavailable"
+}
+
 main() {
     test_host_match_accepts_bundled_backend
     test_host_mismatch_rejects_bundled_backend
@@ -381,6 +410,8 @@ main() {
     test_web_round_trip_for_quoted_values
     test_registry_parsing_preserves_empty_columns
     test_doctor_tolerates_missing_log_markers
+    test_dashboard_service_unit_rendering
+    test_dashboard_service_status_reports_unsupported_without_systemctl
     printf 'All portability tests passed.\n'
 }
 

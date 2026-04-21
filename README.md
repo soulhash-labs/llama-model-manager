@@ -67,6 +67,33 @@ llama-model doctor
 llama-model build-runtime --backend auto
 ```
 
+## Optional Dashboard Background Service
+
+The dashboard normally runs on demand and does not stay resident. Advanced users can opt into a managed `systemd --user` service when they want a stable local dashboard URL without launching it manually.
+
+Default mode:
+
+- run `llama-model-web` when needed
+- or use `llama-model-gui`
+- nothing starts automatically at login unless you enable it
+
+Advanced mode:
+
+```bash
+llama-model dashboard-service install
+llama-model dashboard-service enable
+llama-model dashboard-service restart
+llama-model dashboard-service status
+llama-model dashboard-service logs
+```
+
+The installed user unit serves the installed dashboard launcher with a fixed local URL:
+
+- unit: `llama-model-web.service`
+- URL: `http://127.0.0.1:8765/`
+
+The background service remains fully optional and is never enabled by default.
+
 ## Runtime Portability
 
 - llama.cpp source is portable, but built `llama-server` binaries are backend-, platform-, and architecture-specific

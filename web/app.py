@@ -503,16 +503,41 @@ class Manager:
             "LLAMA_SERVER_EXTRA_ARGS": values.get("LLAMA_SERVER_EXTRA_ARGS", ""),
         }
 
+    def dashboard_service_status(self) -> dict[str, str]:
+        if self.demo:
+            return {
+                "supported": "yes",
+                "manager_reachable": "yes",
+                "installable": "yes",
+                "installed": "yes",
+                "enabled": "yes",
+                "active": "yes",
+                "logs_available": "yes",
+                "status": "running",
+                "unit": "llama-model-web.service",
+                "unit_file": str(self.home / ".config" / "systemd" / "user" / "llama-model-web.service"),
+                "url": "http://127.0.0.1:8765/",
+                "host": "127.0.0.1",
+                "port": "8765",
+                "message": "Background dashboard service is running.",
+            }
+        return self.parse_key_values(self.run_cli("dashboard-service", "status"))
+
     def state(self) -> dict[str, Any]:
         if self.demo:
             return {
                 **DEMO_STATE,
                 "demo": True,
+                "meta": {
+                    "home_dir": str(self.home),
+                    "dashboard_service_managed": False,
+                },
                 "defaults": dict(DEMO_STATE["defaults"]),
                 "current": dict(DEMO_STATE["current"]),
                 "doctor": dict(DEMO_STATE["doctor"]),
                 "mode": dict(DEMO_STATE["mode"]),
                 "models": [dict(model) for model in DEMO_STATE["models"]],
+                "dashboard_service": self.dashboard_service_status(),
                 "registry_file": str(self.models_file),
                 "registry_exists": True,
                 "defaults_file": str(self.defaults_file),
@@ -531,12 +556,14 @@ class Manager:
             "demo": False,
             "meta": {
                 "home_dir": str(self.home),
+                "dashboard_service_managed": os.environ.get("LLAMA_MODEL_WEB_SERVICE") == "1",
             },
             "defaults": defaults,
             "current": current,
             "doctor": doctor,
             "mode": mode,
             "models": self.read_models(),
+            "dashboard_service": self.dashboard_service_status(),
             "discovery_root": self.discovery_root,
             "api_base": api_base,
             "opencode_model": f"llamacpp/{current_model_name}",
@@ -563,6 +590,12 @@ class AppHandler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query)
             lines = int(query.get("lines", ["80"])[0])
             logs = self.manager.run_cli("logs", str(lines))
+            self.send_json({"lines": lines, "content": logs})
+            return
+        if parsed.path == "/api/dashboard-service/logs":
+            query = urllib.parse.parse_qs(parsed.query)
+            lines = int(query.get("lines", ["100"])[0])
+            logs = self.manager.run_cli("dashboard-service", "logs", str(lines))
             self.send_json({"lines": lines, "content": logs})
             return
         self.serve_static(parsed.path)
@@ -609,6 +642,11 @@ class AppHandler(BaseHTTPRequestHandler):
                 }
                 self.manager.save_defaults(updates)
                 self.send_json({"ok": True})
+                return
+            if parsed.path == "/api/dashboard-service":
+                action = str(payload.get("action", "status")).strip()
+                self.manager.run_cli("dashboard-service", action)
+                self.send_json({"ok": True, "service": self.manager.dashboard_service_status()})
                 return
             self.send_error_json(HTTPStatus.NOT_FOUND, "Unknown API route")
         except ValueError as exc:
@@ -668,6 +706,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--host", default=os.environ.get("LLAMA_MODEL_WEB_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("LLAMA_MODEL_WEB_PORT", "8765")))
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--require-bind", action="store_true", help="exit non-zero if the dashboard port is already occupied")
     parser.add_argument("--demo", action="store_true", help="Serve sanitized demo data for screenshots and public docs")
     args = parser.parse_args(argv)
 
@@ -680,8 +719,11 @@ def main(argv: list[str]) -> int:
 
     try:
         server = ThreadingHTTPServer((args.host, args.port), handler)
-    except OSError:
+    except OSError as exc:
         url = f"http://{args.host}:{args.port}/"
+        if args.require_bind:
+            print(f"{APP_TITLE} could not bind {url}: {exc}", file=sys.stderr)
+            return 1
         if not args.no_browser:
             webbrowser.open(url)
         print(f"{APP_TITLE} already appears to be running at {url}")

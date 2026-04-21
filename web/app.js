@@ -271,6 +271,58 @@ function renderHero(data) {
   setText("#hero-health", `Health: ${health}`);
 }
 
+function serviceFlag(service, key) {
+  return String(service?.[key] || "").toLowerCase() === "yes";
+}
+
+function dashboardServiceStatusLabel(service) {
+  const status = String(service?.status || "unavailable");
+  if (status === "running") return "Running";
+  if (status === "stopped") return "Stopped";
+  if (status === "not-installed") return "Not Installed";
+  return "Unavailable";
+}
+
+function dashboardServiceSupportLabel(service) {
+  if (!serviceFlag(service, "supported")) return "Unavailable On This System";
+  if (!serviceFlag(service, "manager_reachable")) return "Session Unavailable";
+  return "Available";
+}
+
+function renderDashboardService(service) {
+  const supported = serviceFlag(service, "supported");
+  const reachable = serviceFlag(service, "manager_reachable");
+  const installed = serviceFlag(service, "installed");
+  const enabled = serviceFlag(service, "enabled");
+  const active = serviceFlag(service, "active");
+  const logsAvailable = serviceFlag(service, "logs_available");
+
+  setText("#dashboard-service-status", dashboardServiceStatusLabel(service));
+  setText("#dashboard-service-message", service?.message || "-");
+  setText("#dashboard-service-lifecycle", installed ? (active ? "Running" : "Installed") : "Not Installed");
+  setText("#dashboard-service-login", installed ? (enabled ? "Enabled At Login" : "Not enabled at login") : "Install first");
+  setText("#dashboard-service-url", service?.url || "-");
+  setText("#dashboard-service-unit", service?.unit || "-");
+  setText("#dashboard-service-support", dashboardServiceSupportLabel(service));
+  setText("#dashboard-service-path", service?.unit_file ? displayPath(service.unit_file) : "-");
+
+  const installButton = $("#dashboard-service-install");
+  const enableButton = $("#dashboard-service-enable");
+  const restartButton = $("#dashboard-service-restart");
+  const stopButton = $("#dashboard-service-stop");
+  const disableButton = $("#dashboard-service-disable");
+  const removeButton = $("#dashboard-service-remove");
+  const logsButton = $("#dashboard-service-logs");
+
+  if (installButton) installButton.disabled = !supported || !reachable || !serviceFlag(service, "installable") || installed;
+  if (enableButton) enableButton.disabled = !supported || !reachable || !installed || enabled;
+  if (restartButton) restartButton.disabled = !supported || !reachable || !installed;
+  if (stopButton) stopButton.disabled = !supported || !reachable || !installed || !active;
+  if (disableButton) disableButton.disabled = !supported || !reachable || !installed || !enabled;
+  if (removeButton) removeButton.disabled = !installed;
+  if (logsButton) logsButton.disabled = !supported || !reachable || !installed || !logsAvailable;
+}
+
 function renderStatus(data) {
   const current = data.current || {};
   const doctor = data.doctor || {};
@@ -279,6 +331,7 @@ function renderStatus(data) {
 
   renderNotice(data);
   renderHero(data);
+  renderDashboardService(data.dashboard_service || {});
 
   setText("#metric-model", current.alias || "stopped");
   setText("#metric-model-path", current.model || "No model running");
@@ -522,6 +575,52 @@ async function saveModel(event) {
   });
 }
 
+async function performDashboardServiceAction(action, button, options = {}) {
+  const managed = Boolean(state.data?.meta?.dashboard_service_managed);
+  if (options.confirmMessage && !window.confirm(options.confirmMessage)) return;
+
+  if (options.expectDisconnect && managed) {
+    const restore = beginButtonBusy(button, options.pendingLabel || "Working...");
+    try {
+      await fetch("/api/dashboard-service", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+    } catch (error) {
+      console.info("dashboard service action likely disconnected the current page", error);
+    } finally {
+      restore();
+    }
+    showToast(options.disconnectMessage || "Service action requested. This page may disconnect.", "info", { timeout: 5200 });
+    return;
+  }
+
+  await withButtonBusy(button, options.pendingLabel || "Working...", async () => {
+    await api("/api/dashboard-service", {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    });
+    await refreshState();
+  }, {
+    successMessage: options.successMessage,
+    successKind: options.successKind || "success",
+  });
+}
+
+async function loadDashboardServiceLogs(button) {
+  await withButtonBusy(button, "Loading...", async () => {
+    const payload = await api("/api/dashboard-service/logs?lines=100");
+    const output = $("#service-logs-output");
+    output.classList.remove("hidden");
+    output.textContent = payload.content || "";
+    output.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, {
+    successMessage: "Loaded dashboard service logs.",
+    successKind: "info",
+  });
+}
+
 async function saveDefaults(event) {
   event.preventDefault();
   const submitButton = event.submitter || $("#defaults-form button[type='submit']");
@@ -685,6 +784,53 @@ function bindEvents() {
     successMessage: "Loaded recent server logs.",
     successKind: "info",
   }).catch(showError));
+  $("#dashboard-service-install").addEventListener("click", (event) => performDashboardServiceAction("install", event.currentTarget, {
+    pendingLabel: "Installing...",
+    successMessage: "Dashboard service installed.",
+  }).catch(showError));
+  $("#dashboard-service-enable").addEventListener("click", (event) => performDashboardServiceAction("enable", event.currentTarget, {
+    pendingLabel: "Enabling...",
+    successMessage: "Dashboard service will start at login.",
+  }).catch(showError));
+  $("#dashboard-service-restart").addEventListener("click", (event) => performDashboardServiceAction("restart", event.currentTarget, {
+    pendingLabel: "Restarting...",
+    successMessage: "Dashboard service restarted.",
+    successKind: "info",
+  }).catch(showError));
+  $("#dashboard-service-stop").addEventListener("click", (event) => {
+    const managed = Boolean(state.data?.meta?.dashboard_service_managed);
+    const confirmMessage = managed
+      ? "This page is currently being served by the managed dashboard service. Stopping it will disconnect this page. Continue?"
+      : "Stop the optional dashboard background service?";
+    return performDashboardServiceAction("stop", event.currentTarget, {
+      pendingLabel: "Stopping...",
+      successMessage: "Dashboard service stopped.",
+      successKind: "info",
+      confirmMessage,
+      expectDisconnect: true,
+      disconnectMessage: "Dashboard service stop requested. This page may disconnect if it was being served by that service.",
+    }).catch(showError);
+  });
+  $("#dashboard-service-disable").addEventListener("click", (event) => performDashboardServiceAction("disable", event.currentTarget, {
+    pendingLabel: "Disabling...",
+    successMessage: "Dashboard service will no longer start at login.",
+    successKind: "info",
+  }).catch(showError));
+  $("#dashboard-service-remove").addEventListener("click", (event) => {
+    const managed = Boolean(state.data?.meta?.dashboard_service_managed);
+    const confirmMessage = managed
+      ? "This removes the installed dashboard service unit. If this page is being served by that service, it may disconnect. Continue?"
+      : "Remove the installed dashboard service unit?";
+    return performDashboardServiceAction("uninstall", event.currentTarget, {
+      pendingLabel: "Removing...",
+      successMessage: "Dashboard service removed.",
+      successKind: "info",
+      confirmMessage,
+      expectDisconnect: true,
+      disconnectMessage: "Dashboard service removal requested. This page may disconnect if it was being served by that service.",
+    }).catch(showError);
+  });
+  $("#dashboard-service-logs").addEventListener("click", (event) => loadDashboardServiceLogs(event.currentTarget).catch(showError));
   $("#scan-models").addEventListener("click", (event) => withButtonBusy(event.currentTarget, "Scanning...", async () => {
     const items = await scanModels();
     showToast(items.length ? `Found ${items.length} model candidate${items.length === 1 ? "" : "s"}.` : "No model candidates found in this root.", items.length ? "success" : "info");

@@ -20,6 +20,10 @@ Commands:
   llama-model switch /absolute/path/to/model.gguf
   llama-model logs 40
   llama-model stop
+  llama-model dashboard-service status
+  llama-model dashboard-service install
+  llama-model dashboard-service enable
+  llama-model dashboard-service restart
   llama-model-web
 
 Registry file:
@@ -62,6 +66,16 @@ Dashboard:
   Run llama-model-web or launch "LLM Model Manager" from the desktop or app menu.
   The browser UI can switch models, scan/import new GGUFs, edit presets, save defaults, and inspect runtime/binary diagnostics.
   It also tells you when the registry or defaults files do not exist yet, instead of showing an empty editor with no context.
+
+Optional background service:
+  The dashboard stays on-demand by default.
+  Advanced users can install an opt-in systemd --user service with:
+    llama-model dashboard-service install
+    llama-model dashboard-service enable
+    llama-model dashboard-service restart
+    llama-model dashboard-service status
+    llama-model dashboard-service logs
+  This service is never enabled automatically during install.
 
 Legacy UI:
   Set LLAMA_MODEL_UI=zenity if you want to force the old Zenity launcher.

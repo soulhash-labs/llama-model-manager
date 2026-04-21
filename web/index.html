@@ -181,6 +181,50 @@
         </section>
 
         <section class="panel">
+          <div class="panel-head panel-head-anchored">
+            <div>
+              <span class="panel-tag">Optional</span>
+              <h2>Dashboard Service</h2>
+              <p>Optional background service for users who want the dashboard available without launching it manually.</p>
+            </div>
+            <div class="inline-actions service-actions-primary">
+              <button id="dashboard-service-install" class="button button-primary" title="Install the optional background dashboard service for this user account.">Install Service</button>
+              <button id="dashboard-service-enable" class="button" title="Start the dashboard service automatically when you sign in.">Enable At Login</button>
+              <button id="dashboard-service-restart" class="button" title="Reload the dashboard backend if the service has been updated or stopped responding.">Restart Service</button>
+            </div>
+          </div>
+          <div class="service-grid">
+            <article class="metric-card">
+              <span class="metric-label">Status</span>
+              <strong id="dashboard-service-status">-</strong>
+              <span id="dashboard-service-message" class="metric-note">-</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">Lifecycle</span>
+              <strong id="dashboard-service-lifecycle">-</strong>
+              <span id="dashboard-service-login" class="metric-note">-</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">Persistent URL</span>
+              <strong id="dashboard-service-url">-</strong>
+              <span id="dashboard-service-unit" class="metric-note">-</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">Support</span>
+              <strong id="dashboard-service-support">-</strong>
+              <span id="dashboard-service-path" class="metric-note">-</span>
+            </article>
+          </div>
+          <div class="inline-actions service-actions-secondary">
+            <button id="dashboard-service-stop" class="button button-danger" title="Stop the optional dashboard service. The current page may disconnect if it is being served by that service.">Stop Service</button>
+            <button id="dashboard-service-disable" class="button" title="Disable the dashboard service from starting automatically at login.">Disable At Login</button>
+            <button id="dashboard-service-remove" class="button" title="Remove the installed dashboard service unit from this user account.">Remove Service</button>
+            <button id="dashboard-service-logs" class="button" title="Show recent logs from the dashboard background service.">View Service Logs</button>
+          </div>
+          <pre id="service-logs-output" class="log-box hidden"></pre>
+        </section>
+
+        <section class="panel">
           <div class="panel-head">
             <div>
               <span class="panel-tag">Registry</span>

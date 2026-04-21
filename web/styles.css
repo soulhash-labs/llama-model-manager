@@ -332,6 +332,28 @@ h2 {
   display: none;
 }
 
+.service-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.service-actions-primary,
+.service-actions-secondary {
+  flex-wrap: wrap;
+}
+
+.service-actions-secondary {
+  margin-top: 1rem;
+}
+
+#dashboard-service-url,
+#dashboard-service-unit,
+#dashboard-service-path,
+#dashboard-service-message {
+  word-break: break-word;
+}
+
 .help-badge {
   flex: 0 0 auto;
   width: 2rem;
