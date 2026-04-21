@@ -35,7 +35,9 @@ else
 fi
 
 if [[ ! -f "$CONFIG_DIR/models.tsv" ]]; then
-    install -m 0644 "$ROOT_DIR/config/models.tsv.example" "$CONFIG_DIR/models.tsv"
+    cat >"$CONFIG_DIR/models.tsv" <<'EOF_MODELS'
+# alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes
+EOF_MODELS
     printf 'installed %s\n' "$CONFIG_DIR/models.tsv"
 else
     printf 'kept existing %s\n' "$CONFIG_DIR/models.tsv"

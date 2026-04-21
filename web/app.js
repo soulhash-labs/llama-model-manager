@@ -86,6 +86,15 @@ function basename(path) {
   return String(path || "").split("/").filter(Boolean).pop() || "";
 }
 
+function displayPath(path) {
+  const value = String(path || "");
+  const homeDir = String(state.data?.meta?.home_dir || "");
+  if (!value || !homeDir) return value;
+  if (value === homeDir) return "~";
+  if (value.startsWith(`${homeDir}/`)) return `~/${value.slice(homeDir.length + 1)}`;
+  return value;
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -219,10 +228,10 @@ function renderNotice(data) {
     messages.push("Demo mode is active. Registry and runtime values are sample data, not your local machine.");
   }
   if (!data.registry_exists) {
-    messages.push(`No registry file exists yet at ${data.registry_file}. Save a model to create it, or scan a root and stage one from discovery.`);
+    messages.push(`No registry file exists yet at ${displayPath(data.registry_file)}. Save a model to create it, or scan a root and stage one from discovery.`);
   }
   if (!data.defaults_exists) {
-    messages.push(`Defaults file is missing at ${data.defaults_file}. The dashboard is using built-in fallbacks until you save defaults.`);
+    messages.push(`Defaults file is missing at ${displayPath(data.defaults_file)}. The dashboard is using built-in fallbacks until you save defaults.`);
   }
 
   if (!messages.length) {
@@ -324,7 +333,7 @@ function renderModels(models) {
   setText("#registry-count", String(models.length));
 
   if (!models.length) {
-    const registryPath = state.data?.registry_file || "~/.config/llama-server/models.tsv";
+    const registryPath = displayPath(state.data?.registry_file || "~/.config/llama-server/models.tsv");
     const registryHint = state.data?.registry_exists
       ? "Use Scan Root to discover GGUF files or fill in the Model Editor below to create the first entry."
       : `No registry file exists yet. Saving a model will create ${registryPath}.`;
@@ -368,7 +377,7 @@ function renderDiscovery(items) {
   setText("#discovery-count", String(items.length));
 
   if (!state.discoveryScanned) {
-    const root = $("#discovery-root")?.value.trim() || state.data?.discovery_root || "~/models";
+    const root = displayPath($("#discovery-root")?.value.trim() || state.data?.discovery_root || "~/models");
     renderEmptyRow(
       tbody,
       5,
@@ -380,7 +389,7 @@ function renderDiscovery(items) {
   }
 
   if (!items.length) {
-    const root = $("#discovery-root")?.value.trim() || state.data?.discovery_root || "~/models";
+    const root = displayPath($("#discovery-root")?.value.trim() || state.data?.discovery_root || "~/models");
     renderEmptyRow(
       tbody,
       5,
@@ -457,7 +466,7 @@ function renderDefaults(defaults) {
 
 async function refreshState() {
   state.data = await api("/api/state");
-  $("#discovery-root").value = state.data.discovery_root || "";
+  $("#discovery-root").value = displayPath(state.data.discovery_root || "");
   renderStatus(state.data);
   renderModels(state.data.models || []);
   renderDefaults(state.data.defaults || {});

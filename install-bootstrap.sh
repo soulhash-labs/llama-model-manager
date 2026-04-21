@@ -54,4 +54,8 @@ if ! need_cmd bash; then
 fi
 
 printf '%s\n' "Running llama-model-manager installer..."
+if exec 3</dev/tty 2>/dev/null; then
+    exec bash "$SOURCE_DIR/install.sh" <&3
+fi
+
 exec bash "$SOURCE_DIR/install.sh"

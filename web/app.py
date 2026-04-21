@@ -529,6 +529,9 @@ class Manager:
             "title": APP_TITLE,
             "brand": APP_BRAND,
             "demo": False,
+            "meta": {
+                "home_dir": str(self.home),
+            },
             "defaults": defaults,
             "current": current,
             "doctor": doctor,

@@ -172,6 +172,38 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$install_script" "Would you like to check/install build dependencies"
 }
 
+test_installers_support_bootstrap_tty_handoff_and_empty_registry_seed() {
+    local bootstrap
+    local tmp
+    local models
+    local app_py
+    local app_js
+
+    bootstrap="$(cat "$ROOT_DIR/install-bootstrap.sh")"
+    assert_contains "$bootstrap" 'exec 3</dev/tty 2>/dev/null'
+    assert_contains "$bootstrap" 'exec bash "$SOURCE_DIR/install.sh" <&3'
+
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/home/Desktop" "$tmp/config" "$tmp/data"
+
+    env \
+        HOME="$tmp/home" \
+        XDG_CONFIG_HOME="$tmp/config" \
+        XDG_DATA_HOME="$tmp/data" \
+        bash "$ROOT_DIR/install.sh" >/dev/null
+
+    models="$(cat "$tmp/config/llama-server/models.tsv")"
+    assert_contains "$models" "# alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes"
+    assert_not_contains "$models" "qwen36-35b-q2"
+    assert_not_contains "$models" "gemma4-e4b-q8"
+
+    app_py="$(cat "$ROOT_DIR/web/app.py")"
+    app_js="$(cat "$ROOT_DIR/web/app.js")"
+    assert_contains "$app_py" '"home_dir": str(self.home)'
+    assert_contains "$app_js" 'function displayPath(path) {'
+    assert_contains "$app_js" 'return `~/${value.slice(homeDir.length + 1)}`;'
+}
+
 test_dependency_install_preview_exists() {
     local preview
 
@@ -247,6 +279,7 @@ main() {
     test_cpu_fallback_selected_when_gpu_bundle_is_rejected
     test_no_safe_binary_path_reports_build_guidance
     test_docs_no_longer_imply_universal_gpu_binary
+    test_installers_support_bootstrap_tty_handoff_and_empty_registry_seed
     test_dependency_install_preview_exists
     test_state_and_shell_split_helpers
     test_web_round_trip_for_quoted_values
