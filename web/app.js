@@ -233,6 +233,9 @@ function renderNotice(data) {
   if (!data.defaults_exists) {
     messages.push(`Defaults file is missing at ${displayPath(data.defaults_file)}. The dashboard is using built-in fallbacks until you save defaults.`);
   }
+  if ((data.doctor?.external_owner || "") === "yes" && data.doctor?.external_owner_message) {
+    messages.push(data.doctor.external_owner_message);
+  }
 
   if (!messages.length) {
     notice.classList.add("hidden");

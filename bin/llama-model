@@ -198,6 +198,17 @@ clear_state_file() {
     rm -f "$STATE_FILE"
 }
 
+managed_state_pid() {
+    if read_state_file && [[ -n "${CURRENT_PID:-}" ]]; then
+        if kill -0 "$CURRENT_PID" 2>/dev/null && pid_matches_managed_server "$CURRENT_PID"; then
+            printf '%s
+' "$CURRENT_PID"
+            return 0
+        fi
+    fi
+    return 1
+}
+
 pid_command_line() {
     local pid="$1"
 
@@ -1421,6 +1432,41 @@ find_pid() {
     printf '%s\n' "$pid"
 }
 
+pid_cgroup_text() {
+    local pid="$1"
+
+    if [[ -r "/proc/$pid/cgroup" ]]; then
+        cat "/proc/$pid/cgroup"
+    fi
+}
+
+systemd_unit_from_cgroup_text() {
+    local text="$1"
+    local unit
+
+    unit="$(printf '%s
+' "$text" | grep -oE '[A-Za-z0-9_.@-]+\.service' | tail -n 1 || true)"
+    [[ -n "$unit" ]] && printf '%s
+' "$unit"
+}
+
+pid_systemd_unit() {
+    local pid="$1"
+    local cgroup_text
+
+    cgroup_text="$(pid_cgroup_text "$pid")"
+    [[ -n "$cgroup_text" ]] || return 1
+    systemd_unit_from_cgroup_text "$cgroup_text"
+}
+
+pid_owned_by_manager() {
+    local pid="$1"
+    local managed_pid=""
+
+    managed_pid="$(managed_state_pid 2>/dev/null || true)"
+    [[ -n "$managed_pid" && "$managed_pid" == "$pid" ]]
+}
+
 cmd_arg_from_pid() {
     local pid="$1"
     local key="$2"
@@ -1936,6 +1982,9 @@ show_doctor() {
     local graph_splits=""
     local listening=""
     local binary_ok="no"
+    local external_owner="no"
+    local external_owner_unit=""
+    local external_owner_message=""
 
     pid="$(find_pid)"
     if [[ -n "$pid" ]]; then
@@ -1953,6 +2002,16 @@ show_doctor() {
         kv_buffer="$(grep -E 'KV buffer size = ' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*KV buffer size = //' || true)"
         graph_splits="$(grep -E 'graph splits = ' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*graph splits = //' || true)"
         listening="$(grep -F 'server is listening on' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*server is listening on //' || true)"
+    fi
+
+    if [[ -n "$pid" ]] && ! pid_owned_by_manager "$pid"; then
+        external_owner="yes"
+        external_owner_unit="$(pid_systemd_unit "$pid" || true)"
+        if [[ -n "$external_owner_unit" ]]; then
+            external_owner_message="external systemd service appears to own port ${LLAMA_SERVER_PORT}; stop/disable ${external_owner_unit} or move one side to a different port"
+        else
+            external_owner_message="external llama-server process appears to own port ${LLAMA_SERVER_PORT}; stop/disable that service or move one side to a different port"
+        fi
     fi
 
     if probe_server_binary; then
@@ -1977,6 +2036,9 @@ show_doctor() {
     printf 'binary_message: %s\n' "${SELECTED_LLAMA_SERVER_MESSAGE:-}"
     printf 'binary_guidance: %s\n' "${SELECTED_LLAMA_SERVER_GUIDANCE:-}"
     printf 'binary_label: %s\n' "${SELECTED_LLAMA_SERVER_LABEL:-}"
+    printf 'external_owner: %s\n' "$external_owner"
+    printf 'external_owner_unit: %s\n' "$external_owner_unit"
+    printf 'external_owner_message: %s\n' "$external_owner_message"
     printf 'endpoint: http://%s:%s/v1\n' "$LLAMA_SERVER_HOST" "$LLAMA_SERVER_PORT"
     printf 'build_info: %s\n' "$build_info"
     printf 'offload: %s\n' "$offload"

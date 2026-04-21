@@ -396,6 +396,41 @@ test_dashboard_service_status_reports_unsupported_without_systemctl() {
     assert_contains "$output" "status: unavailable"
 }
 
+test_doctor_reports_external_systemd_owner() {
+    local tmp
+    local output
+
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/home" "$tmp/config/llama-server" "$tmp/state" "$tmp/runtime"
+    cat >"$tmp/config/llama-server/defaults.env" <<EOF
+LLAMA_SERVER_BIN=
+LLAMA_SERVER_DEVICE=
+LLAMA_SERVER_PORT=19081
+LLAMA_SERVER_LOG=$tmp/llama-server.log
+EOF
+    : >"$tmp/llama-server.log"
+
+    # shellcheck disable=SC1090
+    source "$BIN"
+    find_pid() { printf '%s\n' "$$"; }
+    pid_cgroup_text() { printf '0::/system.slice/llama-terran.service\n'; }
+    probe_server_binary() { return 1; }
+
+    HOME="$tmp/home"
+    XDG_CONFIG_HOME="$tmp/config"
+    XDG_STATE_HOME="$tmp/state"
+    STATE_FILE="$tmp/state/current.env"
+    LLAMA_SERVER_RUNTIME_DIR="$tmp/runtime"
+    LLAMA_SERVER_PORT=19081
+    LLAMA_SERVER_LOG="$tmp/llama-server.log"
+
+    output="$(show_doctor)"
+
+    assert_contains "$output" "external_owner: yes"
+    assert_contains "$output" "external_owner_unit: llama-terran.service"
+    assert_contains "$output" "external_owner_message: external systemd service appears to own port 19081; stop/disable llama-terran.service or move one side to a different port"
+}
+
 main() {
     test_host_match_accepts_bundled_backend
     test_host_mismatch_rejects_bundled_backend
@@ -412,6 +447,7 @@ main() {
     test_doctor_tolerates_missing_log_markers
     test_dashboard_service_unit_rendering
     test_dashboard_service_status_reports_unsupported_without_systemctl
+    test_doctor_reports_external_systemd_owner
     printf 'All portability tests passed.\n'
 }
 
