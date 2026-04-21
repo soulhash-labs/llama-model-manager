@@ -350,8 +350,19 @@ h2 {
 #dashboard-service-url,
 #dashboard-service-unit,
 #dashboard-service-path,
-#dashboard-service-message {
+#dashboard-service-message,
+#ownership-conflict-unit,
+#ownership-conflict-message {
   word-break: break-word;
+}
+
+.conflict-card {
+  border-color: rgba(197, 72, 26, 0.22);
+  background: linear-gradient(180deg, rgba(197, 72, 26, 0.08), rgba(197, 72, 26, 0.03));
+}
+
+.conflict-card.hidden {
+  display: none;
 }
 
 .help-badge {

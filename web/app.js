@@ -326,6 +326,24 @@ function renderDashboardService(service) {
   if (logsButton) logsButton.disabled = !supported || !reachable || !installed || !logsAvailable;
 }
 
+function renderOwnershipConflict(doctor) {
+  const card = $("#ownership-conflict-card");
+  if (!card) return;
+
+  if ((doctor.external_owner || "") !== "yes") {
+    card.classList.add("hidden");
+    setText("#ownership-conflict-status", "-");
+    setText("#ownership-conflict-unit", "-");
+    setText("#ownership-conflict-message", "-");
+    return;
+  }
+
+  card.classList.remove("hidden");
+  setText("#ownership-conflict-status", doctor.external_owner_unit || "External Process");
+  setText("#ownership-conflict-unit", doctor.external_owner_unit ? `Unit ${doctor.external_owner_unit}` : "A foreign llama-server already owns this port.");
+  setText("#ownership-conflict-message", doctor.external_owner_message || "Stop or move the conflicting service before switching models here.");
+}
+
 function renderStatus(data) {
   const current = data.current || {};
   const doctor = data.doctor || {};
@@ -335,6 +353,7 @@ function renderStatus(data) {
   renderNotice(data);
   renderHero(data);
   renderDashboardService(data.dashboard_service || {});
+  renderOwnershipConflict(doctor);
 
   setText("#metric-model", current.alias || "stopped");
   setText("#metric-model-path", current.model || "No model running");
