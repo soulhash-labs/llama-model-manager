@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Main installer for Llama Model Manager.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="${HOME}/.local/bin"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/llama-server"
