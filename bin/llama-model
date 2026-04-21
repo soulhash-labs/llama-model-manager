@@ -266,6 +266,23 @@ split_shell_words() {
     done
 }
 
+split_tsv_record() {
+    local raw="${1-}"
+
+    if command_available python3; then
+        python3 -c '
+import sys
+parts = sys.argv[1].split("\t")
+parts.extend([""] * (10 - len(parts)))
+sys.stdout.buffer.write(b"".join(part.encode("utf-8") + b"\0" for part in parts[:10]))
+' "$raw"
+        return 0
+    fi
+
+    # Fallback: shell splitting does not preserve empty tab fields reliably.
+    printf '%s\0' "$raw" "" "" "" "" "" "" "" "" ""
+}
+
 canonicalize_path() {
     local target="$1"
     local dir
@@ -1425,6 +1442,8 @@ cmd_arg_from_pid() {
 
 lookup_model() {
     local needle="$1"
+    local raw_line
+    local -a fields=()
     local alias
     local path
     local extra
@@ -1438,7 +1457,18 @@ lookup_model() {
 
     [[ -f "$MODELS_FILE" ]] || die "model registry not found: $MODELS_FILE"
 
-    while IFS=$'\t' read -r alias path extra context ngl batch threads parallel device notes; do
+    while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
+        mapfile -d '' -t fields < <(split_tsv_record "$raw_line")
+        alias="${fields[0]}"
+        path="${fields[1]}"
+        extra="${fields[2]}"
+        context="${fields[3]}"
+        ngl="${fields[4]}"
+        batch="${fields[5]}"
+        threads="${fields[6]}"
+        parallel="${fields[7]}"
+        device="${fields[8]}"
+        notes="${fields[9]}"
         [[ -n "$alias" ]] || continue
         [[ "${alias:0:1}" == "#" ]] && continue
         if [[ "$alias" == "$needle" ]]; then
@@ -1453,20 +1483,17 @@ lookup_model() {
 
 lookup_alias_for_path() {
     local needle="$1"
+    local raw_line
+    local -a fields=()
     local alias
     local path
-    local extra
-    local context
-    local ngl
-    local batch
-    local threads
-    local parallel
-    local device
-    local notes
 
     [[ -f "$MODELS_FILE" ]] || return 1
 
-    while IFS=$'\t' read -r alias path extra context ngl batch threads parallel device notes; do
+    while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
+        mapfile -d '' -t fields < <(split_tsv_record "$raw_line")
+        alias="${fields[0]}"
+        path="${fields[1]}"
         [[ -n "$alias" ]] || continue
         [[ "${alias:0:1}" == "#" ]] && continue
         if [[ "$path" == "$needle" ]]; then
@@ -1759,6 +1786,8 @@ list_models() {
     local marker
     local status
     local preset
+    local raw_line
+    local -a fields=()
 
     [[ -f "$MODELS_FILE" ]] || die "model registry not found: $MODELS_FILE"
 
@@ -1768,7 +1797,18 @@ list_models() {
     fi
 
     printf '  %-18s %-8s %-8s %s\n' "ALIAS" "STATUS" "PRESET" "MODEL"
-    while IFS=$'\t' read -r alias path extra context ngl batch threads parallel device notes; do
+    while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
+        mapfile -d '' -t fields < <(split_tsv_record "$raw_line")
+        alias="${fields[0]}"
+        path="${fields[1]}"
+        extra="${fields[2]}"
+        context="${fields[3]}"
+        ngl="${fields[4]}"
+        batch="${fields[5]}"
+        threads="${fields[6]}"
+        parallel="${fields[7]}"
+        device="${fields[8]}"
+        notes="${fields[9]}"
         [[ -n "$alias" ]] || continue
         [[ "${alias:0:1}" == "#" ]] && continue
         marker=" "
@@ -1785,6 +1825,7 @@ list_models() {
 
 show_model() {
     local resolved
+    local -a fields=()
     local alias
     local model_path
     local model_extra
@@ -1797,7 +1838,17 @@ show_model() {
     local model_notes
 
     resolved="$(lookup_model "$1")" || die "unknown model alias: $1"
-    IFS=$'\t' read -r alias model_path model_extra model_context model_ngl model_batch model_threads model_parallel model_device model_notes <<<"$resolved"
+    mapfile -d '' -t fields < <(split_tsv_record "$resolved")
+    alias="${fields[0]}"
+    model_path="${fields[1]}"
+    model_extra="${fields[2]}"
+    model_context="${fields[3]}"
+    model_ngl="${fields[4]}"
+    model_batch="${fields[5]}"
+    model_threads="${fields[6]}"
+    model_parallel="${fields[7]}"
+    model_device="${fields[8]}"
+    model_notes="${fields[9]}"
 
     printf 'alias: %s\n' "$alias"
     printf 'model: %s\n' "$model_path"
@@ -1886,11 +1937,11 @@ show_doctor() {
     fi
 
     if [[ -f "$LLAMA_SERVER_LOG" ]]; then
-        build_info="$(grep -F 'build_info:' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*build_info: //')"
-        offload="$(grep -E 'offloaded [0-9]+/[0-9]+ layers to GPU' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*offloaded /offloaded /')"
-        kv_buffer="$(grep -E 'KV buffer size = ' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*KV buffer size = //')"
-        graph_splits="$(grep -E 'graph splits = ' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*graph splits = //')"
-        listening="$(grep -F 'server is listening on' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*server is listening on //')"
+        build_info="$(grep -F 'build_info:' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*build_info: //' || true)"
+        offload="$(grep -E 'offloaded [0-9]+/[0-9]+ layers to GPU' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*offloaded /offloaded /' || true)"
+        kv_buffer="$(grep -E 'KV buffer size = ' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*KV buffer size = //' || true)"
+        graph_splits="$(grep -E 'graph splits = ' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*graph splits = //' || true)"
+        listening="$(grep -F 'server is listening on' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*server is listening on //' || true)"
     fi
 
     if probe_server_binary; then
@@ -1913,15 +1964,14 @@ show_doctor() {
     printf 'binary_backend: %s\n' "${SELECTED_LLAMA_SERVER_BACKEND:-none}"
     printf 'binary_status: %s\n' "${SELECTED_LLAMA_SERVER_STATUS:-unavailable}"
     printf 'binary_message: %s\n' "${SELECTED_LLAMA_SERVER_MESSAGE:-}"
-    [[ -n "${SELECTED_LLAMA_SERVER_GUIDANCE:-}" ]] && printf 'binary_guidance: %s\n' "$SELECTED_LLAMA_SERVER_GUIDANCE"
-    [[ -n "${SELECTED_LLAMA_SERVER_LABEL:-}" ]] && printf 'binary_label: %s\n' "$SELECTED_LLAMA_SERVER_LABEL"
+    printf 'binary_guidance: %s\n' "${SELECTED_LLAMA_SERVER_GUIDANCE:-}"
+    printf 'binary_label: %s\n' "${SELECTED_LLAMA_SERVER_LABEL:-}"
     printf 'endpoint: http://%s:%s/v1\n' "$LLAMA_SERVER_HOST" "$LLAMA_SERVER_PORT"
-    [[ -n "$build_info" ]] && printf 'build_info: %s\n' "$build_info"
-    [[ -n "$offload" ]] && printf 'offload: %s\n' "$offload"
-    [[ -n "$kv_buffer" ]] && printf 'kv_buffer: %s\n' "$kv_buffer"
-    [[ -n "$graph_splits" ]] && printf 'graph_splits: %s\n' "$graph_splits"
-    [[ -n "$listening" ]] && printf 'server: %s\n' "$listening"
-    return 0
+    printf 'build_info: %s\n' "$build_info"
+    printf 'offload: %s\n' "$offload"
+    printf 'kv_buffer: %s\n' "$kv_buffer"
+    printf 'graph_splits: %s\n' "$graph_splits"
+    printf 'server: %s\n' "$listening"
 }
 
 show_mode() {
@@ -1993,9 +2043,20 @@ switch_model() {
     local model_parallel
     local model_device
     local model_notes
+    local -a fields=()
 
     resolved="$(resolve_model "$spec")"
-    IFS=$'\t' read -r alias model_path model_extra model_context model_ngl model_batch model_threads model_parallel model_device model_notes <<<"$resolved"
+    mapfile -d '' -t fields < <(split_tsv_record "$resolved")
+    alias="${fields[0]}"
+    model_path="${fields[1]}"
+    model_extra="${fields[2]}"
+    model_context="${fields[3]}"
+    model_ngl="${fields[4]}"
+    model_batch="${fields[5]}"
+    model_threads="${fields[6]}"
+    model_parallel="${fields[7]}"
+    model_device="${fields[8]}"
+    model_notes="${fields[9]}"
 
     stop_server
     backup_log
@@ -2150,6 +2211,8 @@ add_model() {
     local notes
     local tmp
     local existing_alias
+    local raw_line
+    local -a fields=()
     local line_alias
     local line_path
     local line_extra
@@ -2169,23 +2232,43 @@ add_model() {
     [[ -f "$model_path" ]] || die "model not found: $model_path"
 
     parsed="$(parse_add_options "$alias" "$model_path" "$@")"
-    IFS=$'\t' read -r existing_alias model_path extra context ngl batch threads parallel device notes <<<"$parsed"
+    mapfile -d '' -t fields < <(split_tsv_record "$parsed")
+    existing_alias="${fields[0]}"
+    model_path="${fields[1]}"
+    extra="${fields[2]}"
+    context="${fields[3]}"
+    ngl="${fields[4]}"
+    batch="${fields[5]}"
+    threads="${fields[6]}"
+    parallel="${fields[7]}"
+    device="${fields[8]}"
+    notes="${fields[9]}"
 
     ensure_models_file
     tmp="$(mktemp)"
 
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        if [[ -z "$line" ]] || [[ "${line:0:1}" == "#" ]]; then
-            printf '%s\n' "$line" >>"$tmp"
+    while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
+        if [[ -z "$raw_line" ]] || [[ "${raw_line:0:1}" == "#" ]]; then
+            printf '%s\n' "$raw_line" >>"$tmp"
             continue
         fi
 
-        IFS=$'\t' read -r line_alias line_path line_extra line_context line_ngl line_batch line_threads line_parallel line_device line_notes <<<"$line"
+        mapfile -d '' -t fields < <(split_tsv_record "$raw_line")
+        line_alias="${fields[0]}"
+        line_path="${fields[1]}"
+        line_extra="${fields[2]}"
+        line_context="${fields[3]}"
+        line_ngl="${fields[4]}"
+        line_batch="${fields[5]}"
+        line_threads="${fields[6]}"
+        line_parallel="${fields[7]}"
+        line_device="${fields[8]}"
+        line_notes="${fields[9]}"
         if [[ "$line_alias" == "$alias" ]]; then
             write_registry_line "$alias" "$model_path" "$extra" "$context" "$ngl" "$batch" "$threads" "$parallel" "$device" "$notes" >>"$tmp"
             replaced=1
         else
-            printf '%s\n' "$line" >>"$tmp"
+            printf '%s\n' "$raw_line" >>"$tmp"
         fi
     done <"$MODELS_FILE"
 

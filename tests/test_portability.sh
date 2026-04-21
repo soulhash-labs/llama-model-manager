@@ -318,6 +318,55 @@ PY
     assert_contains "$output" "--mmproj '/tmp/My Models/mmproj.gguf'"
 }
 
+test_registry_parsing_preserves_empty_columns() {
+    local tmp
+    local output
+
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/home" "$tmp/config/llama-server" "$tmp/state"
+    cat >"$tmp/config/llama-server/models.tsv" <<'EOF'
+# alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes
+demo	/tmp/demo.gguf		32000
+EOF
+    : >"/tmp/demo.gguf"
+
+    output="$(env \
+        HOME="$tmp/home" \
+        XDG_CONFIG_HOME="$tmp/config" \
+        XDG_STATE_HOME="$tmp/state" \
+        "$BIN" show demo)"
+
+    assert_contains "$output" "extra_args: "
+    assert_contains "$output" "context: 32000"
+    assert_not_contains "$output" "extra_args: 32000"
+}
+
+test_doctor_tolerates_missing_log_markers() {
+    local tmp
+    local output
+
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/home" "$tmp/config/llama-server" "$tmp/state" "$tmp/runtime"
+    cat >"$tmp/config/llama-server/defaults.env" <<EOF
+LLAMA_SERVER_BIN=
+LLAMA_SERVER_DEVICE=
+LLAMA_SERVER_PORT=19081
+LLAMA_SERVER_LOG=$tmp/llama-server.log
+EOF
+    : >"$tmp/llama-server.log"
+
+    output="$(env \
+        HOME="$tmp/home" \
+        PATH="/usr/bin:/bin" \
+        XDG_CONFIG_HOME="$tmp/config" \
+        XDG_STATE_HOME="$tmp/state" \
+        LLAMA_SERVER_RUNTIME_DIR="$tmp/runtime" \
+        "$BIN" doctor)"
+
+    assert_contains "$output" "health: unavailable"
+    assert_contains "$output" "binary_status: unavailable"
+}
+
 main() {
     test_host_match_accepts_bundled_backend
     test_host_mismatch_rejects_bundled_backend
@@ -330,6 +379,8 @@ main() {
     test_dependency_install_preview_exists
     test_state_and_shell_split_helpers
     test_web_round_trip_for_quoted_values
+    test_registry_parsing_preserves_empty_columns
+    test_doctor_tolerates_missing_log_markers
     printf 'All portability tests passed.\n'
 }
 
