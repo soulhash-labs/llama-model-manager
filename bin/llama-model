@@ -2744,9 +2744,7 @@ claude_gateway_detect_pid() {
 }
 
 claude_gateway_running() {
-    local pid=""
-    pid="$(claude_gateway_detect_pid 2>/dev/null || true)"
-    [[ -n "$pid" ]] && claude_gateway_health_ok
+    claude_gateway_health_ok
 }
 
 claude_gateway_wait_ready() {
@@ -2770,7 +2768,8 @@ claude_gateway_wait_ready() {
 
 claude_gateway_start() {
     local script
-    local pid
+    local pid=""
+    local listener_pid=""
     local model_id=""
     local upstream_base
     local -a cmd=()
@@ -2780,9 +2779,15 @@ claude_gateway_start() {
     model_id="$(claude_gateway_model_id 2>/dev/null || true)"
     mkdir -p "$(dirname "$CLAUDE_GATEWAY_LOG")" "$(dirname "$CLAUDE_GATEWAY_PID_FILE")"
 
-    pid="$(claude_gateway_detect_pid 2>/dev/null || true)"
-    if [[ -n "$pid" ]] && claude_gateway_health_ok; then
-        printf '%s\n' "$pid" > "$CLAUDE_GATEWAY_PID_FILE"
+    listener_pid="$(claude_gateway_listener_pid 2>/dev/null || true)"
+    if claude_gateway_health_ok; then
+        pid="$listener_pid"
+        if [[ -z "$pid" ]]; then
+            pid="$(claude_gateway_pid 2>/dev/null || true)"
+        fi
+        if [[ -n "$pid" ]]; then
+            printf '%s\n' "$pid" > "$CLAUDE_GATEWAY_PID_FILE"
+        fi
         printf 'status: running\n'
         printf 'pid: %s\n' "$pid"
         printf 'url: %s\n' "$(claude_gateway_url)"
@@ -2792,7 +2797,6 @@ claude_gateway_start() {
         return 0
     fi
 
-    listener_pid="$(claude_gateway_listener_pid 2>/dev/null || true)"
     if [[ -n "$listener_pid" ]] && ! pid_matches_claude_gateway "$listener_pid"; then
         die "port ${CLAUDE_GATEWAY_PORT} is already occupied by another process"
     fi
@@ -2820,6 +2824,9 @@ claude_gateway_stop() {
     local pid
     pid="$(claude_gateway_detect_pid 2>/dev/null || true)"
     if [[ -z "$pid" ]]; then
+        pid="$(claude_gateway_listener_pid 2>/dev/null || true)"
+    fi
+    if [[ -z "$pid" ]]; then
         rm -f "$CLAUDE_GATEWAY_PID_FILE"
         printf 'status: stopped\n'
         return 0
@@ -2846,9 +2853,14 @@ claude_gateway_status() {
     local pid=""
     local model_id="$(claude_gateway_model_id 2>/dev/null || true)"
     pid="$(claude_gateway_detect_pid 2>/dev/null || true)"
-    if [[ -n "$pid" ]] && claude_gateway_health_ok; then
+    if [[ -z "$pid" ]]; then
+        pid="$(claude_gateway_listener_pid 2>/dev/null || true)"
+    fi
+    if claude_gateway_health_ok; then
         running="yes"
-        printf '%s\n' "$pid" > "$CLAUDE_GATEWAY_PID_FILE"
+        if [[ -n "$pid" ]]; then
+            printf '%s\n' "$pid" > "$CLAUDE_GATEWAY_PID_FILE"
+        fi
     fi
     printf 'running: %s\n' "$running"
     printf 'pid: %s\n' "$pid"

@@ -582,9 +582,12 @@ test_claude_gateway_detects_existing_listener() {
     CLAUDE_GATEWAY_LOG="$tmp/claude-gateway.log"
     CLAUDE_GATEWAY_PID_FILE="$tmp/claude-gateway.pid"
     claude_gateway_health_ok() { return 0; }
-    claude_gateway_pid() { return 1; }
+    claude_gateway_pid() { printf '44339\n'; }
     claude_gateway_listener_pid() { printf '28010\n'; }
-    pid_matches_claude_gateway() { [[ "$1" == '28010' ]]; }
+    pid_matches_claude_gateway() {
+        [[ "$1" == '44339' ]] && return 1
+        [[ "$1" == '28010' ]]
+    }
     claude_gateway_model_id() { printf 'qwen35-9b-q8\n'; }
     claude_gateway_upstream_base() { printf 'http://127.0.0.1:8081/v1\n'; }
 
