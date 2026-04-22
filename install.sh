@@ -79,6 +79,25 @@ printf '  2. Or use the launcher: llama-model-gui\n'
 printf '  3. Build a local runtime if needed: llama-model build-runtime --backend auto\n'
 printf '  4. Edit %s/defaults.env if needed\n' "$CONFIG_DIR"
 printf '  5. Run: llama-model current\n'
+OPENCODE_CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"
+OPENCLAW_MAIN_CONFIG="$HOME/.openclaw/openclaw.json"
+CLAUDE_SETTINGS_FILE="$HOME/.claude/settings.json"
+if [[ -f "$OPENCODE_CONFIG_FILE" ]]; then
+    printf '  6. Sync your existing opencode config: llama-model sync-opencode\n'
+else
+    printf '  6. If you use opencode later, sync it with: llama-model sync-opencode\n'
+fi
+if [[ -f "$OPENCLAW_MAIN_CONFIG" ]]; then
+    printf '  7. Sync your existing OpenClaw config: llama-model sync-openclaw\n'
+else
+    printf '  7. If you use OpenClaw later, sync it with: llama-model sync-openclaw\n'
+fi
+if [[ -f "$CLAUDE_SETTINGS_FILE" ]]; then
+    printf '  8. Sync your Claude Code settings: llama-model sync-claude\n'
+else
+    printf '  8. If you use Claude Code later, sync it with: llama-model sync-claude\n'
+fi
+printf '  9. Optional local Claude gateway: llama-model claude-gateway start\n'
 
 if [[ -t 0 && -t 1 ]]; then
     printf '\nWould you like to check/install build dependencies and compile a local llama.cpp runtime now? [Y/n] '

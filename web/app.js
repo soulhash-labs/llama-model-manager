@@ -390,7 +390,30 @@ function renderStatus(data) {
     ]),
   );
   setText("#api-base", data.api_base || "-");
+  setText("#integration-endpoint-note", "OpenAI-compatible local endpoint.");
   setText("#opencode-model", data.opencode_model || "-");
+  setText("#opencode-path", joinNotes([
+    data.opencode_config_exists ? "config present" : "config missing",
+    displayPath(data.opencode_config_file || ""),
+  ]) || "-");
+  setText("#openclaw-model", data.openclaw_model || "-");
+  setText("#openclaw-path", joinNotes([
+    `profile ${data.openclaw_profile || "main"}`,
+    data.openclaw_config_exists ? "config present" : "config missing",
+    displayPath(data.openclaw_config_file || ""),
+  ]) || "-");
+  setText("#claude-model", data.claude_model_id || "-");
+  setText("#claude-path", joinNotes([
+    data.claude_settings_exists ? "settings present" : "settings missing",
+    displayPath(data.claude_settings_file || ""),
+    data.claude_base_url || "",
+  ]) || "-");
+  const claudeGateway = data.claude_gateway || {};
+  setText("#claude-gateway-status", (claudeGateway.running || "") === "yes" ? "Running" : "Stopped");
+  setText("#claude-gateway-url", joinNotes([
+    claudeGateway.url || "-",
+    claudeGateway.model_id ? `model ${claudeGateway.model_id}` : "",
+  ]) || "-");
   setText("#toggle-mode", nextMode);
   setTitle(
     "#toggle-mode",
@@ -537,6 +560,15 @@ function renderDefaults(defaults) {
   $("#default-parallel").value = defaults.LLAMA_SERVER_PARALLEL || "";
   $("#default-log").value = defaults.LLAMA_SERVER_LOG || "";
   $("#default-extra").value = defaults.LLAMA_SERVER_EXTRA_ARGS || "";
+  $("#default-openclaw-profile").value = defaults.OPENCLAW_PROFILE || "";
+  $("#default-openclaw-api-key").value = defaults.OPENCLAW_API_KEY || "";
+  $("#default-claude-gateway-host").value = defaults.CLAUDE_GATEWAY_HOST || "";
+  $("#default-claude-gateway-port").value = defaults.CLAUDE_GATEWAY_PORT || "";
+  $("#default-claude-gateway-log").value = defaults.CLAUDE_GATEWAY_LOG || "";
+  $("#default-claude-base-url").value = defaults.CLAUDE_BASE_URL || "";
+  $("#default-claude-model-id").value = defaults.CLAUDE_MODEL_ID || "";
+  $("#default-claude-auth-token").value = defaults.CLAUDE_AUTH_TOKEN || "";
+  $("#default-claude-api-key").value = defaults.CLAUDE_API_KEY || "";
 }
 
 async function refreshState() {
@@ -643,6 +675,41 @@ async function loadDashboardServiceLogs(button) {
   });
 }
 
+async function performIntegrationSync(path, button, pendingLabel, successMessage) {
+  await withButtonBusy(button, pendingLabel, async () => {
+    await api(path, { method: "POST", body: JSON.stringify({}) });
+    await refreshState();
+  }, {
+    successMessage,
+  });
+}
+
+async function performClaudeGatewayAction(action, button, options = {}) {
+  await withButtonBusy(button, options.pendingLabel || "Working...", async () => {
+    await api("/api/claude-gateway", {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    });
+    await refreshState();
+  }, {
+    successMessage: options.successMessage,
+    successKind: options.successKind || "info",
+  });
+}
+
+async function loadClaudeGatewayLogs(button) {
+  await withButtonBusy(button, "Loading...", async () => {
+    const payload = await api("/api/claude-gateway/logs?lines=100");
+    const output = $("#claude-gateway-logs-output");
+    output.classList.remove("hidden");
+    output.textContent = payload.content || "";
+    output.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, {
+    successMessage: "Loaded Claude gateway logs.",
+    successKind: "info",
+  });
+}
+
 async function saveDefaults(event) {
   event.preventDefault();
   const submitButton = event.submitter || $("#defaults-form button[type='submit']");
@@ -657,6 +724,15 @@ async function saveDefaults(event) {
     LLAMA_SERVER_PARALLEL: $("#default-parallel").value.trim(),
     LLAMA_SERVER_LOG: $("#default-log").value.trim(),
     LLAMA_SERVER_EXTRA_ARGS: $("#default-extra").value.trim(),
+    OPENCLAW_PROFILE: $("#default-openclaw-profile").value.trim(),
+    OPENCLAW_API_KEY: $("#default-openclaw-api-key").value.trim(),
+    CLAUDE_GATEWAY_HOST: $("#default-claude-gateway-host").value.trim(),
+    CLAUDE_GATEWAY_PORT: $("#default-claude-gateway-port").value.trim(),
+    CLAUDE_GATEWAY_LOG: $("#default-claude-gateway-log").value.trim(),
+    CLAUDE_BASE_URL: $("#default-claude-base-url").value.trim(),
+    CLAUDE_MODEL_ID: $("#default-claude-model-id").value.trim(),
+    CLAUDE_AUTH_TOKEN: $("#default-claude-auth-token").value.trim(),
+    CLAUDE_API_KEY: $("#default-claude-api-key").value.trim(),
   };
 
   await withButtonBusy(submitButton, "Saving...", async () => {
@@ -853,6 +929,13 @@ function bindEvents() {
     }).catch(showError);
   });
   $("#dashboard-service-logs").addEventListener("click", (event) => loadDashboardServiceLogs(event.currentTarget).catch(showError));
+  $("#sync-opencode").addEventListener("click", (event) => performIntegrationSync("/api/opencode/sync", event.currentTarget, "Syncing...", "opencode synced.").catch(showError));
+  $("#sync-openclaw").addEventListener("click", (event) => performIntegrationSync("/api/openclaw/sync", event.currentTarget, "Syncing...", "OpenClaw synced.").catch(showError));
+  $("#sync-claude").addEventListener("click", (event) => performIntegrationSync("/api/claude/sync", event.currentTarget, "Syncing...", "Claude Code settings synced.").catch(showError));
+  $("#claude-gateway-start").addEventListener("click", (event) => performClaudeGatewayAction("start", event.currentTarget, { pendingLabel: "Starting...", successMessage: "Claude gateway started." }).catch(showError));
+  $("#claude-gateway-restart").addEventListener("click", (event) => performClaudeGatewayAction("restart", event.currentTarget, { pendingLabel: "Restarting...", successMessage: "Claude gateway restarted." }).catch(showError));
+  $("#claude-gateway-stop").addEventListener("click", (event) => performClaudeGatewayAction("stop", event.currentTarget, { pendingLabel: "Stopping...", successMessage: "Claude gateway stopped." }).catch(showError));
+  $("#claude-gateway-logs").addEventListener("click", (event) => loadClaudeGatewayLogs(event.currentTarget).catch(showError));
   $("#scan-models").addEventListener("click", (event) => withButtonBusy(event.currentTarget, "Scanning...", async () => {
     const items = await scanModels();
     showToast(items.length ? `Found ${items.length} model candidate${items.length === 1 ? "" : "s"}.` : "No model candidates found in this root.", items.length ? "success" : "info");

@@ -145,7 +145,7 @@ If `doctor` reports `binary_status: unavailable`, install the missing build depe
 - CLI diagnostics via `llama-model doctor`
 - manifest-driven runtime selection that only accepts validated bundled binaries
 - local `llama.cpp` bootstrap via `llama-model build-runtime`
-- OpenAI-compatible endpoint summary for local harnesses such as `opencode`
+- OpenAI-compatible endpoint summary plus sync wiring for local harnesses such as `opencode`, `OpenClaw`, and `Claude Code`
 - Modern Operator dashboard treatment with toasts, busy states, and first-run empty states
 
 ## Dependencies
@@ -159,6 +159,14 @@ If `doctor` reports `binary_status: unavailable`, install the missing build depe
 - `LLAMA_SERVER_PARALLEL=1` is recommended for a single coding harness because it avoids parallel slot pressure without reducing context length
 - set `LLAMA_MODEL_UI=zenity` if you want to force the old Zenity UI instead of the browser dashboard
 
+## Client Sync
+
+- `opencode` keeps its own local client config in `~/.config/opencode/opencode.json`, so it can keep pointing at a stale GGUF even after `llama-model switch`.
+- `llama-model sync-opencode` updates the `llamacpp` provider endpoint, default model, and local model-state wiring to match `llama-model current`.
+- `llama-model sync-openclaw` updates `~/.openclaw/openclaw.json` or `~/.openclaw-<profile>/openclaw.json` so OpenClaw points directly at the live local endpoint.
+- `llama-model sync-claude` writes `~/.claude/settings.json` for Claude Code, and `llama-model claude-gateway` runs a local Anthropic-compatible bridge in front of the current llama.cpp server.
+- the dashboard exposes direct sync actions for all three tools and gateway controls for Claude Code.
+
 ## Common Commands
 
 ```bash
@@ -168,6 +176,10 @@ llama-model add gemma4-e4b-q8 /absolute/path/to/Gemma-4-E4B-Q8_K_P.gguf --mmproj
 llama-model discover ~/models
 llama-model build-runtime --backend auto
 llama-model switch qwen35-9b-q8
+llama-model sync-opencode
+llama-model sync-openclaw --profile lmm-eval qwen35-9b-q8
+llama-model sync-claude qwen35-9b-q8
+llama-model claude-gateway start
 llama-model doctor
 ```
 

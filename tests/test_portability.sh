@@ -166,10 +166,22 @@ test_docs_no_longer_imply_universal_gpu_binary() {
 
     assert_contains "$readme" "backend-, platform-, and architecture-specific"
     assert_contains "$readme" "shows the install commands it plans to run"
+    assert_contains "$readme" "llama-model sync-opencode"
+    assert_contains "$readme" "llama-model sync-openclaw"
+    assert_contains "$readme" "llama-model sync-claude"
     assert_contains "$help" "llama-model build-runtime --backend auto"
+    assert_contains "$help" "llama-model sync-opencode"
+    assert_contains "$help" "llama-model sync-openclaw"
+    assert_contains "$help" "llama-model sync-claude"
+    assert_contains "$help" "llama-model claude-gateway start"
+    assert_contains "$defaults" "OPENCLAW_PROFILE="
+    assert_contains "$defaults" "CLAUDE_GATEWAY_PORT=4000"
     assert_not_contains "$defaults" "LLAMA_SERVER_DEVICE=cuda0"
     assert_not_contains "$web_index" "GPU-aware defaults"
     assert_contains "$install_script" "Would you like to check/install build dependencies"
+    assert_contains "$install_script" "llama-model sync-opencode"
+    assert_contains "$install_script" "llama-model sync-openclaw"
+    assert_contains "$install_script" "llama-model sync-claude"
 }
 
 test_installers_support_bootstrap_tty_handoff_and_empty_registry_seed() {
@@ -429,6 +441,143 @@ EOF
     assert_contains "$output" "external_owner: yes"
     assert_contains "$output" "external_owner_unit: llama-terran.service"
     assert_contains "$output" "external_owner_message: external systemd service appears to own port 19081; stop/disable llama-terran.service or move one side to a different port"
+}
+
+
+test_sync_opencode_updates_config_and_state() {
+    local tmp
+    local output
+    local config
+    local state_json
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    mkdir -p "$tmp/models" "$tmp/config/opencode" "$tmp/state/opencode"
+    : >"$tmp/models/Qwen3.5-9B-Q8_0.gguf"
+    cat >"$tmp/config/llama-server/models.tsv" <<EOF
+# alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes
+qwen35-9b-q8	$tmp/models/Qwen3.5-9B-Q8_0.gguf		65536
+EOF
+    cat >"$tmp/config/opencode/opencode.json" <<'EOF'
+{
+  "provider": {
+    "other": {
+      "name": "keep-me"
+    }
+  },
+  "permissions": {
+    "fs": "read-only"
+  }
+}
+EOF
+    cat >"$tmp/state/opencode/model.json" <<'EOF'
+{
+  "recent": ["llamacpp/old.gguf", "other/model"],
+  "variant": {
+    "llamacpp/old.gguf": "default"
+  },
+  "favorite": {
+    "keep": true
+  }
+}
+EOF
+
+    output="$(run_cli "$tmp" sync-opencode qwen35-9b-q8)"
+    assert_contains "$output" "status: synced"
+    assert_contains "$output" "opencode_model: llamacpp/Qwen3.5-9B-Q8_0.gguf"
+
+    config="$(cat "$tmp/config/opencode/opencode.json")"
+    state_json="$(cat "$tmp/state/opencode/model.json")"
+    assert_contains "$config" '"model": "llamacpp/Qwen3.5-9B-Q8_0.gguf"'
+    assert_contains "$config" '"baseURL": "http://127.0.0.1:19081/v1"'
+    assert_contains "$config" '"other"'
+    assert_contains "$state_json" '"llamacpp/Qwen3.5-9B-Q8_0.gguf"'
+    assert_contains "$state_json" '"favorite"'
+}
+
+test_sync_openclaw_updates_profile_config() {
+    local tmp
+    local output
+    local config
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    mkdir -p "$tmp/models" "$tmp/home/.openclaw-lmm-eval"
+    : >"$tmp/models/Qwen3.5-9B-Q8_0.gguf"
+    cat >"$tmp/config/llama-server/defaults.env" <<'EOF'
+LLAMA_SERVER_BIN=
+LLAMA_SERVER_DEVICE=
+LLAMA_SERVER_PORT=19081
+LLAMA_SERVER_LOG=
+OPENCLAW_PROFILE=lmm-eval
+OPENCLAW_API_KEY=llama-local
+EOF
+    cat >"$tmp/config/llama-server/models.tsv" <<EOF
+# alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes
+qwen35-9b-q8	$tmp/models/Qwen3.5-9B-Q8_0.gguf		65536
+EOF
+    cat >"$tmp/home/.openclaw-lmm-eval/openclaw.json" <<'EOF'
+{
+  "telemetry": {"enabled": false},
+  "models": {"providers": {"ollama": {"baseUrl": "http://127.0.0.1:11434"}}}
+}
+EOF
+
+    output="$(run_cli "$tmp" sync-openclaw --profile lmm-eval qwen35-9b-q8)"
+    assert_contains "$output" "openclaw_model: llamacpp/qwen35-9b-q8"
+
+    config="$(cat "$tmp/home/.openclaw-lmm-eval/openclaw.json")"
+    assert_contains "$config" '"primary": "llamacpp/qwen35-9b-q8"'
+    assert_contains "$config" '"baseUrl": "http://127.0.0.1:19081/v1"'
+    assert_contains "$config" '"apiKey": "llama-local"'
+    assert_contains "$config" '"telemetry"'
+    assert_contains "$config" '"ollama"'
+}
+
+test_sync_claude_updates_settings() {
+    local tmp
+    local output
+    local settings
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    mkdir -p "$tmp/home/.claude"
+    cat >"$tmp/config/llama-server/defaults.env" <<'EOF'
+LLAMA_SERVER_BIN=
+LLAMA_SERVER_DEVICE=
+LLAMA_SERVER_PORT=19081
+LLAMA_SERVER_LOG=
+CLAUDE_BASE_URL=http://127.0.0.1:4000
+CLAUDE_MODEL_ID=qwen35-9b-q8
+CLAUDE_AUTH_TOKEN=local-dev-token
+EOF
+    cat >"$tmp/home/.claude/settings.json" <<'EOF'
+{
+  "theme": "dark"
+}
+EOF
+
+    output="$(run_cli "$tmp" sync-claude)"
+    assert_contains "$output" "status: synced"
+    assert_contains "$output" "claude_api_key: mirrored-from-auth-token"
+
+    settings="$(cat "$tmp/home/.claude/settings.json")"
+    assert_contains "$settings" '"model": "qwen35-9b-q8"'
+    assert_contains "$settings" '"ANTHROPIC_BASE_URL": "http://127.0.0.1:4000"'
+    assert_contains "$settings" '"ANTHROPIC_AUTH_TOKEN": "local-dev-token"'
+    assert_contains "$settings" '"ANTHROPIC_API_KEY": "local-dev-token"'
+    assert_contains "$settings" '"theme": "dark"'
+}
+
+test_claude_gateway_status_without_runtime_is_clean() {
+    local tmp
+    local output
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    output="$(run_cli "$tmp" claude-gateway status)"
+    assert_contains "$output" "running: no"
+    assert_contains "$output" "url: http://127.0.0.1:4000"
 }
 
 main() {

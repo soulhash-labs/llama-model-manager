@@ -42,6 +42,19 @@ DASHBOARD_SERVICE_INSTALLED_BIN="$HOME/.local/bin/llama-model-web"
 DASHBOARD_SERVICE_HOST="${LLAMA_MODEL_WEB_HOST:-127.0.0.1}"
 DASHBOARD_SERVICE_PORT="${LLAMA_MODEL_WEB_PORT:-8765}"
 DASHBOARD_SERVICE_URL="http://${DASHBOARD_SERVICE_HOST}:${DASHBOARD_SERVICE_PORT}/"
+OPENCODE_CONFIG_FILE="${OPENCODE_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json}"
+OPENCODE_MODEL_STATE_FILE="${OPENCODE_MODEL_STATE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/opencode/model.json}"
+OPENCLAW_PROFILE="${OPENCLAW_PROFILE:-}"
+OPENCLAW_API_KEY="${OPENCLAW_API_KEY:-llama-local}"
+CLAUDE_SETTINGS_FILE="${CLAUDE_SETTINGS_FILE:-$HOME/.claude/settings.json}"
+CLAUDE_GATEWAY_HOST="${CLAUDE_GATEWAY_HOST:-127.0.0.1}"
+CLAUDE_GATEWAY_PORT="${CLAUDE_GATEWAY_PORT:-4000}"
+CLAUDE_GATEWAY_LOG="${CLAUDE_GATEWAY_LOG:-$HOME/models/claude-gateway.log}"
+CLAUDE_GATEWAY_PID_FILE="${CLAUDE_GATEWAY_PID_FILE:-$STATE_DIR/claude-gateway.pid}"
+CLAUDE_BASE_URL="${CLAUDE_BASE_URL:-}"
+CLAUDE_MODEL_ID="${CLAUDE_MODEL_ID:-}"
+CLAUDE_AUTH_TOKEN="${CLAUDE_AUTH_TOKEN:-}"
+CLAUDE_API_KEY="${CLAUDE_API_KEY:-}"
 
 if [[ -f "$DEFAULTS_FILE" ]]; then
     # User-tunable runtime defaults live here, not in the wrapper itself.
@@ -86,6 +99,10 @@ Usage:
   llama-model set-mode <single|multi> [--restart]
   llama-model switch <alias|/path/to/model.gguf> [extra llama-server args...]
   llama-model restart [alias|/path/to/model.gguf] [extra llama-server args...]
+  llama-model sync-opencode [alias|/path/to/model.gguf]
+  llama-model sync-openclaw [--profile NAME] [alias|/path/to/model.gguf]
+  llama-model sync-claude [model-id]
+  llama-model claude-gateway start|stop|restart|status|logs
   llama-model stop
   llama-model logs [lines]
   llama-model dashboard-service install|enable|disable|start|stop|restart|status|logs|uninstall
@@ -99,6 +116,10 @@ Examples:
   llama-model mode
   llama-model set-mode single --restart
   llama-model switch qwen35-9b-q8
+  llama-model sync-opencode
+  llama-model sync-openclaw --profile lmm-eval qwen35-9b-q8
+  llama-model sync-claude qwen35-9b-q8
+  llama-model claude-gateway start
   llama-model switch /absolute/path/to/model.gguf --no-warmup
   llama-model dashboard-service status
   llama-model dashboard-service install
@@ -112,6 +133,8 @@ Notes:
   - Bundled llama.cpp binaries are backend-, platform-, and architecture-specific.
   - llama-model only auto-accepts bundled binaries that pass an explicit compatibility check.
   - If no safe binary is available, run: llama-model build-runtime
+  - opencode, OpenClaw, and Claude Code keep their own client settings.
+  - sync-opencode, sync-openclaw, and sync-claude align those settings with the active llama-model runtime.
 EOF
 }
 
@@ -2433,6 +2456,368 @@ discover_models() {
 }
 
 
+
+require_python3() {
+    command_available python3 || die "python3 is required for this integration command"
+}
+
+upstream_api_base() {
+    printf 'http://%s:%s/v1\n' "$LLAMA_SERVER_HOST" "$LLAMA_SERVER_PORT"
+}
+
+resolve_sync_target() {
+    local spec="${1:-}"
+    local resolved=""
+    local pid=""
+    local -a fields=()
+    local alias=""
+    local model_path=""
+    local context=""
+    local source=""
+
+    if [[ -n "$spec" ]]; then
+        resolved="$(resolve_model "$spec")"
+        mapfile -d '' -t fields < <(split_tsv_record "$resolved")
+        alias="${fields[0]}"
+        model_path="${fields[1]}"
+        context="${fields[3]}"
+        source="explicit-target"
+    else
+        pid="$(find_pid)"
+        if [[ -n "$pid" ]]; then
+            model_path="$(cmd_arg_from_pid "$pid" -m || true)"
+            [[ -n "$model_path" ]] || die "running llama-server on port $LLAMA_SERVER_PORT did not report a model path"
+            alias="$(lookup_alias_for_path "$model_path" || true)"
+            [[ -n "$alias" ]] || alias="custom"
+            context="$(cmd_arg_from_pid "$pid" -c || true)"
+            source="running-server"
+        elif read_state_file && [[ -n "${CURRENT_MODEL:-}" ]]; then
+            model_path="$CURRENT_MODEL"
+            alias="${CURRENT_ALIAS:-custom}"
+            context="${CURRENT_CONTEXT:-}"
+            source="saved-state"
+        else
+            die "no running server and no saved model state; start or switch a model first"
+        fi
+    fi
+
+    [[ -f "$model_path" ]] || die "model not found: $model_path"
+
+    SYNC_TARGET_SOURCE="$source"
+    SYNC_TARGET_ALIAS="$alias"
+    SYNC_TARGET_MODEL_PATH="$(canonicalize_path "$model_path")"
+    SYNC_TARGET_MODEL_NAME="$(basename "$SYNC_TARGET_MODEL_PATH")"
+    if [[ -n "$alias" && "$alias" != "custom" ]]; then
+        SYNC_TARGET_MODEL_ID="$alias"
+    else
+        SYNC_TARGET_MODEL_ID="$(sanitize_alias "$SYNC_TARGET_MODEL_PATH")"
+    fi
+    SYNC_TARGET_CONTEXT="${context:-$LLAMA_SERVER_CONTEXT}"
+}
+
+resolve_openclaw_config_file() {
+    local profile="${1:-}"
+    if [[ -z "$profile" || "$profile" == "main" ]]; then
+        printf '%s\n' "$HOME/.openclaw/openclaw.json"
+    else
+        printf '%s\n' "$HOME/.openclaw-${profile}/openclaw.json"
+    fi
+}
+
+sync_opencode() {
+    [[ $# -le 1 ]] || die "sync-opencode accepts at most one optional alias or path"
+    local spec="${1:-}"
+    local config_exists_before="no"
+    local state_exists_before="no"
+    local api_base
+
+    resolve_sync_target "$spec"
+    api_base="$(upstream_api_base)"
+    [[ -f "$OPENCODE_CONFIG_FILE" ]] && config_exists_before="yes"
+    [[ -f "$OPENCODE_MODEL_STATE_FILE" ]] && state_exists_before="yes"
+    require_python3
+    python3 "$APP_ROOT/scripts/integration_sync.py" opencode \
+        --config-file "$OPENCODE_CONFIG_FILE" \
+        --state-file "$OPENCODE_MODEL_STATE_FILE" \
+        --model-name "$SYNC_TARGET_MODEL_NAME" \
+        --display-name "$SYNC_TARGET_MODEL_NAME" \
+        --api-base "$api_base"
+
+    printf 'status: synced\n'
+    printf 'source: %s\n' "$SYNC_TARGET_SOURCE"
+    printf 'alias: %s\n' "$SYNC_TARGET_ALIAS"
+    printf 'model_path: %s\n' "$SYNC_TARGET_MODEL_PATH"
+    printf 'opencode_model: llamacpp/%s\n' "$SYNC_TARGET_MODEL_NAME"
+    printf 'api_base: %s\n' "$api_base"
+    printf 'config_file: %s\n' "$OPENCODE_CONFIG_FILE"
+    printf 'config_exists_before: %s\n' "$config_exists_before"
+    printf 'state_file: %s\n' "$OPENCODE_MODEL_STATE_FILE"
+    printf 'state_exists_before: %s\n' "$state_exists_before"
+}
+
+sync_openclaw() {
+    local profile="$OPENCLAW_PROFILE"
+    local spec=""
+    local config_file
+    local profile_label
+    local config_exists_before="no"
+    local api_base
+    local api_key
+    local context_window
+    local max_tokens="4096"
+    local workspace
+
+    while (($#)); do
+        case "$1" in
+            --profile)
+                [[ $# -ge 2 ]] || die "--profile requires a name"
+                profile="$2"
+                shift 2
+                ;;
+            *)
+                [[ -z "$spec" ]] || die "sync-openclaw accepts at most one alias or path"
+                spec="$1"
+                shift
+                ;;
+        esac
+    done
+
+    resolve_sync_target "$spec"
+    api_base="$(upstream_api_base)"
+    api_key="$(trim_whitespace "${OPENCLAW_API_KEY:-llama-local}")"
+    [[ -n "$api_key" ]] || api_key="llama-local"
+    context_window="${SYNC_TARGET_CONTEXT:-$LLAMA_SERVER_CONTEXT}"
+    [[ "$context_window" =~ ^[0-9]+$ ]] || context_window="$LLAMA_SERVER_CONTEXT"
+    profile_label="${profile:-main}"
+    config_file="$(resolve_openclaw_config_file "$profile")"
+    [[ -f "$config_file" ]] && config_exists_before="yes"
+
+    require_python3
+    workspace="$(python3 "$APP_ROOT/scripts/integration_sync.py" openclaw \
+        --config-file "$config_file" \
+        --model-id "$SYNC_TARGET_MODEL_ID" \
+        --display-name "$SYNC_TARGET_MODEL_NAME" \
+        --alias "$SYNC_TARGET_ALIAS" \
+        --api-base "$api_base" \
+        --api-key "$api_key" \
+        --context-window "$context_window" \
+        --max-tokens "$max_tokens")"
+
+    printf 'status: synced\n'
+    printf 'source: %s\n' "$SYNC_TARGET_SOURCE"
+    printf 'profile: %s\n' "$profile_label"
+    printf 'alias: %s\n' "$SYNC_TARGET_ALIAS"
+    printf 'model_path: %s\n' "$SYNC_TARGET_MODEL_PATH"
+    printf 'openclaw_model: llamacpp/%s\n' "$SYNC_TARGET_MODEL_ID"
+    printf 'api_base: %s\n' "$api_base"
+    printf 'workspace: %s\n' "$workspace"
+    printf 'config_file: %s\n' "$config_file"
+    printf 'config_exists_before: %s\n' "$config_exists_before"
+}
+
+sync_claude() {
+    [[ $# -le 1 ]] || die "sync-claude accepts at most one optional model id"
+    local model_id="$(trim_whitespace "${1:-}")"
+    local base_url
+    local auth_token
+    local api_key
+    local api_key_source="unchanged"
+    local settings_exists_before="no"
+
+    if [[ -z "$model_id" ]]; then
+        model_id="$(trim_whitespace "${CLAUDE_MODEL_ID:-}")"
+    fi
+    if [[ -z "$model_id" ]]; then
+        resolve_sync_target ""
+        model_id="$SYNC_TARGET_MODEL_ID"
+    fi
+
+    base_url="$(trim_whitespace "${CLAUDE_BASE_URL:-}")"
+    if [[ -z "$base_url" ]]; then
+        base_url="http://${CLAUDE_GATEWAY_HOST}:${CLAUDE_GATEWAY_PORT}"
+    fi
+    auth_token="$(trim_whitespace "${CLAUDE_AUTH_TOKEN:-${ANTHROPIC_AUTH_TOKEN:-}}")"
+    api_key="$(trim_whitespace "${CLAUDE_API_KEY:-${ANTHROPIC_API_KEY:-}}")"
+    if [[ -z "$api_key" && -n "$auth_token" ]]; then
+        api_key="$auth_token"
+        api_key_source="mirrored-from-auth-token"
+    elif [[ -n "$api_key" ]]; then
+        api_key_source="configured"
+    fi
+    [[ -f "$CLAUDE_SETTINGS_FILE" ]] && settings_exists_before="yes"
+
+    require_python3
+    python3 "$APP_ROOT/scripts/integration_sync.py" claude \
+        --settings-file "$CLAUDE_SETTINGS_FILE" \
+        --model-id "$model_id" \
+        --base-url "$base_url" \
+        --auth-token "$auth_token" \
+        --api-key "$api_key"
+
+    printf 'status: synced\n'
+    printf 'model_id: %s\n' "$model_id"
+    printf 'base_url: %s\n' "$base_url"
+    printf 'settings_file: %s\n' "$CLAUDE_SETTINGS_FILE"
+    printf 'settings_exists_before: %s\n' "$settings_exists_before"
+    printf 'claude_auth: %s\n' "$([[ -n "$auth_token" ]] && printf configured || printf unchanged)"
+    printf 'claude_api_key: %s\n' "$api_key_source"
+}
+
+claude_gateway_script() {
+    local script="$APP_ROOT/scripts/claude_gateway.py"
+    [[ -f "$script" ]] || die "Claude gateway script not found: $script"
+    printf '%s\n' "$script"
+}
+
+claude_gateway_model_id() {
+    local model_id
+    model_id="$(trim_whitespace "${CLAUDE_MODEL_ID:-}")"
+    if [[ -n "$model_id" ]]; then
+        printf '%s\n' "$model_id"
+        return 0
+    fi
+    resolve_sync_target ""
+    printf '%s\n' "$SYNC_TARGET_MODEL_ID"
+}
+
+claude_gateway_url() {
+    printf 'http://%s:%s\n' "$CLAUDE_GATEWAY_HOST" "$CLAUDE_GATEWAY_PORT"
+}
+
+claude_gateway_upstream_base() {
+    upstream_api_base
+}
+
+claude_gateway_pid() {
+    [[ -f "$CLAUDE_GATEWAY_PID_FILE" ]] || return 1
+    cat "$CLAUDE_GATEWAY_PID_FILE"
+}
+
+claude_gateway_running() {
+    local pid
+    pid="$(claude_gateway_pid 2>/dev/null || true)"
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+claude_gateway_wait_ready() {
+    local pid="$1"
+    local url="$(claude_gateway_url)/healthz"
+    local waited
+
+    for waited in $(seq 1 30); do
+        if curl -fsS "$url" >/dev/null 2>&1; then
+            return 0
+        fi
+        if ! kill -0 "$pid" 2>/dev/null; then
+            tail -n 60 "$CLAUDE_GATEWAY_LOG" >&2 || true
+            die "claude gateway exited during startup"
+        fi
+        sleep 1
+    done
+    tail -n 60 "$CLAUDE_GATEWAY_LOG" >&2 || true
+    die "timed out waiting for $(claude_gateway_url)/healthz"
+}
+
+claude_gateway_start() {
+    local script
+    local pid
+    local model_id=""
+    local upstream_base
+    local -a cmd=()
+    require_python3
+    script="$(claude_gateway_script)"
+    upstream_base="$(claude_gateway_upstream_base)"
+    model_id="$(claude_gateway_model_id 2>/dev/null || true)"
+    mkdir -p "$(dirname "$CLAUDE_GATEWAY_LOG")" "$(dirname "$CLAUDE_GATEWAY_PID_FILE")"
+
+    if claude_gateway_running; then
+        printf 'status: running\n'
+        printf 'pid: %s\n' "$(claude_gateway_pid)"
+        printf 'url: %s\n' "$(claude_gateway_url)"
+        return 0
+    fi
+
+    cmd=(python3 "$script" --host "$CLAUDE_GATEWAY_HOST" --port "$CLAUDE_GATEWAY_PORT" --upstream-base "$upstream_base")
+    if [[ -n "$model_id" ]]; then
+        cmd+=(--advertised-model-id "$model_id")
+    fi
+
+    setsid "${cmd[@]}" >"$CLAUDE_GATEWAY_LOG" 2>&1 < /dev/null &
+    pid=$!
+    disown "$pid" 2>/dev/null || true
+    printf '%s\n' "$pid" > "$CLAUDE_GATEWAY_PID_FILE"
+    claude_gateway_wait_ready "$pid"
+
+    printf 'status: running\n'
+    printf 'pid: %s\n' "$pid"
+    printf 'url: %s\n' "$(claude_gateway_url)"
+    printf 'upstream_base: %s\n' "$upstream_base"
+    printf 'model_id: %s\n' "$model_id"
+    printf 'log: %s\n' "$CLAUDE_GATEWAY_LOG"
+}
+
+claude_gateway_stop() {
+    local pid
+    pid="$(claude_gateway_pid 2>/dev/null || true)"
+    if [[ -z "$pid" ]]; then
+        rm -f "$CLAUDE_GATEWAY_PID_FILE"
+        printf 'status: stopped\n'
+        return 0
+    fi
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in $(seq 1 15); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            rm -f "$CLAUDE_GATEWAY_PID_FILE"
+            printf 'status: stopped\n'
+            return 0
+        fi
+        sleep 1
+    done
+    die "claude gateway pid $pid did not stop"
+}
+
+claude_gateway_restart() {
+    claude_gateway_stop >/dev/null 2>&1 || true
+    claude_gateway_start
+}
+
+claude_gateway_status() {
+    local running="no"
+    local pid=""
+    local model_id="$(claude_gateway_model_id 2>/dev/null || true)"
+    if claude_gateway_running; then
+        running="yes"
+        pid="$(claude_gateway_pid)"
+    fi
+    printf 'running: %s\n' "$running"
+    printf 'pid: %s\n' "$pid"
+    printf 'url: %s\n' "$(claude_gateway_url)"
+    printf 'upstream_base: %s\n' "$(claude_gateway_upstream_base)"
+    printf 'model_id: %s\n' "$model_id"
+    printf 'log: %s\n' "$CLAUDE_GATEWAY_LOG"
+}
+
+claude_gateway_logs() {
+    local lines="${1:-100}"
+    tail -n "$lines" "$CLAUDE_GATEWAY_LOG"
+}
+
+claude_gateway_command() {
+    local action="${1:-status}"
+    shift || true
+    case "$action" in
+        start) claude_gateway_start ;;
+        stop) claude_gateway_stop ;;
+        restart) claude_gateway_restart ;;
+        status) claude_gateway_status ;;
+        logs) claude_gateway_logs "$@" ;;
+        help|-h|--help)
+            printf '%s\n' 'Usage: llama-model claude-gateway start|stop|restart|status|logs'
+            ;;
+        *) die "unknown claude-gateway action: $action" ;;
+    esac
+}
+
 dashboard_systemctl_available() {
     if [[ -n "${LLAMA_MODEL_SYSTEMCTL_BIN:-}" ]]; then
         [[ -x "$LLAMA_MODEL_SYSTEMCTL_BIN" ]]
@@ -2732,6 +3117,22 @@ main() {
         restart)
             shift
             restart_model "$@"
+            ;;
+        sync-opencode)
+            shift
+            sync_opencode "$@"
+            ;;
+        sync-openclaw)
+            shift
+            sync_openclaw "$@"
+            ;;
+        sync-claude)
+            shift
+            sync_claude "$@"
+            ;;
+        claude-gateway)
+            shift
+            claude_gateway_command "$@"
             ;;
         stop)
             shift

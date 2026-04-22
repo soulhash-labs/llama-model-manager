@@ -33,6 +33,15 @@ KNOWN_DEFAULT_KEYS = [
     "LLAMA_SERVER_LOG",
     "LLAMA_SERVER_WAIT_SECONDS",
     "LLAMA_SERVER_EXTRA_ARGS",
+    "OPENCLAW_PROFILE",
+    "OPENCLAW_API_KEY",
+    "CLAUDE_GATEWAY_HOST",
+    "CLAUDE_GATEWAY_PORT",
+    "CLAUDE_GATEWAY_LOG",
+    "CLAUDE_BASE_URL",
+    "CLAUDE_MODEL_ID",
+    "CLAUDE_AUTH_TOKEN",
+    "CLAUDE_API_KEY",
 ]
 
 DEMO_STATE = {
@@ -181,10 +190,15 @@ class Manager:
         self.app_root = app_root
         self.demo = demo
         self.home = Path.home()
-        self.config_dir = Path(os.environ.get("XDG_CONFIG_HOME", self.home / ".config")) / "llama-server"
+        self.xdg_config_home = Path(os.environ.get("XDG_CONFIG_HOME", self.home / ".config"))
+        self.xdg_state_home = Path(os.environ.get("XDG_STATE_HOME", self.home / ".local" / "state"))
+        self.config_dir = self.xdg_config_home / "llama-server"
         self.defaults_file = Path(os.environ.get("LLAMA_DEFAULTS_FILE", self.config_dir / "defaults.env"))
         self.models_file = Path(os.environ.get("LLAMA_MODELS_FILE", self.config_dir / "models.tsv"))
         self.discovery_root = os.environ.get("LLAMA_MODEL_DISCOVERY_ROOT", str(self.home / "models"))
+        self.opencode_config_file = Path(os.environ.get("OPENCODE_CONFIG_FILE", self.xdg_config_home / "opencode" / "opencode.json"))
+        self.opencode_model_state_file = Path(os.environ.get("OPENCODE_MODEL_STATE_FILE", self.xdg_state_home / "opencode" / "model.json"))
+        self.claude_settings_file = Path(os.environ.get("CLAUDE_SETTINGS_FILE", self.home / ".claude" / "settings.json"))
         self.cli_bin = self._resolve_cli_bin()
 
     def _resolve_cli_bin(self) -> Path:
@@ -501,7 +515,54 @@ class Manager:
             "LLAMA_SERVER_PARALLEL": values.get("LLAMA_SERVER_PARALLEL", ""),
             "LLAMA_SERVER_LOG": values.get("LLAMA_SERVER_LOG", str(self.home / "models" / "llama-server.log")),
             "LLAMA_SERVER_EXTRA_ARGS": values.get("LLAMA_SERVER_EXTRA_ARGS", ""),
+            "OPENCLAW_PROFILE": values.get("OPENCLAW_PROFILE", ""),
+            "OPENCLAW_API_KEY": values.get("OPENCLAW_API_KEY", "llama-local"),
+            "CLAUDE_GATEWAY_HOST": values.get("CLAUDE_GATEWAY_HOST", "127.0.0.1"),
+            "CLAUDE_GATEWAY_PORT": values.get("CLAUDE_GATEWAY_PORT", "4000"),
+            "CLAUDE_GATEWAY_LOG": values.get("CLAUDE_GATEWAY_LOG", str(self.home / "models" / "claude-gateway.log")),
+            "CLAUDE_BASE_URL": values.get("CLAUDE_BASE_URL", ""),
+            "CLAUDE_MODEL_ID": values.get("CLAUDE_MODEL_ID", ""),
+            "CLAUDE_AUTH_TOKEN": values.get("CLAUDE_AUTH_TOKEN", ""),
+            "CLAUDE_API_KEY": values.get("CLAUDE_API_KEY", ""),
         }
+
+    def integration_state(self, defaults: dict[str, str], current: dict[str, str]) -> dict[str, Any]:
+        current_model_name = Path(current.get("model", "")).name if current.get("model") else ""
+        current_alias = current.get("alias", "") if current.get("alias") and current.get("alias") != "custom" else ""
+        openclaw_profile = defaults.get("OPENCLAW_PROFILE", "").strip() or "main"
+        if openclaw_profile == "main":
+            openclaw_config_file = self.home / ".openclaw" / "openclaw.json"
+        else:
+            openclaw_config_file = self.home / f".openclaw-{openclaw_profile}" / "openclaw.json"
+        claude_gateway_status = self.parse_key_values(self.run_cli("claude-gateway", "status")) if not self.demo else {}
+        claude_model_id = defaults.get("CLAUDE_MODEL_ID", "").strip() or current_alias
+        claude_base_url = defaults.get("CLAUDE_BASE_URL", "").strip() or f"http://{defaults.get('CLAUDE_GATEWAY_HOST', '127.0.0.1')}:{defaults.get('CLAUDE_GATEWAY_PORT', '4000')}"
+        return {
+            "opencode_model": f"llamacpp/{current_model_name}" if current_model_name else "",
+            "opencode_config_file": str(self.opencode_config_file),
+            "opencode_config_exists": self.opencode_config_file.exists(),
+            "opencode_state_file": str(self.opencode_model_state_file),
+            "opencode_state_exists": self.opencode_model_state_file.exists(),
+            "openclaw_model": f"llamacpp/{current_alias}" if current_alias else "",
+            "openclaw_profile": openclaw_profile,
+            "openclaw_sync_note": "direct llama.cpp provider",
+            "openclaw_config_file": str(openclaw_config_file),
+            "openclaw_config_exists": openclaw_config_file.exists(),
+            "claude_settings_file": str(self.claude_settings_file),
+            "claude_settings_exists": self.claude_settings_file.exists(),
+            "claude_model_id": claude_model_id,
+            "claude_base_url": claude_base_url,
+            "claude_gateway": claude_gateway_status,
+        }
+
+    def sync_opencode(self) -> dict[str, str]:
+        return self.parse_key_values(self.run_cli("sync-opencode"))
+
+    def sync_openclaw(self) -> dict[str, str]:
+        return self.parse_key_values(self.run_cli("sync-openclaw"))
+
+    def sync_claude(self) -> dict[str, str]:
+        return self.parse_key_values(self.run_cli("sync-claude"))
 
     def dashboard_service_status(self) -> dict[str, str]:
         if self.demo:
@@ -542,11 +603,26 @@ class Manager:
                 "registry_exists": True,
                 "defaults_file": str(self.defaults_file),
                 "defaults_exists": True,
+                "opencode_config_file": str(self.opencode_config_file),
+                "opencode_config_exists": True,
+                "opencode_state_file": str(self.opencode_model_state_file),
+                "opencode_state_exists": True,
+                "openclaw_model": "llamacpp/qwen36-35b-q2",
+                "openclaw_profile": "main",
+                "openclaw_sync_note": "direct llama.cpp provider",
+                "openclaw_config_file": str(self.home / ".openclaw" / "openclaw.json"),
+                "openclaw_config_exists": True,
+                "claude_settings_file": str(self.claude_settings_file),
+                "claude_settings_exists": True,
+                "claude_model_id": "qwen35-9b-q8",
+                "claude_base_url": "http://127.0.0.1:4000",
+                "claude_gateway": {"running": "yes", "url": "http://127.0.0.1:4000", "model_id": "qwen35-9b-q8", "log": "/var/log/claude-gateway.log"},
             }
         current = self.parse_key_values(self.run_cli("current"))
         doctor = self.parse_key_values(self.run_cli("doctor"))
         mode = self.parse_key_values(self.run_cli("mode"))
         defaults = self.defaults()
+        integration = self.integration_state(defaults, current)
         api_base = f"http://{defaults['LLAMA_SERVER_HOST']}:{defaults['LLAMA_SERVER_PORT']}/v1"
         current_model_name = Path(current["model"]).name if current.get("model") else "<model>"
 
@@ -564,9 +640,9 @@ class Manager:
             "mode": mode,
             "models": self.read_models(),
             "dashboard_service": self.dashboard_service_status(),
+            **integration,
             "discovery_root": self.discovery_root,
             "api_base": api_base,
-            "opencode_model": f"llamacpp/{current_model_name}",
             "registry_file": str(self.models_file),
             "registry_exists": self.models_file.exists(),
             "defaults_file": str(self.defaults_file),
@@ -596,6 +672,12 @@ class AppHandler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query)
             lines = int(query.get("lines", ["100"])[0])
             logs = self.manager.run_cli("dashboard-service", "logs", str(lines))
+            self.send_json({"lines": lines, "content": logs})
+            return
+        if parsed.path == "/api/claude-gateway/logs":
+            query = urllib.parse.parse_qs(parsed.query)
+            lines = int(query.get("lines", ["100"])[0])
+            logs = self.manager.run_cli("claude-gateway", "logs", str(lines))
             self.send_json({"lines": lines, "content": logs})
             return
         self.serve_static(parsed.path)
@@ -647,6 +729,23 @@ class AppHandler(BaseHTTPRequestHandler):
                 action = str(payload.get("action", "status")).strip()
                 self.manager.run_cli("dashboard-service", action)
                 self.send_json({"ok": True, "service": self.manager.dashboard_service_status()})
+                return
+            if parsed.path == "/api/opencode/sync":
+                result = self.manager.sync_opencode()
+                self.send_json({"ok": True, "result": result})
+                return
+            if parsed.path == "/api/openclaw/sync":
+                result = self.manager.sync_openclaw()
+                self.send_json({"ok": True, "result": result})
+                return
+            if parsed.path == "/api/claude/sync":
+                result = self.manager.sync_claude()
+                self.send_json({"ok": True, "result": result})
+                return
+            if parsed.path == "/api/claude-gateway":
+                action = str(payload.get("action", "status")).strip()
+                result = self.parse_key_values(self.manager.run_cli("claude-gateway", action))
+                self.send_json({"ok": True, "result": result})
                 return
             self.send_error_json(HTTPStatus.NOT_FOUND, "Unknown API route")
         except ValueError as exc:

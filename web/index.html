@@ -413,6 +413,42 @@
               Extra Args
               <input name="LLAMA_SERVER_EXTRA_ARGS" id="default-extra">
             </label>
+            <label title="Optional OpenClaw profile name. Leave blank to target the main profile.">
+              OpenClaw Profile
+              <input name="OPENCLAW_PROFILE" id="default-openclaw-profile" placeholder="blank for main">
+            </label>
+            <label title="API key written into the OpenClaw llamacpp provider block.">
+              OpenClaw API Key
+              <input name="OPENCLAW_API_KEY" id="default-openclaw-api-key" placeholder="llama-local">
+            </label>
+            <label title="Host used by the local Claude gateway service.">
+              Claude Gateway Host
+              <input name="CLAUDE_GATEWAY_HOST" id="default-claude-gateway-host" placeholder="127.0.0.1">
+            </label>
+            <label title="Port used by the local Claude gateway service.">
+              Claude Gateway Port
+              <input name="CLAUDE_GATEWAY_PORT" id="default-claude-gateway-port" placeholder="4000">
+            </label>
+            <label class="span-2" title="Log path for the local Claude gateway service.">
+              Claude Gateway Log
+              <input name="CLAUDE_GATEWAY_LOG" id="default-claude-gateway-log" placeholder="$HOME/models/claude-gateway.log">
+            </label>
+            <label class="span-2" title="Base URL written into Claude Code settings. Leave blank to follow the local gateway host and port.">
+              Claude Base URL
+              <input name="CLAUDE_BASE_URL" id="default-claude-base-url" placeholder="http://127.0.0.1:4000">
+            </label>
+            <label title="Claude model id to advertise and sync. Leave blank to follow the active alias.">
+              Claude Model ID
+              <input name="CLAUDE_MODEL_ID" id="default-claude-model-id" placeholder="qwen35-9b-q8">
+            </label>
+            <label title="Optional auth token passed through to Claude Code local settings.">
+              Claude Auth Token
+              <input name="CLAUDE_AUTH_TOKEN" id="default-claude-auth-token" placeholder="local-dev-token">
+            </label>
+            <label title="Optional API key passed through to Claude Code local settings.">
+              Claude API Key
+              <input name="CLAUDE_API_KEY" id="default-claude-api-key" placeholder="local-dev-token">
+            </label>
             <div class="form-actions span-2">
               <button
                 type="submit"
@@ -435,12 +471,45 @@
             <article class="integration-card">
               <span class="metric-label">API Base</span>
               <code id="api-base">-</code>
+              <span id="integration-endpoint-note" class="metric-note">OpenAI-compatible local endpoint.</span>
             </article>
             <article class="integration-card">
-              <span class="metric-label">opencode Model</span>
+              <span class="metric-label">opencode</span>
               <code id="opencode-model">-</code>
+              <span id="opencode-path" class="metric-note">-</span>
+              <div class="inline-actions integration-actions">
+                <button id="sync-opencode" class="button button-small button-primary" title="Sync opencode to the currently served llama.cpp model.">Sync opencode</button>
+              </div>
+            </article>
+            <article class="integration-card">
+              <span class="metric-label">OpenClaw</span>
+              <code id="openclaw-model">-</code>
+              <span id="openclaw-path" class="metric-note">-</span>
+              <div class="inline-actions integration-actions">
+                <button id="sync-openclaw" class="button button-small button-primary" title="Sync OpenClaw to the currently served llama.cpp model.">Sync OpenClaw</button>
+              </div>
+            </article>
+            <article class="integration-card">
+              <span class="metric-label">Claude Code</span>
+              <code id="claude-model">-</code>
+              <span id="claude-path" class="metric-note">-</span>
+              <div class="inline-actions integration-actions">
+                <button id="sync-claude" class="button button-small button-primary" title="Sync Claude Code settings to the local Claude gateway.">Sync Claude</button>
+              </div>
+            </article>
+            <article class="integration-card">
+              <span class="metric-label">Claude Gateway</span>
+              <code id="claude-gateway-status">-</code>
+              <span id="claude-gateway-url" class="metric-note">-</span>
+              <div class="inline-actions integration-actions">
+                <button id="claude-gateway-start" class="button button-small button-primary" title="Start the local Anthropic-compatible Claude gateway.">Start</button>
+                <button id="claude-gateway-restart" class="button button-small" title="Restart the Claude gateway.">Restart</button>
+                <button id="claude-gateway-stop" class="button button-small button-danger" title="Stop the Claude gateway.">Stop</button>
+                <button id="claude-gateway-logs" class="button button-small" title="Show recent Claude gateway logs.">Logs</button>
+              </div>
             </article>
           </div>
+          <pre id="claude-gateway-logs-output" class="log-box hidden"></pre>
         </section>
       </main>
 

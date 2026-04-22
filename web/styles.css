@@ -858,6 +858,11 @@ input:focus {
   overflow-wrap: anywhere;
 }
 
+.integration-actions {
+  margin-top: 0.75rem;
+  flex-wrap: wrap;
+}
+
 .log-box {
   margin: 1rem 0 0;
   padding: 1rem;
