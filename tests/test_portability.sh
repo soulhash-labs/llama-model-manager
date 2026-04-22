@@ -166,11 +166,11 @@ test_docs_no_longer_imply_universal_gpu_binary() {
 
     assert_contains "$readme" "backend-, platform-, and architecture-specific"
     assert_contains "$readme" "shows the install commands it plans to run"
-    assert_contains "$readme" "llama-model sync-opencode"
+    assert_contains "$readme" "llama-model sync-opencode --preset long-run"
     assert_contains "$readme" "llama-model sync-openclaw"
     assert_contains "$readme" "llama-model sync-claude"
     assert_contains "$help" "llama-model build-runtime --backend auto"
-    assert_contains "$help" "llama-model sync-opencode"
+    assert_contains "$help" "llama-model sync-opencode --preset balanced|long-run"
     assert_contains "$help" "llama-model sync-openclaw"
     assert_contains "$help" "llama-model sync-claude"
     assert_contains "$help" "llama-model claude-gateway start"
@@ -485,17 +485,47 @@ EOF
 }
 EOF
 
-    output="$(run_cli "$tmp" sync-opencode qwen35-9b-q8)"
+    output="$(run_cli "$tmp" sync-opencode --preset balanced qwen35-9b-q8)"
     assert_contains "$output" "status: synced"
+    assert_contains "$output" "preset: balanced"
     assert_contains "$output" "opencode_model: llamacpp/Qwen3.5-9B-Q8_0.gguf"
+    assert_contains "$output" "timeout_ms: 1800000"
+    assert_contains "$output" "chunk_timeout_ms: 60000"
 
     config="$(cat "$tmp/config/opencode/opencode.json")"
     state_json="$(cat "$tmp/state/opencode/model.json")"
     assert_contains "$config" '"model": "llamacpp/Qwen3.5-9B-Q8_0.gguf"'
     assert_contains "$config" '"baseURL": "http://127.0.0.1:19081/v1"'
+    assert_contains "$config" '"timeout": 1800000'
+    assert_contains "$config" '"chunkTimeout": 60000'
     assert_contains "$config" '"other"'
     assert_contains "$state_json" '"llamacpp/Qwen3.5-9B-Q8_0.gguf"'
     assert_contains "$state_json" '"favorite"'
+}
+
+test_sync_opencode_long_run_preset() {
+    local tmp
+    local output
+    local config
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    mkdir -p "$tmp/models" "$tmp/config/opencode" "$tmp/state/opencode"
+    : >"$tmp/models/Qwen3.5-9B-Q8_0.gguf"
+    cat >"$tmp/config/llama-server/models.tsv" <<EOF
+# alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes
+qwen35-9b-q8	$tmp/models/Qwen3.5-9B-Q8_0.gguf		65536
+EOF
+
+    output="$(run_cli "$tmp" sync-opencode --preset long-run qwen35-9b-q8)"
+    assert_contains "$output" "preset: long-run"
+    assert_contains "$output" "timeout_ms: 7200000"
+    assert_contains "$output" "chunk_timeout_ms: 300000"
+    assert_contains "$output" "runtime_note: single-client recommended for long local reasoning sessions"
+
+    config="$(cat "$tmp/config/opencode/opencode.json")"
+    assert_contains "$config" '"timeout": 7200000'
+    assert_contains "$config" '"chunkTimeout": 300000'
 }
 
 test_sync_openclaw_updates_profile_config() {

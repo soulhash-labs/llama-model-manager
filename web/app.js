@@ -396,6 +396,12 @@ function renderStatus(data) {
     data.opencode_config_exists ? "config present" : "config missing",
     displayPath(data.opencode_config_file || ""),
   ]) || "-");
+  setText("#opencode-state", joinNotes([
+    data.opencode_preset ? `${data.opencode_preset} preset` : "not yet synced",
+    data.opencode_timeout_ms ? `timeout ${Math.round(Number(data.opencode_timeout_ms) / 1000)}s` : "",
+    data.opencode_chunk_timeout_ms ? `chunk ${Math.round(Number(data.opencode_chunk_timeout_ms) / 1000)}s` : "",
+    data.opencode_note || "",
+  ]) || "-");
   setText("#openclaw-model", data.openclaw_model || "-");
   setText("#openclaw-path", joinNotes([
     `profile ${data.openclaw_profile || "main"}`,
@@ -677,9 +683,9 @@ async function loadDashboardServiceLogs(button) {
   });
 }
 
-async function performIntegrationSync(path, button, pendingLabel, successMessage) {
+async function performIntegrationSync(path, button, pendingLabel, successMessage, payload = {}) {
   await withButtonBusy(button, pendingLabel, async () => {
-    await api(path, { method: "POST", body: JSON.stringify({}) });
+    await api(path, { method: "POST", body: JSON.stringify(payload) });
     await refreshState();
   }, {
     successMessage,
@@ -932,7 +938,8 @@ function bindEvents() {
     }).catch(showError);
   });
   $("#dashboard-service-logs").addEventListener("click", (event) => loadDashboardServiceLogs(event.currentTarget).catch(showError));
-  $("#sync-opencode").addEventListener("click", (event) => performIntegrationSync("/api/opencode/sync", event.currentTarget, "Syncing...", "opencode synced.").catch(showError));
+  $("#sync-opencode-balanced").addEventListener("click", (event) => performIntegrationSync("/api/opencode/sync", event.currentTarget, "Syncing...", "opencode synced with the balanced preset.", { preset: "balanced" }).catch(showError));
+  $("#sync-opencode-long-run").addEventListener("click", (event) => performIntegrationSync("/api/opencode/sync", event.currentTarget, "Syncing...", "opencode synced with the long-run preset.", { preset: "long-run" }).catch(showError));
   $("#sync-openclaw").addEventListener("click", (event) => performIntegrationSync("/api/openclaw/sync", event.currentTarget, "Syncing...", "OpenClaw synced.").catch(showError));
   $("#sync-claude").addEventListener("click", (event) => performIntegrationSync("/api/claude/sync", event.currentTarget, "Syncing...", "Claude Code settings synced.").catch(showError));
   $("#claude-gateway-start").addEventListener("click", (event) => performClaudeGatewayAction("start", event.currentTarget, { pendingLabel: "Starting...", successMessage: "Claude gateway started." }).catch(showError));

@@ -84,7 +84,7 @@ Optional background service:
 
 Client integrations:
   opencode keeps its own config under ~/.config/opencode/opencode.json and state under ~/.local/state/opencode/model.json.
-  Run `llama-model sync-opencode` to align it with the active llama.cpp runtime.
+  Run `llama-model sync-opencode --preset balanced|long-run` to align it with the active llama.cpp runtime.
 
   OpenClaw keeps its provider config under ~/.openclaw/openclaw.json or ~/.openclaw-<profile>/openclaw.json.
   Run `llama-model sync-openclaw` to point it at the live local endpoint.

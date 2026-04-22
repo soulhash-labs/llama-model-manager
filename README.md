@@ -154,7 +154,7 @@ Current public integration support:
 
 - `opencode`
   - direct sync to the live local OpenAI-compatible `llama.cpp` endpoint
-  - CLI: `llama-model sync-opencode`
+  - CLI: `llama-model sync-opencode --preset balanced|long-run`
   - dashboard action: `Sync opencode`
 - `OpenClaw`
   - direct sync to the live local OpenAI-compatible `llama.cpp` endpoint
@@ -199,7 +199,8 @@ llama-model add gemma4-e4b-q8 /absolute/path/to/Gemma-4-E4B-Q8_K_P.gguf --mmproj
 llama-model discover ~/models
 llama-model build-runtime --backend auto
 llama-model switch qwen35-9b-q8
-llama-model sync-opencode
+llama-model sync-opencode --preset balanced
+llama-model sync-opencode --preset long-run
 llama-model sync-openclaw --profile lmm-eval qwen35-9b-q8
 llama-model sync-claude qwen35-9b-q8
 llama-model claude-gateway start

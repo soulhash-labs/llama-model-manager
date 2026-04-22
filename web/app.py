@@ -240,6 +240,15 @@ class Manager:
             data[key.strip()] = value.strip()
         return data
 
+    def load_json_file(self, path: Path) -> dict[str, Any]:
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
     def parse_env_file(self, path: Path) -> dict[str, str]:
         data: dict[str, str] = {}
         if not path.exists():
@@ -528,9 +537,29 @@ class Manager:
             "CLAUDE_API_KEY": values.get("CLAUDE_API_KEY", ""),
         }
 
-    def integration_state(self, defaults: dict[str, str], current: dict[str, str]) -> dict[str, Any]:
+    def integration_state(self, defaults: dict[str, str], current: dict[str, str], mode: dict[str, str]) -> dict[str, Any]:
         current_model_name = Path(current.get("model", "")).name if current.get("model") else ""
         current_alias = current.get("alias", "") if current.get("alias") and current.get("alias") != "custom" else ""
+        opencode_config = self.load_json_file(self.opencode_config_file)
+        opencode_provider = opencode_config.get("provider", {}).get("llamacpp", {}) if isinstance(opencode_config.get("provider"), dict) else {}
+        opencode_options = opencode_provider.get("options", {}) if isinstance(opencode_provider.get("options"), dict) else {}
+        opencode_timeout = str(opencode_options.get("timeout", "")) if opencode_options.get("timeout") is not None else ""
+        opencode_chunk_timeout = str(opencode_options.get("chunkTimeout", "")) if opencode_options.get("chunkTimeout") is not None else ""
+        if opencode_timeout == "7200000" and opencode_chunk_timeout == "300000":
+            opencode_preset = "long-run"
+        elif opencode_timeout == "1800000" and opencode_chunk_timeout == "60000":
+            opencode_preset = "balanced"
+        elif opencode_timeout or opencode_chunk_timeout:
+            opencode_preset = "custom"
+        else:
+            opencode_preset = ""
+        opencode_note = ""
+        if opencode_preset == "long-run":
+            configured_mode = mode.get("configured_mode", "") if isinstance(mode, dict) else ""
+            if configured_mode != "single-client":
+                opencode_note = "single-client recommended for long local reasoning sessions"
+            else:
+                opencode_note = "long-run preset active"
         openclaw_profile = defaults.get("OPENCLAW_PROFILE", "").strip() or "main"
         if openclaw_profile == "main":
             openclaw_config_file = self.home / ".openclaw" / "openclaw.json"
@@ -545,6 +574,10 @@ class Manager:
             "opencode_config_exists": self.opencode_config_file.exists(),
             "opencode_state_file": str(self.opencode_model_state_file),
             "opencode_state_exists": self.opencode_model_state_file.exists(),
+            "opencode_timeout_ms": opencode_timeout,
+            "opencode_chunk_timeout_ms": opencode_chunk_timeout,
+            "opencode_preset": opencode_preset,
+            "opencode_note": opencode_note,
             "openclaw_model": f"llamacpp/{current_alias}" if current_alias else "",
             "openclaw_profile": openclaw_profile,
             "openclaw_sync_note": "direct llama.cpp provider",
@@ -557,8 +590,8 @@ class Manager:
             "claude_gateway": claude_gateway_status,
         }
 
-    def sync_opencode(self) -> dict[str, str]:
-        return self.parse_key_values(self.run_cli("sync-opencode"))
+    def sync_opencode(self, preset: str = "balanced") -> dict[str, str]:
+        return self.parse_key_values(self.run_cli("sync-opencode", "--preset", preset))
 
     def sync_openclaw(self) -> dict[str, str]:
         return self.parse_key_values(self.run_cli("sync-openclaw"))
@@ -624,7 +657,7 @@ class Manager:
         doctor = self.parse_key_values(self.run_cli("doctor"))
         mode = self.parse_key_values(self.run_cli("mode"))
         defaults = self.defaults()
-        integration = self.integration_state(defaults, current)
+        integration = self.integration_state(defaults, current, mode)
         api_base = f"http://{defaults['LLAMA_SERVER_HOST']}:{defaults['LLAMA_SERVER_PORT']}/v1"
         current_model_name = Path(current["model"]).name if current.get("model") else "<model>"
 
@@ -733,7 +766,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "service": self.manager.dashboard_service_status()})
                 return
             if parsed.path == "/api/opencode/sync":
-                result = self.manager.sync_opencode()
+                preset = str(payload.get("preset", "balanced")).strip() or "balanced"
+                result = self.manager.sync_opencode(preset)
                 self.send_json({"ok": True, "result": result})
                 return
             if parsed.path == "/api/openclaw/sync":

@@ -100,7 +100,7 @@ Usage:
   llama-model set-mode <single|multi> [--restart]
   llama-model switch <alias|/path/to/model.gguf> [extra llama-server args...]
   llama-model restart [alias|/path/to/model.gguf] [extra llama-server args...]
-  llama-model sync-opencode [alias|/path/to/model.gguf]
+  llama-model sync-opencode [--preset balanced|long-run] [alias|/path/to/model.gguf]
   llama-model sync-openclaw [--profile NAME] [alias|/path/to/model.gguf]
   llama-model sync-claude [model-id]
   llama-model claude-gateway start|stop|restart|status|logs
@@ -117,7 +117,8 @@ Examples:
   llama-model mode
   llama-model set-mode single --restart
   llama-model switch qwen35-9b-q8
-  llama-model sync-opencode
+  llama-model sync-opencode --preset balanced
+  llama-model sync-opencode --preset long-run
   llama-model sync-openclaw --profile lmm-eval qwen35-9b-q8
   llama-model sync-claude qwen35-9b-q8
   llama-model claude-gateway start
@@ -2525,31 +2526,75 @@ resolve_openclaw_config_file() {
     fi
 }
 
+opencode_preset_values() {
+    local preset="${1:-balanced}"
+    case "$preset" in
+        balanced)
+            printf '1800000\t60000\n'
+            ;;
+        long-run|longrun)
+            printf '7200000\t300000\n'
+            ;;
+        *)
+            die "unsupported opencode preset: $preset (expected balanced or long-run)"
+            ;;
+    esac
+}
+
 sync_opencode() {
-    [[ $# -le 1 ]] || die "sync-opencode accepts at most one optional alias or path"
-    local spec="${1:-}"
+    local preset="balanced"
+    local spec=""
     local config_exists_before="no"
     local state_exists_before="no"
     local api_base
+    local timeout_ms
+    local chunk_timeout_ms
+    local runtime_note=""
+
+    while (($#)); do
+        case "$1" in
+            --preset)
+                [[ $# -ge 2 ]] || die "--preset requires balanced or long-run"
+                preset="$2"
+                shift 2
+                ;;
+            *)
+                [[ -z "$spec" ]] || die "sync-opencode accepts at most one optional alias or path"
+                spec="$1"
+                shift
+                ;;
+        esac
+    done
+
+    IFS=$'\t' read -r timeout_ms chunk_timeout_ms <<<"$(opencode_preset_values "$preset")"
 
     resolve_sync_target "$spec"
     api_base="$(upstream_api_base)"
     [[ -f "$OPENCODE_CONFIG_FILE" ]] && config_exists_before="yes"
     [[ -f "$OPENCODE_MODEL_STATE_FILE" ]] && state_exists_before="yes"
+    if [[ "$preset" == "long-run" && "$(configured_mode_name)" != "single-client" ]]; then
+        runtime_note="single-client recommended for long local reasoning sessions"
+    fi
     require_python3
     python3 "$APP_ROOT/scripts/integration_sync.py" opencode \
         --config-file "$OPENCODE_CONFIG_FILE" \
         --state-file "$OPENCODE_MODEL_STATE_FILE" \
         --model-name "$SYNC_TARGET_MODEL_NAME" \
         --display-name "$SYNC_TARGET_MODEL_NAME" \
-        --api-base "$api_base"
+        --api-base "$api_base" \
+        --timeout-ms "$timeout_ms" \
+        --chunk-timeout-ms "$chunk_timeout_ms"
 
     printf 'status: synced\n'
+    printf 'preset: %s\n' "$preset"
     printf 'source: %s\n' "$SYNC_TARGET_SOURCE"
     printf 'alias: %s\n' "$SYNC_TARGET_ALIAS"
     printf 'model_path: %s\n' "$SYNC_TARGET_MODEL_PATH"
     printf 'opencode_model: llamacpp/%s\n' "$SYNC_TARGET_MODEL_NAME"
     printf 'api_base: %s\n' "$api_base"
+    printf 'timeout_ms: %s\n' "$timeout_ms"
+    printf 'chunk_timeout_ms: %s\n' "$chunk_timeout_ms"
+    printf 'runtime_note: %s\n' "$runtime_note"
     printf 'config_file: %s\n' "$OPENCODE_CONFIG_FILE"
     printf 'config_exists_before: %s\n' "$config_exists_before"
     printf 'state_file: %s\n' "$OPENCODE_MODEL_STATE_FILE"

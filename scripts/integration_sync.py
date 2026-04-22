@@ -47,8 +47,8 @@ def sync_opencode(args: argparse.Namespace) -> None:
     if not isinstance(options, dict):
         options = {}
     options["baseURL"] = api_base
-    options.setdefault("timeout", 600000)
-    options.setdefault("chunkTimeout", 60000)
+    options["timeout"] = int(args.timeout_ms)
+    options["chunkTimeout"] = int(args.chunk_timeout_ms)
     llamacpp["options"] = options
     models = llamacpp.get("models")
     if not isinstance(models, dict):
@@ -189,6 +189,8 @@ def main() -> int:
     op.add_argument("--model-name", required=True)
     op.add_argument("--display-name", required=True)
     op.add_argument("--api-base", required=True)
+    op.add_argument("--timeout-ms", required=True, type=int)
+    op.add_argument("--chunk-timeout-ms", required=True, type=int)
     op.set_defaults(func=sync_opencode)
 
     oc = sub.add_parser("openclaw")
