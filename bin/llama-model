@@ -2693,10 +2693,60 @@ claude_gateway_pid() {
     cat "$CLAUDE_GATEWAY_PID_FILE"
 }
 
-claude_gateway_running() {
-    local pid
+claude_gateway_listener_pid() {
+    local pid=""
+
+    if command_available lsof; then
+        pid="$(lsof -tiTCP:"$CLAUDE_GATEWAY_PORT" -sTCP:LISTEN 2>/dev/null | head -n 1 || true)"
+        [[ -n "$pid" ]] && { printf '%s\n' "$pid"; return 0; }
+    fi
+
+    if command_available ss; then
+        pid="$(ss -ltnp "( sport = :$CLAUDE_GATEWAY_PORT )" 2>/dev/null | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | head -n 1 || true)"
+        [[ -n "$pid" ]] && { printf '%s\n' "$pid"; return 0; }
+    fi
+
+    pid="$(pgrep -af 'claude_gateway.py' 2>/dev/null | awk -v port="$CLAUDE_GATEWAY_PORT" '$0 ~ ("--port " port "([[:space:]]|$)") { print $1; exit }' || true)"
+    [[ -n "$pid" ]] && printf '%s\n' "$pid"
+}
+
+pid_matches_claude_gateway() {
+    local pid="$1"
+    local cmdline
+
+    cmdline="$(pid_command_line "$pid")"
+    [[ -n "$cmdline" ]] || return 1
+    [[ "$cmdline" == *claude_gateway.py* ]] || return 1
+    [[ "$cmdline" == *"--port ${CLAUDE_GATEWAY_PORT}"* ]] || return 1
+    return 0
+}
+
+claude_gateway_health_ok() {
+    curl -fsS "$(claude_gateway_url)/healthz" >/dev/null 2>&1
+}
+
+claude_gateway_detect_pid() {
+    local pid=""
+
     pid="$(claude_gateway_pid 2>/dev/null || true)"
-    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && pid_matches_claude_gateway "$pid"; then
+        printf '%s\n' "$pid"
+        return 0
+    fi
+
+    pid="$(claude_gateway_listener_pid 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && pid_matches_claude_gateway "$pid"; then
+        printf '%s\n' "$pid"
+        return 0
+    fi
+
+    return 1
+}
+
+claude_gateway_running() {
+    local pid=""
+    pid="$(claude_gateway_detect_pid 2>/dev/null || true)"
+    [[ -n "$pid" ]] && claude_gateway_health_ok
 }
 
 claude_gateway_wait_ready() {
@@ -2730,11 +2780,21 @@ claude_gateway_start() {
     model_id="$(claude_gateway_model_id 2>/dev/null || true)"
     mkdir -p "$(dirname "$CLAUDE_GATEWAY_LOG")" "$(dirname "$CLAUDE_GATEWAY_PID_FILE")"
 
-    if claude_gateway_running; then
+    pid="$(claude_gateway_detect_pid 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && claude_gateway_health_ok; then
+        printf '%s\n' "$pid" > "$CLAUDE_GATEWAY_PID_FILE"
         printf 'status: running\n'
-        printf 'pid: %s\n' "$(claude_gateway_pid)"
+        printf 'pid: %s\n' "$pid"
         printf 'url: %s\n' "$(claude_gateway_url)"
+        printf 'upstream_base: %s\n' "$upstream_base"
+        printf 'model_id: %s\n' "$model_id"
+        printf 'log: %s\n' "$CLAUDE_GATEWAY_LOG"
         return 0
+    fi
+
+    listener_pid="$(claude_gateway_listener_pid 2>/dev/null || true)"
+    if [[ -n "$listener_pid" ]] && ! pid_matches_claude_gateway "$listener_pid"; then
+        die "port ${CLAUDE_GATEWAY_PORT} is already occupied by another process"
     fi
 
     cmd=(python3 "$script" --host "$CLAUDE_GATEWAY_HOST" --port "$CLAUDE_GATEWAY_PORT" --upstream-base "$upstream_base")
@@ -2758,7 +2818,7 @@ claude_gateway_start() {
 
 claude_gateway_stop() {
     local pid
-    pid="$(claude_gateway_pid 2>/dev/null || true)"
+    pid="$(claude_gateway_detect_pid 2>/dev/null || true)"
     if [[ -z "$pid" ]]; then
         rm -f "$CLAUDE_GATEWAY_PID_FILE"
         printf 'status: stopped\n'
@@ -2785,9 +2845,10 @@ claude_gateway_status() {
     local running="no"
     local pid=""
     local model_id="$(claude_gateway_model_id 2>/dev/null || true)"
-    if claude_gateway_running; then
+    pid="$(claude_gateway_detect_pid 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && claude_gateway_health_ok; then
         running="yes"
-        pid="$(claude_gateway_pid)"
+        printf '%s\n' "$pid" > "$CLAUDE_GATEWAY_PID_FILE"
     fi
     printf 'running: %s\n' "$running"
     printf 'pid: %s\n' "$pid"

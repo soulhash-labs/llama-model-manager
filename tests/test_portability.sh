@@ -192,8 +192,8 @@ test_installers_support_bootstrap_tty_handoff_and_empty_registry_seed() {
     local app_js
 
     bootstrap="$(cat "$ROOT_DIR/install-bootstrap.sh")"
-    assert_contains "$bootstrap" 'if [ -r /dev/tty ]; then'
-    assert_contains "$bootstrap" 'exec bash "$SOURCE_DIR/install.sh" </dev/tty'
+    assert_contains "$bootstrap" 'if [ -r /dev/tty ] && exec 3</dev/tty 2>/dev/null; then'
+    assert_contains "$bootstrap" 'exec bash "$SOURCE_DIR/install.sh" <&3'
 
     tmp="$(mktemp -d)"
     mkdir -p "$tmp/home/Desktop" "$tmp/config" "$tmp/data"
@@ -567,6 +567,34 @@ EOF
     assert_contains "$settings" '"ANTHROPIC_AUTH_TOKEN": "local-dev-token"'
     assert_contains "$settings" '"ANTHROPIC_API_KEY": "local-dev-token"'
     assert_contains "$settings" '"theme": "dark"'
+}
+
+test_claude_gateway_detects_existing_listener() {
+    local tmp
+    local output
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+
+    # shellcheck disable=SC1090
+    source "$BIN"
+    CLAUDE_GATEWAY_PORT=4000
+    CLAUDE_GATEWAY_LOG="$tmp/claude-gateway.log"
+    CLAUDE_GATEWAY_PID_FILE="$tmp/claude-gateway.pid"
+    claude_gateway_health_ok() { return 0; }
+    claude_gateway_pid() { return 1; }
+    claude_gateway_listener_pid() { printf '28010\n'; }
+    pid_matches_claude_gateway() { [[ "$1" == '28010' ]]; }
+    claude_gateway_model_id() { printf 'qwen35-9b-q8\n'; }
+    claude_gateway_upstream_base() { printf 'http://127.0.0.1:8081/v1\n'; }
+
+    output="$(claude_gateway_start)"
+    assert_contains "$output" 'status: running'
+    assert_contains "$output" 'pid: 28010'
+
+    output="$(claude_gateway_status)"
+    assert_contains "$output" 'running: yes'
+    assert_contains "$output" 'pid: 28010'
 }
 
 test_claude_gateway_status_without_runtime_is_clean() {
