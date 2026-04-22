@@ -192,8 +192,9 @@ test_installers_support_bootstrap_tty_handoff_and_empty_registry_seed() {
     local app_js
 
     bootstrap="$(cat "$ROOT_DIR/install-bootstrap.sh")"
-    assert_contains "$bootstrap" 'if [ -r /dev/tty ] && exec 3</dev/tty 2>/dev/null; then'
-    assert_contains "$bootstrap" 'exec bash "$SOURCE_DIR/install.sh" <&3'
+    assert_contains "$bootstrap" "TTY_REATTACH_OK=\"no\""
+    assert_contains "$bootstrap" "if sh -c 'exec </dev/tty' 2>/dev/null; then"
+    assert_contains "$bootstrap" 'exec bash "$SOURCE_DIR/install.sh" </dev/tty'
 
     tmp="$(mktemp -d)"
     mkdir -p "$tmp/home/Desktop" "$tmp/config" "$tmp/data"
