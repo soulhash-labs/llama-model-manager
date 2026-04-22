@@ -148,6 +148,29 @@ If `doctor` reports `binary_status: unavailable`, install the missing build depe
 - OpenAI-compatible endpoint summary plus sync wiring for local harnesses such as `opencode`, `OpenClaw`, and `Claude Code`
 - Modern Operator dashboard treatment with toasts, busy states, and first-run empty states
 
+## Supported Integrations
+
+Current public integration support:
+
+- `opencode`
+  - direct sync to the live local OpenAI-compatible `llama.cpp` endpoint
+  - CLI: `llama-model sync-opencode`
+  - dashboard action: `Sync opencode`
+- `OpenClaw`
+  - direct sync to the live local OpenAI-compatible `llama.cpp` endpoint
+  - CLI: `llama-model sync-openclaw`
+  - dashboard action: `Sync OpenClaw`
+- `Claude Code`
+  - syncs local Claude settings to a local Anthropic-compatible gateway target
+  - CLI: `llama-model sync-claude`
+  - dashboard action: `Sync Claude`
+- `Claude gateway`
+  - local bridge in front of the active `llama.cpp` endpoint for Claude Code compatibility
+  - CLI: `llama-model claude-gateway start|stop|restart|status|logs`
+  - dashboard controls: `Start`, `Restart`, `Stop`, `Logs`
+
+These integrations are optional. The default product behavior remains the local `llama.cpp` runtime plus the on-demand dashboard.
+
 ## Dependencies
 
 - `python3` is required for the web dashboard
