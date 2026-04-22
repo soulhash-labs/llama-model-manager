@@ -402,6 +402,11 @@ function renderStatus(data) {
     data.opencode_chunk_timeout_ms ? `chunk ${Math.round(Number(data.opencode_chunk_timeout_ms) / 1000)}s` : "",
     data.opencode_note || "",
   ]) || "-");
+  const opencodeBadge = $("#opencode-preset-badge");
+  if (opencodeBadge) {
+    opencodeBadge.classList.toggle("hidden", data.opencode_preset !== "long-run");
+    opencodeBadge.title = data.opencode_note || "Long-run preset active for extended local reasoning sessions.";
+  }
   setText("#openclaw-model", data.openclaw_model || "-");
   setText("#openclaw-path", joinNotes([
     `profile ${data.openclaw_profile || "main"}`,

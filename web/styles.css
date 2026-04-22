@@ -863,6 +863,32 @@ input:focus {
   flex-wrap: wrap;
 }
 
+.integration-chip-row {
+  min-height: 1.9rem;
+  margin: 0.35rem 0 0.15rem;
+}
+
+.integration-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.32rem 0.68rem;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.integration-badge.hidden {
+  display: none;
+}
+
+.integration-badge-long-run {
+  background: rgba(197, 72, 26, 0.12);
+  border: 1px solid rgba(197, 72, 26, 0.18);
+  color: #c5481a;
+}
+
 .log-box {
   margin: 1rem 0 0;
   padding: 1rem;
