@@ -94,6 +94,7 @@ Client integrations:
   Run `llama-model sync-claude` and, when needed, start the local bridge with `llama-model claude-gateway start`.
 
   GlyphOS AI Compute can target the same local llama.cpp endpoint.
+  A bundled public copy lives under integrations/public-glyphos-ai-compute/ in the repo and under ~/.local/share/llama-model-manager/integrations/ after install.
   Run `llama-model sync-glyphos` to align ~/.glyphos/config.yaml with the active local runtime.
 
 Legacy UI:

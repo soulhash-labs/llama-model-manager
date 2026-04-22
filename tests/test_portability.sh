@@ -187,6 +187,9 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$install_script" "llama-model sync-openclaw"
     assert_contains "$install_script" "llama-model sync-claude"
     assert_contains "$install_script" "llama-model sync-glyphos"
+    assert_contains "$readme" "integrations/public-glyphos-ai-compute/"
+    assert_contains "$help" "bundled public copy lives under integrations/public-glyphos-ai-compute/"
+    assert_contains "$install_script" "Bundled public GlyphOS AI Compute package"
 }
 
 test_installers_support_bootstrap_tty_handoff_and_empty_registry_seed() {
@@ -570,6 +573,13 @@ EOF
     assert_contains "$config" '"ollama"'
 }
 
+test_bundled_glyphos_public_package_exists() {
+    [[ -f "$ROOT_DIR/integrations/public-glyphos-ai-compute/README.md" ]] || fail "expected bundled public GlyphOS README"
+    [[ -f "$ROOT_DIR/integrations/public-glyphos-ai-compute/glyphos_ai/ai_compute/api_client.py" ]] || fail "expected bundled GlyphOS api_client"
+    [[ -f "$ROOT_DIR/integrations/public-glyphos-ai-compute/glyphos_ai/glyph/encoder.py" ]] || fail "expected bundled GlyphOS encoder"
+    [[ ! -e "$ROOT_DIR/integrations/public-glyphos-ai-compute/q45_engine" ]] || fail "bundled public GlyphOS package must not include q45_engine"
+}
+
 test_sync_glyphos_updates_config() {
     local tmp
     local output
@@ -717,6 +727,7 @@ main() {
     test_dashboard_service_unit_rendering
     test_dashboard_service_status_reports_unsupported_without_systemctl
     test_doctor_reports_external_systemd_owner
+    test_bundled_glyphos_public_package_exists
     printf 'All portability tests passed.\n'
 }
 

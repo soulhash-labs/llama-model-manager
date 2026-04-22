@@ -186,13 +186,19 @@ These integrations are optional. The default product behavior remains the local 
 - `LLAMA_SERVER_PARALLEL=1` is recommended for a single coding harness because it avoids parallel slot pressure without reducing context length
 - set `LLAMA_MODEL_UI=zenity` if you want to force the old Zenity UI instead of the browser dashboard
 
+## Bundled Local Packages
+
+- public GlyphOS AI Compute package is vendored locally under `integrations/public-glyphos-ai-compute/`
+- this bundled copy contains only the public glyph + AI routing layers
+- the private Q45 / quantum stack is intentionally not included here
+
 ## Client Sync
 
 - `opencode` keeps its own local client config in `~/.config/opencode/opencode.json`, so it can keep pointing at a stale GGUF even after `llama-model switch`.
 - `llama-model sync-opencode` updates the `llamacpp` provider endpoint, default model, and local model-state wiring to match `llama-model current`.
 - `llama-model sync-openclaw` updates `~/.openclaw/openclaw.json` or `~/.openclaw-<profile>/openclaw.json` so OpenClaw points directly at the live local endpoint.
 - `llama-model sync-claude` writes `~/.claude/settings.json` for Claude Code, and `llama-model claude-gateway` runs a local Anthropic-compatible bridge in front of the current llama.cpp server.
-- `llama-model sync-glyphos` writes `~/.glyphos/config.yaml` so the public GlyphOS AI Compute package can target the active local `llama.cpp` endpoint directly.
+- `llama-model sync-glyphos` writes `~/.glyphos/config.yaml` so the bundled public GlyphOS AI Compute package can target the active local `llama.cpp` endpoint directly.
 - the dashboard exposes direct sync actions for all three tools and gateway controls for Claude Code.
 
 ## Common Commands

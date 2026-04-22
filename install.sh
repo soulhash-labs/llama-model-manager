@@ -36,6 +36,10 @@ rm -rf "$APP_SHARE_DIR/web"
 cp -a "$ROOT_DIR/web" "$APP_SHARE_DIR/web"
 rm -rf "$APP_SHARE_DIR/scripts"
 cp -a "$ROOT_DIR/scripts" "$APP_SHARE_DIR/scripts"
+if [[ -d "$ROOT_DIR/integrations" ]]; then
+    rm -rf "$APP_SHARE_DIR/integrations"
+    cp -a "$ROOT_DIR/integrations" "$APP_SHARE_DIR/integrations"
+fi
 if [[ -d "$ROOT_DIR/runtime" ]]; then
     rm -rf "$APP_SHARE_DIR/runtime"
     cp -a "$ROOT_DIR/runtime" "$APP_SHARE_DIR/runtime"
@@ -99,6 +103,7 @@ else
 fi
 printf '  9. Optional local Claude gateway: llama-model claude-gateway start\n'
 printf ' 10. Sync GlyphOS AI Compute if you use it: llama-model sync-glyphos\n'
+printf ' 11. Bundled public GlyphOS AI Compute package: %s/integrations/public-glyphos-ai-compute\n' "$APP_SHARE_DIR"
 
 if [[ -t 0 && -t 1 ]]; then
     printf '\nWould you like to check/install build dependencies and compile a local llama.cpp runtime now? [Y/n] '
