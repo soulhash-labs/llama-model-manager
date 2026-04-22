@@ -72,3 +72,9 @@ If not, environment variables remain the canonical configuration path.
 
 - Q45 / quantum integration is private and intentionally split into a separate internal repo.
 - This package is intended to integrate cleanly with an external runtime owner such as `llama-model-manager`.
+
+## Trademark Notice
+
+- `Soul Hash®` is a registered trademark of soulhash.ai
+- `GlyphOS™` is a trademark of soulhash.ai
+- This bundled public package does not grant trademark rights beyond the applicable license and notice terms

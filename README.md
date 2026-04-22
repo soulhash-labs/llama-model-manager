@@ -224,3 +224,9 @@ llama-model doctor
 - Copyright `2026 soulhash.ai`
 - Licensed under `Apache-2.0`
 - The code is free to use under the license terms while `soulhash.ai` remains the copyright owner
+
+## Trademark Notice
+
+- `Soul Hash®` is a registered trademark of soulhash.ai
+- `GlyphOS™` is a trademark of soulhash.ai
+- The Apache-2.0 license does not grant trademark rights
