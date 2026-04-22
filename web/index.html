@@ -437,6 +437,10 @@
               Claude Base URL
               <input name="CLAUDE_BASE_URL" id="default-claude-base-url" placeholder="http://127.0.0.1:4000">
             </label>
+            <label title="Maximum seconds the local Claude gateway will wait for a slow llama.cpp request before aborting it. Increase this for long local coding sessions.">
+              Claude Gateway Timeout (s)
+              <input name="CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS" id="default-claude-gateway-timeout" placeholder="1800">
+            </label>
             <label title="Claude model id to advertise and sync. Leave blank to follow the active alias.">
               Claude Model ID
               <input name="CLAUDE_MODEL_ID" id="default-claude-model-id" placeholder="qwen35-9b-q8">

@@ -38,6 +38,7 @@ KNOWN_DEFAULT_KEYS = [
     "CLAUDE_GATEWAY_HOST",
     "CLAUDE_GATEWAY_PORT",
     "CLAUDE_GATEWAY_LOG",
+    "CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS",
     "CLAUDE_BASE_URL",
     "CLAUDE_MODEL_ID",
     "CLAUDE_AUTH_TOKEN",
@@ -520,6 +521,7 @@ class Manager:
             "CLAUDE_GATEWAY_HOST": values.get("CLAUDE_GATEWAY_HOST", "127.0.0.1"),
             "CLAUDE_GATEWAY_PORT": values.get("CLAUDE_GATEWAY_PORT", "4000"),
             "CLAUDE_GATEWAY_LOG": values.get("CLAUDE_GATEWAY_LOG", str(self.home / "models" / "claude-gateway.log")),
+            "CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS": values.get("CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS", "1800"),
             "CLAUDE_BASE_URL": values.get("CLAUDE_BASE_URL", ""),
             "CLAUDE_MODEL_ID": values.get("CLAUDE_MODEL_ID", ""),
             "CLAUDE_AUTH_TOKEN": values.get("CLAUDE_AUTH_TOKEN", ""),
@@ -616,7 +618,7 @@ class Manager:
                 "claude_settings_exists": True,
                 "claude_model_id": "qwen35-9b-q8",
                 "claude_base_url": "http://127.0.0.1:4000",
-                "claude_gateway": {"running": "yes", "url": "http://127.0.0.1:4000", "model_id": "qwen35-9b-q8", "log": "/var/log/claude-gateway.log"},
+                "claude_gateway": {"running": "yes", "url": "http://127.0.0.1:4000", "model_id": "qwen35-9b-q8", "log": "/var/log/claude-gateway.log", "upstream_timeout_seconds": "1800"},
             }
         current = self.parse_key_values(self.run_cli("current"))
         doctor = self.parse_key_values(self.run_cli("doctor"))

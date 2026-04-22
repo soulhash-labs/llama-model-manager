@@ -50,6 +50,7 @@ CLAUDE_SETTINGS_FILE="${CLAUDE_SETTINGS_FILE:-$HOME/.claude/settings.json}"
 CLAUDE_GATEWAY_HOST="${CLAUDE_GATEWAY_HOST:-127.0.0.1}"
 CLAUDE_GATEWAY_PORT="${CLAUDE_GATEWAY_PORT:-4000}"
 CLAUDE_GATEWAY_LOG="${CLAUDE_GATEWAY_LOG:-$HOME/models/claude-gateway.log}"
+CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS="${CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS:-1800}"
 CLAUDE_GATEWAY_PID_FILE="${CLAUDE_GATEWAY_PID_FILE:-$STATE_DIR/claude-gateway.pid}"
 CLAUDE_BASE_URL="${CLAUDE_BASE_URL:-}"
 CLAUDE_MODEL_ID="${CLAUDE_MODEL_ID:-}"
@@ -2688,6 +2689,15 @@ claude_gateway_upstream_base() {
     upstream_api_base
 }
 
+claude_gateway_timeout_seconds() {
+    local upstream_timeout_seconds
+    upstream_timeout_seconds="$(trim_whitespace "${CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS:-1800}")"
+    [[ "$upstream_timeout_seconds" =~ ^[0-9]+$ ]] || die "CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS must be a positive integer"
+    (( upstream_timeout_seconds >= 1 )) || die "CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS must be at least 1"
+    printf '%s
+' "$upstream_timeout_seconds"
+}
+
 claude_gateway_pid() {
     [[ -f "$CLAUDE_GATEWAY_PID_FILE" ]] || return 1
     cat "$CLAUDE_GATEWAY_PID_FILE"
@@ -2772,10 +2782,12 @@ claude_gateway_start() {
     local listener_pid=""
     local model_id=""
     local upstream_base
+    local upstream_timeout_seconds
     local -a cmd=()
     require_python3
     script="$(claude_gateway_script)"
     upstream_base="$(claude_gateway_upstream_base)"
+    upstream_timeout_seconds="$(claude_gateway_timeout_seconds)"
     model_id="$(claude_gateway_model_id 2>/dev/null || true)"
     mkdir -p "$(dirname "$CLAUDE_GATEWAY_LOG")" "$(dirname "$CLAUDE_GATEWAY_PID_FILE")"
 
@@ -2801,7 +2813,7 @@ claude_gateway_start() {
         die "port ${CLAUDE_GATEWAY_PORT} is already occupied by another process"
     fi
 
-    cmd=(python3 "$script" --host "$CLAUDE_GATEWAY_HOST" --port "$CLAUDE_GATEWAY_PORT" --upstream-base "$upstream_base")
+    cmd=(python3 "$script" --host "$CLAUDE_GATEWAY_HOST" --port "$CLAUDE_GATEWAY_PORT" --upstream-base "$upstream_base" --upstream-timeout-seconds "$upstream_timeout_seconds")
     if [[ -n "$model_id" ]]; then
         cmd+=(--advertised-model-id "$model_id")
     fi
@@ -2852,6 +2864,7 @@ claude_gateway_status() {
     local running="no"
     local pid=""
     local model_id="$(claude_gateway_model_id 2>/dev/null || true)"
+    local upstream_timeout_seconds="$(claude_gateway_timeout_seconds)"
     pid="$(claude_gateway_detect_pid 2>/dev/null || true)"
     if [[ -z "$pid" ]]; then
         pid="$(claude_gateway_listener_pid 2>/dev/null || true)"
@@ -2866,6 +2879,7 @@ claude_gateway_status() {
     printf 'pid: %s\n' "$pid"
     printf 'url: %s\n' "$(claude_gateway_url)"
     printf 'upstream_base: %s\n' "$(claude_gateway_upstream_base)"
+    printf 'upstream_timeout_seconds: %s\n' "$upstream_timeout_seconds"
     printf 'model_id: %s\n' "$model_id"
     printf 'log: %s\n' "$CLAUDE_GATEWAY_LOG"
 }

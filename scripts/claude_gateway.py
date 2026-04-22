@@ -17,8 +17,9 @@ from typing import Any
 
 
 class UpstreamClient:
-    def __init__(self, upstream_base: str) -> None:
+    def __init__(self, upstream_base: str, request_timeout_seconds: int = 1800) -> None:
         self.base = upstream_base.rstrip("/")
+        self.request_timeout_seconds = max(1, int(request_timeout_seconds))
 
     def _json(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         url = f"{self.base}{path}"
@@ -26,7 +27,7 @@ class UpstreamClient:
         req = urllib.request.Request(url, data=body, method=method)
         req.add_header("Content-Type", "application/json")
         try:
-            with urllib.request.urlopen(req, timeout=600) as response:
+            with urllib.request.urlopen(req, timeout=self.request_timeout_seconds) as response:
                 raw = response.read()
         except urllib.error.HTTPError as exc:
             message = exc.read().decode("utf-8", "replace")
@@ -68,8 +69,8 @@ class UpstreamClient:
 
 
 class ClaudeGateway:
-    def __init__(self, upstream_base: str, advertised_model_id: str = "") -> None:
-        self.upstream = UpstreamClient(upstream_base)
+    def __init__(self, upstream_base: str, upstream_timeout_seconds: int = 1800, advertised_model_id: str = "") -> None:
+        self.upstream = UpstreamClient(upstream_base, request_timeout_seconds=upstream_timeout_seconds)
         self.advertised_model_id = advertised_model_id.strip()
 
     def exposed_model_name(self) -> str:
@@ -304,12 +305,14 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=4000)
     parser.add_argument("--upstream-base", required=True)
+    parser.add_argument("--upstream-timeout-seconds", type=int, default=1800)
     parser.add_argument("--advertised-model-id", default="")
     args = parser.parse_args(argv)
 
     handler = type("GatewayHandlerImpl", (GatewayHandler,), {})
-    handler.gateway = ClaudeGateway(args.upstream_base, args.advertised_model_id)
+    handler.gateway = ClaudeGateway(args.upstream_base, upstream_timeout_seconds=args.upstream_timeout_seconds, advertised_model_id=args.advertised_model_id)
     server = ThreadingHTTPServer((args.host, args.port), handler)
+    print(f"Claude gateway listening on http://{args.host}:{args.port} -> {args.upstream_base} (timeout={args.upstream_timeout_seconds}s)", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

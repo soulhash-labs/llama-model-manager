@@ -176,7 +176,9 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$help" "llama-model claude-gateway start"
     assert_contains "$defaults" "OPENCLAW_PROFILE="
     assert_contains "$defaults" "CLAUDE_GATEWAY_PORT=4000"
+    assert_contains "$defaults" "CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS=1800"
     assert_not_contains "$defaults" "LLAMA_SERVER_DEVICE=cuda0"
+    assert_contains "$web_index" "Claude Gateway Timeout (s)"
     assert_not_contains "$web_index" "GPU-aware defaults"
     assert_contains "$install_script" "Would you like to check/install build dependencies"
     assert_contains "$install_script" "llama-model sync-opencode"
@@ -599,6 +601,24 @@ test_claude_gateway_detects_existing_listener() {
     output="$(claude_gateway_status)"
     assert_contains "$output" 'running: yes'
     assert_contains "$output" 'pid: 28010'
+}
+
+test_claude_gateway_timeout_default_visible() {
+    local tmp
+    local output
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    cat >"$tmp/config/llama-server/defaults.env" <<'EOF'
+LLAMA_SERVER_BIN=
+LLAMA_SERVER_DEVICE=
+LLAMA_SERVER_PORT=19081
+LLAMA_SERVER_LOG=
+CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS=1800
+EOF
+
+    output="$(run_cli "$tmp" claude-gateway status)"
+    assert_contains "$output" "upstream_timeout_seconds: 1800"
 }
 
 test_claude_gateway_status_without_runtime_is_clean() {
