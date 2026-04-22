@@ -229,9 +229,6 @@ def main() -> int:
     return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
-
 
 def load_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
@@ -277,3 +274,6 @@ def sync_glyphos(args: argparse.Namespace) -> None:
 
     config['ai_compute'] = ai_compute
     write_yaml(config_path, config)
+
+if __name__ == "__main__":
+    raise SystemExit(main())

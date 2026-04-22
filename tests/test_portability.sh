@@ -580,6 +580,20 @@ test_bundled_glyphos_public_package_exists() {
     [[ ! -e "$ROOT_DIR/integrations/public-glyphos-ai-compute/q45_engine" ]] || fail "bundled public GlyphOS package must not include q45_engine"
 }
 
+test_integration_sync_cli_glyphos_entrypoint() {
+    local tmp
+    local config
+
+    tmp="$(mktemp -d)"
+    python3 "$ROOT_DIR/scripts/integration_sync.py" glyphos         --config-file "$tmp/config.yaml"         --model-name "Qwen3.5-9B-Q8_0.gguf"         --api-base "http://127.0.0.1:8081/v1"         --timeout-seconds 300 >/dev/null
+
+    config="$(cat "$tmp/config.yaml")"
+    assert_contains "$config" 'preferred_local_backend: llamacpp'
+    assert_contains "$config" 'url: http://127.0.0.1:8081/v1'
+    assert_contains "$config" 'model: Qwen3.5-9B-Q8_0.gguf'
+    assert_contains "$config" 'timeout: 300'
+}
+
 test_sync_glyphos_updates_config() {
     local tmp
     local output
