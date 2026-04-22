@@ -28,6 +28,7 @@ Commands:
   llama-model sync-openclaw [--profile NAME] [alias|/path/to/model.gguf]
   llama-model sync-claude [model-id]
   llama-model claude-gateway start|stop|restart|status|logs
+  llama-model sync-glyphos [alias|/path/to/model.gguf]
   llama-model-web
 
 Registry file:
@@ -91,6 +92,9 @@ Client integrations:
 
   Claude Code keeps settings in ~/.claude/settings.json and expects an Anthropic-style API.
   Run `llama-model sync-claude` and, when needed, start the local bridge with `llama-model claude-gateway start`.
+
+  GlyphOS AI Compute can target the same local llama.cpp endpoint.
+  Run `llama-model sync-glyphos` to align ~/.glyphos/config.yaml with the active local runtime.
 
 Legacy UI:
   Set LLAMA_MODEL_UI=zenity if you want to force the old Zenity launcher.

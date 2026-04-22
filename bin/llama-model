@@ -56,6 +56,8 @@ CLAUDE_BASE_URL="${CLAUDE_BASE_URL:-}"
 CLAUDE_MODEL_ID="${CLAUDE_MODEL_ID:-}"
 CLAUDE_AUTH_TOKEN="${CLAUDE_AUTH_TOKEN:-}"
 CLAUDE_API_KEY="${CLAUDE_API_KEY:-}"
+GLYPHOS_CONFIG_FILE="${GLYPHOS_CONFIG_FILE:-$HOME/.glyphos/config.yaml}"
+GLYPHOS_LLAMACPP_TIMEOUT_SECONDS="${GLYPHOS_LLAMACPP_TIMEOUT_SECONDS:-300}"
 
 if [[ -f "$DEFAULTS_FILE" ]]; then
     # User-tunable runtime defaults live here, not in the wrapper itself.
@@ -103,6 +105,7 @@ Usage:
   llama-model sync-opencode [--preset balanced|long-run] [alias|/path/to/model.gguf]
   llama-model sync-openclaw [--profile NAME] [alias|/path/to/model.gguf]
   llama-model sync-claude [model-id]
+  llama-model sync-glyphos [alias|/path/to/model.gguf]
   llama-model claude-gateway start|stop|restart|status|logs
   llama-model stop
   llama-model logs [lines]
@@ -122,6 +125,7 @@ Examples:
   llama-model sync-openclaw --profile lmm-eval qwen35-9b-q8
   llama-model sync-claude qwen35-9b-q8
   llama-model claude-gateway start
+  llama-model sync-glyphos
   llama-model switch /absolute/path/to/model.gguf --no-warmup
   llama-model dashboard-service status
   llama-model dashboard-service install
@@ -135,8 +139,8 @@ Notes:
   - Bundled llama.cpp binaries are backend-, platform-, and architecture-specific.
   - llama-model only auto-accepts bundled binaries that pass an explicit compatibility check.
   - If no safe binary is available, run: llama-model build-runtime
-  - opencode, OpenClaw, and Claude Code keep their own client settings.
-  - sync-opencode, sync-openclaw, and sync-claude align those settings with the active llama-model runtime.
+  - opencode, OpenClaw, Claude Code, and GlyphOS keep their own client settings.
+  - sync-opencode, sync-openclaw, sync-claude, and sync-glyphos align those settings with the active llama-model runtime.
 EOF
 }
 
@@ -2517,6 +2521,45 @@ resolve_sync_target() {
     SYNC_TARGET_CONTEXT="${context:-$LLAMA_SERVER_CONTEXT}"
 }
 
+sync_glyphos() {
+    [[ $# -le 1 ]] || die "sync-glyphos accepts at most one optional alias or path"
+    local spec="${1:-}"
+    local config_exists_before="no"
+    local api_base
+    local timeout_seconds
+
+    resolve_sync_target "$spec"
+    api_base="$(upstream_api_base)"
+    timeout_seconds="$(trim_whitespace "${GLYPHOS_LLAMACPP_TIMEOUT_SECONDS:-300}")"
+    [[ "$timeout_seconds" =~ ^[0-9]+$ ]] || die "GLYPHOS_LLAMACPP_TIMEOUT_SECONDS must be a positive integer"
+    (( timeout_seconds >= 1 )) || die "GLYPHOS_LLAMACPP_TIMEOUT_SECONDS must be at least 1"
+    [[ -f "$GLYPHOS_CONFIG_FILE" ]] && config_exists_before="yes"
+
+    require_python3
+    python3 "$APP_ROOT/scripts/integration_sync.py" glyphos         --config-file "$GLYPHOS_CONFIG_FILE"         --model-name "$SYNC_TARGET_MODEL_NAME"         --api-base "$api_base"         --timeout-seconds "$timeout_seconds"
+
+    printf 'status: synced
+'
+    printf 'source: %s
+' "$SYNC_TARGET_SOURCE"
+    printf 'alias: %s
+' "$SYNC_TARGET_ALIAS"
+    printf 'model_path: %s
+' "$SYNC_TARGET_MODEL_PATH"
+    printf 'glyphos_model: %s
+' "$SYNC_TARGET_MODEL_NAME"
+    printf 'api_base: %s
+' "$api_base"
+    printf 'config_file: %s
+' "$GLYPHOS_CONFIG_FILE"
+    printf 'config_exists_before: %s
+' "$config_exists_before"
+    printf 'routing_preference: llamacpp
+'
+    printf 'timeout_seconds: %s
+' "$timeout_seconds"
+}
+
 resolve_openclaw_config_file() {
     local profile="${1:-}"
     if [[ -z "$profile" || "$profile" == "main" ]]; then
@@ -3261,6 +3304,10 @@ main() {
         sync-claude)
             shift
             sync_claude "$@"
+            ;;
+        sync-glyphos)
+            shift
+            sync_glyphos "$@"
             ;;
         claude-gateway)
             shift

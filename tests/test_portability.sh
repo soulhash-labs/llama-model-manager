@@ -169,11 +169,13 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$readme" "llama-model sync-opencode --preset long-run"
     assert_contains "$readme" "llama-model sync-openclaw"
     assert_contains "$readme" "llama-model sync-claude"
+    assert_contains "$readme" "llama-model sync-glyphos"
     assert_contains "$help" "llama-model build-runtime --backend auto"
     assert_contains "$help" "llama-model sync-opencode --preset balanced|long-run"
     assert_contains "$help" "llama-model sync-openclaw"
     assert_contains "$help" "llama-model sync-claude"
     assert_contains "$help" "llama-model claude-gateway start"
+    assert_contains "$help" "llama-model sync-glyphos"
     assert_contains "$defaults" "OPENCLAW_PROFILE="
     assert_contains "$defaults" "CLAUDE_GATEWAY_PORT=4000"
     assert_contains "$defaults" "CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS=1800"
@@ -184,6 +186,7 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$install_script" "llama-model sync-opencode"
     assert_contains "$install_script" "llama-model sync-openclaw"
     assert_contains "$install_script" "llama-model sync-claude"
+    assert_contains "$install_script" "llama-model sync-glyphos"
 }
 
 test_installers_support_bootstrap_tty_handoff_and_empty_registry_seed() {
@@ -565,6 +568,41 @@ EOF
     assert_contains "$config" '"apiKey": "llama-local"'
     assert_contains "$config" '"telemetry"'
     assert_contains "$config" '"ollama"'
+}
+
+test_sync_glyphos_updates_config() {
+    local tmp
+    local output
+    local config
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    mkdir -p "$tmp/models"
+    : >"$tmp/models/Qwen3.5-9B-Q8_0.gguf"
+    cat >"$tmp/config/llama-server/models.tsv" <<EOF
+# alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes
+qwen35-9b-q8	$tmp/models/Qwen3.5-9B-Q8_0.gguf		65536
+EOF
+    mkdir -p "$tmp/home/.glyphos"
+    cat >"$tmp/home/.glyphos/config.yaml" <<'EOF'
+ai_compute:
+  openai:
+    enabled: false
+logging:
+  level: INFO
+EOF
+
+    output="$(run_cli "$tmp" sync-glyphos qwen35-9b-q8)"
+    assert_contains "$output" "status: synced"
+    assert_contains "$output" "glyphos_model: Qwen3.5-9B-Q8_0.gguf"
+    assert_contains "$output" "routing_preference: llamacpp"
+
+    config="$(cat "$tmp/home/.glyphos/config.yaml")"
+    assert_contains "$config" 'preferred_local_backend: llamacpp'
+    assert_contains "$config" 'url: http://127.0.0.1:19081/v1'
+    assert_contains "$config" 'model: Qwen3.5-9B-Q8_0.gguf'
+    assert_contains "$config" 'timeout: 300'
+    assert_contains "$config" 'openai:'
 }
 
 test_sync_claude_updates_settings() {

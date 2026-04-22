@@ -98,6 +98,7 @@ else
     printf '  8. If you use Claude Code later, sync it with: llama-model sync-claude\n'
 fi
 printf '  9. Optional local Claude gateway: llama-model claude-gateway start\n'
+printf ' 10. Sync GlyphOS AI Compute if you use it: llama-model sync-glyphos\n'
 
 if [[ -t 0 && -t 1 ]]; then
     printf '\nWould you like to check/install build dependencies and compile a local llama.cpp runtime now? [Y/n] '

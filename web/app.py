@@ -200,6 +200,7 @@ class Manager:
         self.opencode_config_file = Path(os.environ.get("OPENCODE_CONFIG_FILE", self.xdg_config_home / "opencode" / "opencode.json"))
         self.opencode_model_state_file = Path(os.environ.get("OPENCODE_MODEL_STATE_FILE", self.xdg_state_home / "opencode" / "model.json"))
         self.claude_settings_file = Path(os.environ.get("CLAUDE_SETTINGS_FILE", self.home / ".claude" / "settings.json"))
+        self.glyphos_config_file = Path(os.environ.get("GLYPHOS_CONFIG_FILE", self.home / ".glyphos" / "config.yaml"))
         self.cli_bin = self._resolve_cli_bin()
 
     def _resolve_cli_bin(self) -> Path:
@@ -588,6 +589,10 @@ class Manager:
             "claude_model_id": claude_model_id,
             "claude_base_url": claude_base_url,
             "claude_gateway": claude_gateway_status,
+            "glyphos_config_file": str(self.glyphos_config_file),
+            "glyphos_config_exists": self.glyphos_config_file.exists(),
+            "glyphos_model": current_model_name,
+            "glyphos_routing_preference": "llamacpp",
         }
 
     def sync_opencode(self, preset: str = "balanced") -> dict[str, str]:
@@ -598,6 +603,9 @@ class Manager:
 
     def sync_claude(self) -> dict[str, str]:
         return self.parse_key_values(self.run_cli("sync-claude"))
+
+    def sync_glyphos(self) -> dict[str, str]:
+        return self.parse_key_values(self.run_cli("sync-glyphos"))
 
     def dashboard_service_status(self) -> dict[str, str]:
         if self.demo:
@@ -776,6 +784,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/claude/sync":
                 result = self.manager.sync_claude()
+                self.send_json({"ok": True, "result": result})
+                return
+            if parsed.path == "/api/glyphos/sync":
+                result = self.manager.sync_glyphos()
                 self.send_json({"ok": True, "result": result})
                 return
             if parsed.path == "/api/claude-gateway":

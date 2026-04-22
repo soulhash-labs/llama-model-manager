@@ -7,6 +7,11 @@ import os
 from pathlib import Path
 from typing import Any
 
+try:
+    import yaml  # type: ignore
+except Exception:
+    yaml = None
+
 
 def load_json(path: Path) -> dict[str, Any]:
     if not path.exists():
@@ -204,6 +209,13 @@ def main() -> int:
     oc.add_argument("--max-tokens", required=True, type=int)
     oc.set_defaults(func=sync_openclaw)
 
+    gc = sub.add_parser("glyphos")
+    gc.add_argument('--config-file', required=True)
+    gc.add_argument('--model-name', required=True)
+    gc.add_argument('--api-base', required=True)
+    gc.add_argument('--timeout-seconds', required=True, type=int)
+    gc.set_defaults(func=sync_glyphos)
+
     cc = sub.add_parser("claude")
     cc.add_argument("--settings-file", required=True)
     cc.add_argument("--model-id", required=True)
@@ -219,3 +231,49 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    if yaml is None:
+        raise SystemExit('PyYAML is required for glyphos sync')
+    data = yaml.safe_load(path.read_text(encoding='utf-8'))
+    return data if isinstance(data, dict) else {}
+
+
+def write_yaml(path: Path, data: dict[str, Any]) -> None:
+    if yaml is None:
+        raise SystemExit('PyYAML is required for glyphos sync')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f'.{path.name}.tmp-{os.getpid()}')
+    temp_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding='utf-8')
+    temp_path.replace(path)
+
+
+def sync_glyphos(args: argparse.Namespace) -> None:
+    config_path = Path(args.config_file).expanduser()
+    config = load_yaml(config_path)
+    ai_compute = config.get('ai_compute')
+    if not isinstance(ai_compute, dict):
+        ai_compute = {}
+    routing = ai_compute.get('routing')
+    if not isinstance(routing, dict):
+        routing = {}
+    routing.setdefault('high_coherence_threshold', 0.8)
+    routing.setdefault('low_coherence_threshold', 0.3)
+    routing.setdefault('complex_actions', ['ANALYZE', 'SYNTHESIZE', 'PREDICT', 'LEARN', 'TEACH'])
+    routing['preferred_local_backend'] = 'llamacpp'
+    ai_compute['routing'] = routing
+
+    llamacpp = ai_compute.get('llamacpp')
+    if not isinstance(llamacpp, dict):
+        llamacpp = {}
+    llamacpp['enabled'] = True
+    llamacpp['url'] = args.api_base
+    llamacpp['model'] = args.model_name
+    llamacpp['timeout'] = int(args.timeout_seconds)
+    ai_compute['llamacpp'] = llamacpp
+
+    config['ai_compute'] = ai_compute
+    write_yaml(config_path, config)

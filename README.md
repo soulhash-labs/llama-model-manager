@@ -168,6 +168,10 @@ Current public integration support:
   - local bridge in front of the active `llama.cpp` endpoint for Claude Code compatibility
   - CLI: `llama-model claude-gateway start|stop|restart|status|logs`
   - dashboard controls: `Start`, `Restart`, `Stop`, `Logs`
+- `GlyphOS AI Compute`
+  - syncs `~/.glyphos/config.yaml` to the active local `llama.cpp` runtime
+  - CLI: `llama-model sync-glyphos`
+  - dashboard action: `Sync GlyphOS`
 
 These integrations are optional. The default product behavior remains the local `llama.cpp` runtime plus the on-demand dashboard.
 
@@ -188,6 +192,7 @@ These integrations are optional. The default product behavior remains the local 
 - `llama-model sync-opencode` updates the `llamacpp` provider endpoint, default model, and local model-state wiring to match `llama-model current`.
 - `llama-model sync-openclaw` updates `~/.openclaw/openclaw.json` or `~/.openclaw-<profile>/openclaw.json` so OpenClaw points directly at the live local endpoint.
 - `llama-model sync-claude` writes `~/.claude/settings.json` for Claude Code, and `llama-model claude-gateway` runs a local Anthropic-compatible bridge in front of the current llama.cpp server.
+- `llama-model sync-glyphos` writes `~/.glyphos/config.yaml` so the public GlyphOS AI Compute package can target the active local `llama.cpp` endpoint directly.
 - the dashboard exposes direct sync actions for all three tools and gateway controls for Claude Code.
 
 ## Common Commands
@@ -204,6 +209,7 @@ llama-model sync-opencode --preset long-run
 llama-model sync-openclaw --profile lmm-eval qwen35-9b-q8
 llama-model sync-claude qwen35-9b-q8
 llama-model claude-gateway start
+llama-model sync-glyphos
 llama-model doctor
 ```
 

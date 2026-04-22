@@ -426,6 +426,12 @@ function renderStatus(data) {
     claudeGateway.model_id ? `model ${claudeGateway.model_id}` : "",
     claudeGateway.upstream_timeout_seconds ? `timeout ${claudeGateway.upstream_timeout_seconds}s` : "",
   ]) || "-");
+  setText("#glyphos-model", data.glyphos_model || "-");
+  setText("#glyphos-path", joinNotes([
+    data.glyphos_config_exists ? "config present" : "config missing",
+    displayPath(data.glyphos_config_file || ""),
+    data.glyphos_routing_preference ? `route ${data.glyphos_routing_preference}` : "",
+  ]) || "-");
   setText("#toggle-mode", nextMode);
   setTitle(
     "#toggle-mode",
@@ -947,6 +953,7 @@ function bindEvents() {
   $("#sync-opencode-long-run").addEventListener("click", (event) => performIntegrationSync("/api/opencode/sync", event.currentTarget, "Syncing...", "opencode synced with the long-run preset.", { preset: "long-run" }).catch(showError));
   $("#sync-openclaw").addEventListener("click", (event) => performIntegrationSync("/api/openclaw/sync", event.currentTarget, "Syncing...", "OpenClaw synced.").catch(showError));
   $("#sync-claude").addEventListener("click", (event) => performIntegrationSync("/api/claude/sync", event.currentTarget, "Syncing...", "Claude Code settings synced.").catch(showError));
+  $("#sync-glyphos").addEventListener("click", (event) => performIntegrationSync("/api/glyphos/sync", event.currentTarget, "Syncing...", "GlyphOS config synced.").catch(showError));
   $("#claude-gateway-start").addEventListener("click", (event) => performClaudeGatewayAction("start", event.currentTarget, { pendingLabel: "Starting...", successMessage: "Claude gateway started." }).catch(showError));
   $("#claude-gateway-restart").addEventListener("click", (event) => performClaudeGatewayAction("restart", event.currentTarget, { pendingLabel: "Restarting...", successMessage: "Claude gateway restarted." }).catch(showError));
   $("#claude-gateway-stop").addEventListener("click", (event) => performClaudeGatewayAction("stop", event.currentTarget, { pendingLabel: "Stopping...", successMessage: "Claude gateway stopped." }).catch(showError));
