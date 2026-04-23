@@ -21,7 +21,7 @@ Stay local. Stay sovereign. Stay fast.
 
 ## What You Get
 
-- `bin/llama-model`: CLI wrapper for registry management, switching, restart/stop, discovery, and diagnostics
+- `bin/llama-model`: CLI wrapper for registry management, switching, restart/stop, discovery, diagnostics, and download job inspection/control
 - `bin/llama-model-web`: browser dashboard launcher
 - `bin/llama-model-gui`: launcher that prefers the web dashboard and falls back to Zenity
 - `config/defaults.env.example`: runtime defaults template
@@ -139,6 +139,18 @@ The background service remains fully optional and is never enabled by default.
 - this currently covers common package-manager flows such as `apt-get`, `dnf`, `pacman`, `zypper`, and `brew`, plus `xcode-select --install` for macOS command line tools
 - if the host package manager or SDK path is unsupported, the script stops and tells the user what still needs to be installed manually
 
+### Remote Model Downloads
+
+The dashboard can search Hugging Face for cached GGUF artifacts, annotate basic fit signals, and queue downloads through a serialized lifecycle. Download jobs are stored under `~/.local/state/llama-server/download-jobs.json`, so the UI can recover stale workers and the CLI can inspect or act on jobs even if the browser is not open.
+
+Useful CLI fallbacks:
+
+```bash
+llama-model download-jobs
+llama-model download-cancel <job_id>
+llama-model download-retry <job_id>
+```
+
 ### Recommended First-Run Flow
 
 ```bash
@@ -154,6 +166,7 @@ If `doctor` reports `binary_status: unavailable`, install the missing build depe
 ## Key Features
 
 - browser dashboard for switching models, importing discovered GGUFs, editing presets, and checking runtime health
+- managed Hugging Face remote search and serialized download lifecycle with cancel, retry, resume, queue controls, and persisted job state
 - structured registry entries with per-model overrides for context, `ngl`, batch, threads, parallel, device, and notes
 - automatic discovery of `.gguf` models plus same-directory `mmproj` sidecars
 - CLI diagnostics via `llama-model doctor`, including startup failure categories and GPU pressure visibility

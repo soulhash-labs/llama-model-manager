@@ -188,11 +188,15 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$help" "llama-model sync-claude"
     assert_contains "$help" "llama-model claude-gateway start"
     assert_contains "$help" "llama-model sync-glyphos"
+    assert_contains "$help" "llama-model download-jobs"
+    assert_contains "$help" "llama-model download-cancel <job_id>"
     assert_contains "$defaults" "OPENCLAW_PROFILE="
     assert_contains "$defaults" "CLAUDE_GATEWAY_PORT=4000"
     assert_contains "$defaults" "CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS=1800"
     assert_not_contains "$defaults" "LLAMA_SERVER_DEVICE=cuda0"
     assert_contains "$web_index" "Claude Gateway Timeout (s)"
+    assert_contains "$web_index" "Remote Models"
+    assert_contains "$web_index" "Download Jobs"
     assert_not_contains "$web_index" "GPU-aware defaults"
     assert_contains "$install_script" "Would you like to check/install build dependencies"
     assert_contains "$install_script" "llama-model sync-opencode"
@@ -1089,6 +1093,54 @@ test_claude_gateway_status_without_runtime_is_clean() {
     assert_contains "$output" "url: http://127.0.0.1:4000"
 }
 
+
+test_download_lifecycle_cli_fallbacks() {
+    local tmp
+    local output
+    local jobs_file
+    local job_id="job123456789"
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+
+    output="$(run_cli "$tmp" download-jobs)"
+    assert_contains "$output" "no jobs"
+
+    jobs_file="$tmp/state/llama-server/download-jobs.json"
+    mkdir -p "$(dirname "$jobs_file")"
+    cat >"$jobs_file" <<EOF
+{
+  "schema_version": 1,
+  "updated_at": "",
+  "items": [
+    {
+      "id": "$job_id",
+      "status": "running",
+      "repo_id": "author/model",
+      "artifact_name": "model-Q4_K_M.gguf",
+      "destination_root": "$tmp/models",
+      "bytes_downloaded": 10,
+      "bytes_total": 100,
+      "progress": 0.1,
+      "cancel_requested": false
+    }
+  ]
+}
+EOF
+
+    output="$(run_cli "$tmp" download-jobs)"
+    assert_contains "$output" "$job_id"
+    assert_contains "$output" "author/model"
+
+    output="$(LLAMA_MODEL_WEB_PORT=9 run_cli "$tmp" download-cancel "$job_id")"
+    assert_contains "$output" "id: $job_id"
+    assert_contains "$output" "status: cancelled"
+
+    output="$(LLAMA_MODEL_WEB_PORT=9 run_cli "$tmp" download-retry "$job_id")"
+    assert_contains "$output" "status: queued"
+    assert_contains "$output" "artifact_name: model-Q4_K_M.gguf"
+}
+
 main() {
     test_host_match_accepts_bundled_backend
     test_host_mismatch_rejects_bundled_backend
@@ -1119,6 +1171,7 @@ main() {
     test_switch_auto_syncs_opencode_by_default
     test_switch_skips_opencode_when_auto_sync_disabled
     test_switch_opencode_sync_failure_is_non_fatal
+    test_download_lifecycle_cli_fallbacks
     test_sync_openclaw_updates_profile_config
     test_sync_glyphos_updates_config
     test_sync_claude_updates_settings

@@ -236,6 +236,141 @@
         </section>
 
         <section class="panel">
+          <div class="panel-head panel-head-anchored">
+            <div>
+              <span class="panel-tag">Transfers</span>
+              <h2>Remote Models</h2>
+              <p>
+                <span id="remote-count">0</span> cached artifacts from Hugging Face.
+                <span id="remote-fetched-at"></span>
+              </p>
+              <p id="remote-guidance" class="panel-guidance hidden"></p>
+            </div>
+            <div class="inline-actions remote-controls">
+              <label class="inline-field" title="Search term for Hugging Face model discovery. GGUF is a good default.">
+                Query
+                <input id="remote-query" class="wide-input" value="gguf" aria-label="Remote model query">
+              </label>
+              <label class="inline-field" title="How many model records to request from Hugging Face for each search.">
+                Limit
+                <input id="remote-limit" type="number" min="1" step="1" value="30" aria-label="Remote search limit">
+              </label>
+              <label class="inline-field" title="Where downloads will be written on disk. Each repo is stored under huggingface/<author>/<name>.">
+                Root
+                <input id="remote-destination-root" class="wider-input" placeholder="~/models" aria-label="Remote download destination root">
+              </label>
+              <label class="inline-field" title="Hide repos that require authentication or are not publicly accessible.">
+                Hide gated/private
+                <input id="remote-hide-gated" type="checkbox" aria-label="Hide gated or private models">
+              </label>
+              <button
+                id="remote-search"
+                class="button button-primary"
+                title="Fetch and cache remote GGUF artifacts from Hugging Face, then allow one-click download starts."
+              >Search Remote</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="remote-models-table">
+              <thead>
+                <tr>
+                  <th>Repo</th>
+                  <th>Artifact</th>
+                  <th>Size</th>
+                  <th>Fit</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head panel-head-anchored">
+            <div>
+              <span class="panel-tag">Transfers</span>
+              <h2>Download Jobs</h2>
+              <p>
+                <span id="download-count">0</span> persisted remote jobs with resume-aware lifecycle controls.
+                <span id="download-storage-summary"></span>
+              </p>
+              <p id="download-duplicate-guidance" class="panel-guidance hidden"></p>
+            </div>
+            <div class="inline-actions">
+              <label
+                class="inline-field"
+                title="Partial files newer than this many days are kept when cleaning old interrupted downloads."
+              >
+                Keep
+                <input id="cleanup-retention-days" type="number" min="0" step="1" value="7" aria-label="Partial cleanup retention days">
+                days
+              </label>
+              <label
+                class="inline-field"
+                title="Maximum number of download workers that may run at the same time."
+              >
+                Slots
+                <input id="download-slot-limit" type="number" min="1" step="1" value="2" aria-label="Maximum running download slots">
+              </label>
+              <button
+                id="save-download-policy"
+                class="button"
+                title="Save the maximum running download slots for future web-manager starts."
+              >Save Slots</button>
+              <button
+                id="recover-downloads"
+                class="button"
+                title="Mark stale running jobs from an old web-manager process as failed so they can be resumed or retried."
+              >Recover Stale</button>
+              <button
+                id="pause-download-queue"
+                class="button"
+                title="Pause starting queued downloads. Running jobs continue."
+              >Pause Queue</button>
+              <button
+                id="resume-download-queue"
+                class="button button-primary"
+                title="Resume starting queued downloads up to the running slot limit."
+              >Resume Queue</button>
+              <button
+                id="clear-download-queue"
+                class="button"
+                title="Remove all queued jobs. Running jobs and files are not touched."
+              >Clear Queue</button>
+              <button
+                id="cleanup-downloads"
+                class="button"
+                title="Remove stale partial files from old cancelled or failed jobs. Active and fresh partials are kept."
+              >Clean Old Partials</button>
+              <button
+                id="cleanup-duplicate-downloads"
+                class="button"
+                title="Remove redundant completed job records that point at the same artifact path. Model files are kept."
+              >Clean Duplicate Records</button>
+              <button
+                id="delete-orphaned-artifacts"
+                class="button button-danger"
+                title="Delete orphaned GGUF files under known download roots. Registry and completed-job artifacts are kept."
+              >Delete Orphaned Files</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="downloads-table">
+              <thead>
+                <tr>
+                  <th>Artifact</th>
+                  <th>Status</th>
+                  <th>Progress</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
           <div class="panel-head">
             <div>
               <span class="panel-tag">Registry</span>
@@ -591,6 +726,62 @@
             class="button button-small button-primary"
             title="Copy this discovered model into the editor so you can save it into the registry."
           >Stage</button>
+        </td>
+      </tr>
+    </template>
+
+    <template id="remote-row-template">
+      <tr>
+        <td class="path-cell repo-cell"></td>
+        <td class="path-cell remote-artifact-cell"></td>
+        <td class="size-cell"></td>
+        <td class="fit-cell"></td>
+        <td class="row-actions">
+          <button
+            data-action="download-remote"
+            class="button button-small button-primary"
+            title="Queue a remote download job for this artifact."
+          >Download</button>
+        </td>
+      </tr>
+    </template>
+
+    <template id="download-row-template">
+      <tr>
+        <td class="artifact-cell"></td>
+        <td class="download-status-cell"></td>
+        <td class="download-progress-cell"></td>
+        <td class="row-actions">
+          <button
+            data-action="cancel"
+            class="button button-small button-danger"
+            title="Request cancellation for a queued or running download."
+          >Cancel</button>
+          <button
+            data-action="resume"
+            class="button button-small button-primary"
+            title="Continue this interrupted download from its preserved partial file."
+          >Resume</button>
+          <button
+            data-action="retry"
+            class="button button-small"
+            title="Start a fresh retry using the persisted remote metadata."
+          >Retry</button>
+          <button
+            data-action="remove-queued"
+            class="button button-small"
+            title="Remove this queued job without touching any running downloads."
+          >Remove</button>
+          <button
+            data-action="prioritize-queued"
+            class="button button-small button-primary"
+            title="Move this queued job ahead of other queued jobs. Running downloads are not interrupted."
+          >Run Next</button>
+          <button
+            data-action="deprioritize-queued"
+            class="button button-small"
+            title="Move this queued job one slot later. Running downloads are not interrupted."
+          >Later</button>
         </td>
       </tr>
     </template>

@@ -5,6 +5,14 @@ const state = {
   toastId: 0,
 };
 
+const STORAGE_KEYS = {
+  cleanupRetentionDays: "llama-model-manager.cleanupRetentionDays",
+  remoteQuery: "llama-model-manager.remoteQuery",
+  remoteLimit: "llama-model-manager.remoteLimit",
+  remoteHideGated: "llama-model-manager.remoteHideGated",
+  remoteDestinationRoot: "llama-model-manager.remoteDestinationRoot",
+};
+
 function $(selector) {
   return document.querySelector(selector);
 }
@@ -84,6 +92,36 @@ function binarySummary(doctor) {
 
 function basename(path) {
   return String(path || "").split("/").filter(Boolean).pop() || "";
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let amount = bytes;
+  for (const unit of units) {
+    if (amount < 1024 || unit === units[units.length - 1]) {
+      return unit === "B" ? `${Math.round(amount)} ${unit}` : `${amount.toFixed(1)} ${unit}`;
+    }
+    amount /= 1024;
+  }
+  return `${bytes} B`;
+}
+
+function compactHomePath(value, data = {}) {
+  const text = String(value || "").trim();
+  const home = String(data?.meta?.home_dir || "").replace(/\/$/, "");
+  if (!text || !home) {
+    return text;
+  }
+  const normalizedHome = home.endsWith("/") ? home.slice(0, -1) : home;
+  if (text === normalizedHome) {
+    return "~";
+  }
+  if (text.startsWith(`${normalizedHome}/`)) {
+    return `~/${text.slice(normalizedHome.length + 1)}`;
+  }
+  return text;
 }
 
 function displayPath(path) {
@@ -224,6 +262,9 @@ function renderNotice(data) {
   if (!notice) return;
 
   const messages = [];
+  const downloadJobs = data.download_jobs?.items || [];
+  const activeDownloads = downloadJobs.filter((job) => ["queued", "running"].includes(String(job.status || "")));
+  const resumableDownloads = downloadJobs.filter((job) => job.resume_available);
   if (data.demo) {
     messages.push("Demo mode is active. Registry and runtime values are sample data, not your local machine.");
   }
@@ -235,6 +276,13 @@ function renderNotice(data) {
   }
   if ((data.doctor?.external_owner || "") === "yes" && data.doctor?.external_owner_message) {
     messages.push(data.doctor.external_owner_message);
+  }
+  if (activeDownloads.length) {
+    messages.push(`${activeDownloads.length} remote download ${activeDownloads.length === 1 ? "is" : "are"} currently active.`);
+  }
+  if (resumableDownloads.length) {
+    const resumableBytes = resumableDownloads.reduce((total, job) => total + Number(job.partial_bytes || 0), 0);
+    messages.push(`${resumableDownloads.length} interrupted download ${resumableDownloads.length === 1 ? "has" : "have"} ${formatBytes(resumableBytes)} of resumable partial data.`);
   }
 
   if (!messages.length) {
@@ -549,6 +597,352 @@ function renderDiscovery(items) {
   }
 }
 
+function remoteFitLabel(status) {
+  if (!status) return "Unknown";
+  if (status === "good-fit") return "Good Fit";
+  if (status === "likely-tight") return "Likely Tight";
+  if (status === "likely-incompatible") return "Likely Incompatible";
+  return titleize(status);
+}
+
+function renderRemoteModels(remoteStore) {
+  const tbody = $("#remote-models-table tbody");
+  const template = $("#remote-row-template");
+  if (!tbody || !template) return;
+  tbody.innerHTML = "";
+
+  const store = remoteStore && typeof remoteStore === "object" ? remoteStore : {};
+  const rawItems = Array.isArray(store.items) ? store.items : [];
+  const items = rawItems.filter((item) => item && typeof item === "object");
+
+  const fetchedAt = String(store.fetched_at || "").trim();
+  const fetchedLabel = fetchedAt ? `cached ${fetchedAt}` : "";
+  setText("#remote-fetched-at", fetchedLabel ? `· ${fetchedLabel}` : "");
+  setText("#remote-count", String(items.length));
+
+  const guidance = $("#remote-guidance");
+  if (guidance) {
+    guidance.textContent = "";
+    guidance.classList.add("hidden");
+  }
+
+  const query = String(store.query || "").trim();
+  const hideGated = Boolean($("#remote-hide-gated")?.checked);
+  const visible = hideGated
+    ? items.filter((item) => String(item.gated || "") !== "yes" && String(item.private || "") !== "yes")
+    : items;
+
+  if (!query && !items.length) {
+    renderEmptyRow(
+      tbody,
+      5,
+      "Search Remote",
+      "No remote cache has been built yet.",
+      "Run Search Remote to fetch a cached list of Hugging Face GGUF artifacts. Downloads are only allowed for cached entries.",
+    );
+    return;
+  }
+
+  if (!visible.length) {
+    const message = hideGated && items.length
+      ? `All ${items.length} cached entries are gated/private. Disable Hide gated/private to view them.`
+      : "No cached GGUF artifacts match the current filters.";
+    renderEmptyRow(
+      tbody,
+      5,
+      "Nothing Cached",
+      "No usable remote artifacts in view.",
+      message,
+    );
+    return;
+  }
+
+  if (hideGated && visible.length !== items.length && guidance) {
+    guidance.textContent = `${items.length - visible.length} gated/private repo ${items.length - visible.length === 1 ? "entry is" : "entries are"} hidden.`;
+    guidance.classList.remove("hidden");
+  }
+
+  for (const item of visible.slice(0, 300)) {
+    const row = template.content.firstElementChild.cloneNode(true);
+    const repoId = String(item.repo_id || "");
+    const artifactName = String(item.artifact_name || "");
+    const sourceUrl = String(item.source_url || "");
+    const downloadUrl = String(item.download_url || "");
+    const sizeBytes = Number(item.size_bytes || 0);
+    const sizeHuman = String(item.size_human || "") || formatBytes(sizeBytes);
+    const status = String(item.compatibility_status || "unknown");
+    const summary = String(item.compatibility_summary || "");
+    const gated = String(item.gated || "") === "yes";
+    const priv = String(item.private || "") === "yes";
+
+    row.dataset.repoId = repoId;
+    row.dataset.artifactName = artifactName;
+    row.dataset.downloadUrl = downloadUrl;
+
+    row.querySelector(".repo-cell").innerHTML = sourceUrl
+      ? `<a href="${escapeHtml(sourceUrl)}" target="_blank" rel="noreferrer">${escapeHtml(repoId || sourceUrl)}</a>`
+      : escapeHtml(repoId);
+
+    row.querySelector(".remote-artifact-cell").innerHTML = `
+      <div>${escapeHtml(artifactName || "artifact")}</div>
+      <div class="secondary-line">${escapeHtml(joinNotes([
+        item.quant ? `quant ${item.quant}` : "",
+        item.architecture ? String(item.architecture) : "",
+        item.context ? `ctx ${item.context}` : "",
+        item.mmproj_artifact_name ? "mmproj available" : "",
+        gated ? "gated" : "",
+        priv ? "private" : "",
+      ]))}</div>
+    `;
+
+    row.querySelector(".size-cell").textContent = sizeHuman || "-";
+    row.querySelector(".fit-cell").innerHTML = `
+      <span class="status-pill status-${escapeHtml(status)}">${escapeHtml(remoteFitLabel(status))}</span>
+      ${summary ? `<div class="secondary-line">${escapeHtml(summary)}</div>` : ""}
+    `;
+
+    const button = row.querySelector("button[data-action='download-remote']");
+    if (button) {
+      const disabledReason = gated || priv
+        ? "This repo is gated/private on Hugging Face. Authentication is not supported in this manager."
+        : (!repoId || !artifactName || !downloadUrl)
+          ? "Remote metadata is incomplete for this artifact. Search again."
+          : "";
+      button.disabled = Boolean(disabledReason);
+      button.title = disabledReason || `Queue download for ${artifactName}.`;
+    }
+    tbody.appendChild(row);
+  }
+}
+
+function downloadStatusLabel(job) {
+  const status = titleize(job.status || "unknown") || "Unknown";
+  if (String(job.status || "") === "queued" && Number(job.queue_position || 0) > 0) {
+    return Number(job.queue_position) === 1 ? `${status} · next` : `${status} · #${job.queue_position}`;
+  }
+  if (job.resume_available) {
+    return `${status} · resumable`;
+  }
+  if (job.cancel_requested && ["queued", "running"].includes(String(job.status || ""))) {
+    return `${status} · cancelling`;
+  }
+  return status;
+}
+
+function renderDownloads(jobs) {
+  const tbody = $("#downloads-table tbody");
+  const template = $("#download-row-template");
+  if (!tbody || !template) return;
+  tbody.innerHTML = "";
+  setText("#download-count", String(jobs.length));
+  const hasRunningJobs = jobs.some((job) => String(job.status || "") === "running");
+  const hasPartialData = jobs.some((job) => Number(job.partial_bytes || 0) > 0);
+  const recoverButton = $("#recover-downloads");
+  const cleanupButton = $("#cleanup-downloads");
+  const cleanupDuplicatesButton = $("#cleanup-duplicate-downloads");
+  const deleteOrphansButton = $("#delete-orphaned-artifacts");
+  const pauseQueueButton = $("#pause-download-queue");
+  const resumeQueueButton = $("#resume-download-queue");
+  const clearQueueButton = $("#clear-download-queue");
+  const storage = state.data?.download_storage || {};
+  const policy = state.data?.download_policy || {};
+  if (recoverButton) {
+    recoverButton.hidden = !hasRunningJobs;
+    recoverButton.title = hasRunningJobs
+      ? "Mark stale running jobs from an old web-manager process as failed so they can be resumed or retried."
+      : "No running download jobs need stale-worker recovery.";
+  }
+  if (cleanupButton) {
+    cleanupButton.hidden = !hasPartialData;
+    cleanupButton.title = hasPartialData
+      ? "Remove stale partial files from old cancelled or failed jobs. Active and fresh partials are kept."
+      : "No partial download files are currently tracked.";
+  }
+  if (cleanupDuplicatesButton) {
+    cleanupDuplicatesButton.hidden = !storage.duplicate_completed_count;
+    cleanupDuplicatesButton.title = storage.duplicate_completed_count
+      ? "Remove redundant completed job records that point at the same artifact path. Model files are kept."
+      : "No duplicate completed job records are currently tracked.";
+  }
+  if (deleteOrphansButton) {
+    deleteOrphansButton.hidden = !storage.orphaned_artifact_count;
+    deleteOrphansButton.title = storage.orphaned_artifact_count
+      ? "Delete orphaned GGUF files under known download roots. Registry and completed-job artifacts are kept."
+      : "No orphaned GGUF files are currently tracked.";
+  }
+  if (pauseQueueButton) {
+    pauseQueueButton.hidden = Boolean(policy.queue_paused);
+    pauseQueueButton.disabled = !policy.queued_downloads;
+    pauseQueueButton.title = policy.queued_downloads
+      ? "Pause starting queued downloads. Running jobs continue."
+      : "No queued downloads are waiting.";
+  }
+  if (resumeQueueButton) {
+    resumeQueueButton.hidden = !policy.queue_paused;
+    resumeQueueButton.title = "Resume starting queued downloads up to the running slot limit.";
+  }
+  if (clearQueueButton) {
+    clearQueueButton.hidden = !policy.queued_downloads;
+    clearQueueButton.title = policy.queued_downloads
+      ? "Remove all queued jobs. Running jobs and files are not touched."
+      : "No queued downloads are waiting.";
+  }
+  setText(
+    "#download-storage-summary",
+    joinNotes([
+      storage.partial_bytes ? `${formatBytes(storage.partial_bytes)} partials retained` : "",
+      storage.duplicate_completed_count ? `${storage.duplicate_completed_count} duplicate completed artifact ${storage.duplicate_completed_count === 1 ? "path" : "paths"}` : "",
+      storage.orphaned_artifact_count ? `${storage.orphaned_artifact_count} orphaned artifact ${storage.orphaned_artifact_count === 1 ? "file" : "files"} (${formatBytes(storage.orphaned_artifact_bytes || 0)})` : "",
+      Number.isFinite(Number(policy.max_active_downloads)) ? `${policy.running_downloads || 0}/${policy.max_active_downloads} running slots used` : "",
+      policy.queued_downloads ? `${policy.queued_downloads} queued` : "",
+    ]),
+  );
+  const slotInput = $("#download-slot-limit");
+  if (slotInput && document.activeElement !== slotInput && Number(policy.max_active_downloads || 0) > 0) {
+    slotInput.value = String(policy.max_active_downloads);
+  }
+  const duplicateGuidance = $("#download-duplicate-guidance");
+  if (duplicateGuidance) {
+    const guidance = [];
+    if (policy.at_capacity) {
+      guidance.push(`Running download slots are full (${policy.running_downloads}/${policy.max_active_downloads}). New artifacts will wait in the queue until a slot opens.`);
+    }
+    if (policy.queue_paused) {
+      guidance.push("Download queue is paused and will stay paused across web-manager restarts. Running jobs continue, but queued jobs will not start until resumed.");
+    }
+    if (policy.next_queued_job?.artifact_name) {
+      guidance.push(`Next queued artifact: ${policy.next_queued_job.artifact_name}.`);
+    }
+    if (policy.duplicate_active_count) {
+      guidance.push(`${policy.duplicate_active_count} duplicate active artifact ${policy.duplicate_active_count === 1 ? "entry was" : "entries were"} detected. New starts reuse the existing active job for the same artifact.`);
+    }
+    if (storage.duplicate_completed_count) {
+      guidance.push(`${storage.duplicate_completed_job_records || 0} redundant completed job ${storage.duplicate_completed_job_records === 1 ? "record points" : "records point"} at existing artifact paths. ${storage.duplicate_cleanup_guidance || "Review before deleting files."}`);
+    }
+    if (storage.orphaned_artifact_count) {
+      guidance.push(`${storage.orphaned_artifact_count} orphaned artifact ${storage.orphaned_artifact_count === 1 ? "file is" : "files are"} under known download roots. ${storage.orphaned_cleanup_guidance || "Review before deleting files."}`);
+    }
+    if (guidance.length) {
+      duplicateGuidance.textContent = guidance.join(" ");
+      duplicateGuidance.classList.remove("hidden");
+    } else {
+      duplicateGuidance.textContent = "";
+      duplicateGuidance.classList.add("hidden");
+    }
+  }
+
+  if (!jobs.length) {
+    renderEmptyRow(
+      tbody,
+      4,
+      "No Transfers",
+      "No remote download jobs are tracked yet.",
+      "Remote downloads will appear here with cancel, resume, and retry controls once they are started.",
+    );
+    return;
+  }
+
+  for (const job of jobs) {
+    const row = template.content.firstElementChild.cloneNode(true);
+    const status = String(job.status || "");
+    const progress = Number(job.progress || 0);
+    const percent = Number.isFinite(progress) ? Math.round(Math.min(progress, 1) * 100) : 0;
+    const bytes = `${formatBytes(job.bytes_downloaded || 0)} / ${formatBytes(job.bytes_total || 0)}`;
+    const partial = job.partial_bytes > 0 ? `partial ${formatBytes(job.partial_bytes)}` : "";
+    const cancelButton = row.querySelector("button[data-action='cancel']");
+    const resumeButton = row.querySelector("button[data-action='resume']");
+    const retryButton = row.querySelector("button[data-action='retry']");
+    const removeQueuedButton = row.querySelector("button[data-action='remove-queued']");
+    const prioritizeQueuedButton = row.querySelector("button[data-action='prioritize-queued']");
+    const deprioritizeQueuedButton = row.querySelector("button[data-action='deprioritize-queued']");
+
+    row.dataset.jobId = job.id || "";
+    row.querySelector(".artifact-cell").innerHTML = `
+      <div>${escapeHtml(job.artifact_name || job.id || "download")}</div>
+      <div class="secondary-line">${escapeHtml(joinNotes([job.repo_id || "", compactHomePath(job.destination_root || "", state.data)]))}</div>
+    `;
+    row.querySelector(".download-status-cell").innerHTML = `
+      <span class="status-pill status-${escapeHtml(status || "unknown")}">${escapeHtml(downloadStatusLabel(job))}</span>
+      ${job.error ? `<div class="secondary-line">${escapeHtml(job.error)}</div>` : ""}
+    `;
+    row.querySelector(".download-progress-cell").innerHTML = `
+      <div class="progress-track" aria-label="Download progress">
+        <span style="width: ${percent}%"></span>
+      </div>
+      <div class="secondary-line">${escapeHtml(joinNotes([`${percent}%`, bytes, partial]))}</div>
+    `;
+
+    cancelButton.hidden = !["queued", "running"].includes(status);
+    resumeButton.hidden = !job.resume_available;
+    retryButton.hidden = !["failed", "cancelled"].includes(status);
+    removeQueuedButton.hidden = status !== "queued";
+    prioritizeQueuedButton.hidden = status !== "queued" || !job.can_prioritize;
+    deprioritizeQueuedButton.hidden = status !== "queued" || !job.can_deprioritize;
+    cancelButton.title = `Cancel ${job.artifact_name || job.id}.`;
+    resumeButton.title = `Resume ${job.artifact_name || job.id} from ${formatBytes(job.partial_bytes || 0)}.`;
+    retryButton.title = `Retry ${job.artifact_name || job.id} from byte zero.`;
+    removeQueuedButton.title = `Remove queued job ${job.artifact_name || job.id}. Files are not touched.`;
+    prioritizeQueuedButton.title = `Move queued job ${job.artifact_name || job.id} ahead of other queued downloads.`;
+    deprioritizeQueuedButton.title = `Move queued job ${job.artifact_name || job.id} one slot later.`;
+    tbody.appendChild(row);
+  }
+}
+
+function loadCleanupRetentionPreference() {
+  const input = $("#cleanup-retention-days");
+  if (!input) return;
+  const saved = window.localStorage.getItem(STORAGE_KEYS.cleanupRetentionDays);
+  if (saved !== null && saved !== "" && Number.isFinite(Number(saved))) {
+    input.value = saved;
+  }
+}
+
+function saveCleanupRetentionPreference() {
+  const input = $("#cleanup-retention-days");
+  if (!input) return;
+  const value = Math.max(0, Number(input.value || 7));
+  input.value = String(value);
+  window.localStorage.setItem(STORAGE_KEYS.cleanupRetentionDays, String(value));
+}
+
+function loadRemotePreferences() {
+  const queryInput = $("#remote-query");
+  const limitInput = $("#remote-limit");
+  const rootInput = $("#remote-destination-root");
+  const hideInput = $("#remote-hide-gated");
+
+  if (queryInput) {
+    const saved = window.localStorage.getItem(STORAGE_KEYS.remoteQuery);
+    if (saved !== null && saved !== "") queryInput.value = saved;
+  }
+  if (limitInput) {
+    const saved = window.localStorage.getItem(STORAGE_KEYS.remoteLimit);
+    if (saved !== null && saved !== "" && Number.isFinite(Number(saved))) {
+      limitInput.value = saved;
+    }
+  }
+  if (rootInput) {
+    const saved = window.localStorage.getItem(STORAGE_KEYS.remoteDestinationRoot);
+    if (saved !== null && saved !== "") rootInput.value = saved;
+  }
+  if (hideInput) {
+    const saved = window.localStorage.getItem(STORAGE_KEYS.remoteHideGated);
+    if (saved !== null) hideInput.checked = saved === "1";
+  }
+}
+
+function saveRemotePreferences() {
+  const queryInput = $("#remote-query");
+  const limitInput = $("#remote-limit");
+  const rootInput = $("#remote-destination-root");
+  const hideInput = $("#remote-hide-gated");
+
+  if (queryInput) window.localStorage.setItem(STORAGE_KEYS.remoteQuery, queryInput.value.trim());
+  if (limitInput) window.localStorage.setItem(STORAGE_KEYS.remoteLimit, String(Math.max(1, Number(limitInput.value || 30))));
+  if (rootInput) window.localStorage.setItem(STORAGE_KEYS.remoteDestinationRoot, rootInput.value.trim());
+  if (hideInput) window.localStorage.setItem(STORAGE_KEYS.remoteHideGated, hideInput.checked ? "1" : "0");
+}
+
 function fillModelForm(model) {
   $("#model-alias").value = model.alias || "";
   $("#model-path").value = model.path || "";
@@ -609,8 +1003,14 @@ function renderDefaults(defaults) {
 async function refreshState() {
   state.data = await api("/api/state");
   $("#discovery-root").value = displayPath(state.data.discovery_root || "");
+  const remoteRoot = $("#remote-destination-root");
+  if (remoteRoot && !remoteRoot.value.trim()) {
+    remoteRoot.value = compactHomePath(state.data.discovery_root, state.data) || "";
+  }
   renderStatus(state.data);
   renderModels(state.data.models || []);
+  renderRemoteModels(state.data.remote_models || {});
+  renderDownloads(state.data.download_jobs?.items || []);
   renderDefaults(state.data.defaults || {});
 }
 
@@ -892,7 +1292,255 @@ async function onDiscoveryTableClick(event) {
   showToast(`${alias || "Model"} loaded into the editor.`, "info", { timeout: 2200 });
 }
 
+async function onDownloadsTableClick(event) {
+  const button = event.target.closest("button[data-action]");
+  if (!button) return;
+  const row = button.closest("tr");
+  const jobId = row?.dataset.jobId;
+  if (!jobId) return;
+
+  const action = button.dataset.action;
+  if (action === "remove-queued") {
+    const confirmed = window.confirm("Remove this queued download job? Running downloads and files will be left alone.");
+    if (!confirmed) return;
+  }
+  const endpoint = action === "remove-queued"
+    ? "/api/downloads/remove-queued"
+    : action === "prioritize-queued"
+      ? "/api/downloads/prioritize-queued"
+      : action === "deprioritize-queued"
+        ? "/api/downloads/deprioritize-queued"
+      : `/api/downloads/${action}`;
+  const busyLabel = action === "cancel"
+    ? "Cancelling..."
+    : action === "resume"
+      ? "Resuming..."
+      : action === "remove-queued"
+        ? "Removing..."
+        : action === "prioritize-queued"
+          ? "Prioritizing..."
+          : action === "deprioritize-queued"
+            ? "Moving..."
+            : "Retrying...";
+  await withButtonBusy(button, busyLabel, async () => {
+    const payload = await api(endpoint, {
+      method: "POST",
+      body: JSON.stringify({ id: jobId }),
+    });
+    await refreshState();
+    return payload;
+  }, {
+    successMessage: action === "cancel"
+      ? "Download cancellation requested."
+      : action === "resume"
+        ? "Download resume queued."
+        : action === "remove-queued"
+          ? "Queued download removed."
+          : action === "prioritize-queued"
+            ? "Queued download moved to run next."
+            : action === "deprioritize-queued"
+              ? "Queued download moved later."
+              : "Download retry queued.",
+    successKind: action === "cancel" ? "info" : "success",
+  });
+}
+
+async function performRemoteSearch(button) {
+  saveRemotePreferences();
+  const query = $("#remote-query")?.value.trim() || "";
+  const limit = Math.max(1, Math.round(Number($("#remote-limit")?.value || 30)));
+  await withButtonBusy(button, "Searching...", async () => {
+    const payload = await api("/api/remote/search", {
+      method: "POST",
+      body: JSON.stringify({ query, limit }),
+    });
+    state.data.remote_models = payload.remote_models || {};
+    renderRemoteModels(state.data.remote_models);
+    return payload;
+  }, {
+    successMessage: query ? `Remote cache refreshed for "${query}".` : "Remote cache loaded.",
+    successKind: "success",
+  });
+}
+
+async function onRemoteTableClick(event) {
+  const button = event.target.closest("button[data-action='download-remote']");
+  if (!button) return;
+  const row = button.closest("tr");
+  const repoId = row?.dataset.repoId || "";
+  const artifactName = row?.dataset.artifactName || "";
+  const destinationRoot = $("#remote-destination-root")?.value.trim() || state.data?.discovery_root || "";
+  if (!destinationRoot) {
+    showToast("Destination root is required for downloads.", "error");
+    return;
+  }
+  await withButtonBusy(button, "Queueing...", async () => {
+    const payload = await api("/api/downloads/start", {
+      method: "POST",
+      body: JSON.stringify({
+        repo_id: repoId,
+        artifact_name: artifactName,
+        destination_root: destinationRoot,
+      }),
+    });
+    await refreshState();
+    return payload;
+  }, {
+    successMessage: `Queued ${artifactName || "remote download"}.`,
+    successKind: "success",
+  });
+}
+
+async function cleanupDownloads(button) {
+  let removedCount = 0;
+  await withButtonBusy(button, "Cleaning...", async () => {
+    saveCleanupRetentionPreference();
+    const retentionDays = Math.max(0, Number($("#cleanup-retention-days")?.value || 7));
+    const maxAgeSeconds = Math.round(retentionDays * 24 * 60 * 60);
+    const payload = await api("/api/downloads/cleanup", {
+      method: "POST",
+      body: JSON.stringify({ max_age_seconds: maxAgeSeconds }),
+    });
+    removedCount = (payload.removed || []).length;
+    await refreshState();
+    return payload;
+  }, {
+    successMessage: `${removedCount} old partial ${removedCount === 1 ? "file" : "files"} cleaned.`,
+    successKind: "info",
+  });
+}
+
+async function recoverDownloads(button) {
+  let recoveredCount = 0;
+  await withButtonBusy(button, "Recovering...", async () => {
+    const payload = await api("/api/downloads/recover", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    recoveredCount = (payload.recovered || []).length;
+    await refreshState();
+    return payload;
+  }, {
+    successMessage: `${recoveredCount} stale download ${recoveredCount === 1 ? "job" : "jobs"} recovered.`,
+    successKind: "info",
+  });
+}
+
+async function cleanupDuplicateDownloads(button) {
+  const confirmed = window.confirm(
+    "Remove redundant completed job records that point at the same artifact path? Model files will be kept.",
+  );
+  if (!confirmed) return;
+
+  let removedCount = 0;
+  await withButtonBusy(button, "Cleaning...", async () => {
+    const payload = await api("/api/downloads/cleanup-duplicates", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    removedCount = (payload.removed || []).length;
+    await refreshState();
+    return payload;
+  }, {
+    successMessage: `${removedCount} duplicate completed job ${removedCount === 1 ? "record" : "records"} cleaned. Model files kept.`,
+    successKind: "info",
+  });
+}
+
+async function deleteOrphanedArtifacts(button) {
+  const storage = state.data?.download_storage || {};
+  const count = Number(storage.orphaned_artifact_count || 0);
+  const bytes = formatBytes(storage.orphaned_artifact_bytes || 0);
+  const confirmed = window.confirm(
+    `Delete ${count} orphaned GGUF ${count === 1 ? "file" : "files"} (${bytes}) under known download roots? Registry and completed-job artifacts will be kept.`,
+  );
+  if (!confirmed) return;
+
+  let removedCount = 0;
+  await withButtonBusy(button, "Deleting...", async () => {
+    const paths = (storage.orphaned_artifacts || []).map((item) => item.path).filter(Boolean);
+    const payload = await api("/api/downloads/delete-orphans", {
+      method: "POST",
+      body: JSON.stringify({ paths }),
+    });
+    removedCount = (payload.removed || []).length;
+    await refreshState();
+    return payload;
+  }, {
+    successMessage: `${removedCount} orphaned artifact ${removedCount === 1 ? "file" : "files"} deleted.`,
+    successKind: "info",
+  });
+}
+
+async function setDownloadQueuePaused(button, paused) {
+  const endpoint = paused ? "/api/downloads/pause-queue" : "/api/downloads/resume-queue";
+  await withButtonBusy(button, paused ? "Pausing..." : "Resuming...", async () => {
+    const payload = await api(endpoint, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    await refreshState();
+    return payload;
+  }, {
+    successMessage: paused ? "Download queue paused. Running jobs continue." : "Download queue resumed.",
+    successKind: "info",
+  });
+}
+
+async function saveDownloadPolicy(button) {
+  let maxActive = Math.max(1, Number($("#download-slot-limit")?.value || 2));
+  maxActive = Math.round(maxActive);
+  await withButtonBusy(button, "Saving...", async () => {
+    const payload = await api("/api/downloads/policy", {
+      method: "POST",
+      body: JSON.stringify({ max_active_downloads: maxActive }),
+    });
+    await refreshState();
+    return payload;
+  }, {
+    successMessage: `Download running slots set to ${maxActive}.`,
+    successKind: "success",
+  });
+}
+
+async function clearDownloadQueue(button) {
+  const queuedCount = Number(state.data?.download_policy?.queued_downloads || 0);
+  const confirmed = window.confirm(
+    `Remove ${queuedCount} queued download ${queuedCount === 1 ? "job" : "jobs"}? Running downloads and files will be left alone.`,
+  );
+  if (!confirmed) return;
+
+  let removedCount = 0;
+  await withButtonBusy(button, "Clearing...", async () => {
+    const payload = await api("/api/downloads/clear-queued", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    removedCount = (payload.removed || []).length;
+    await refreshState();
+    return payload;
+  }, {
+    successMessage: `${removedCount} queued download ${removedCount === 1 ? "job" : "jobs"} removed.`,
+    successKind: "info",
+  });
+}
+
 function bindEvents() {
+  $("#remote-search")?.addEventListener("click", (event) => performRemoteSearch(event.currentTarget).catch(showError));
+  $("#remote-hide-gated")?.addEventListener("change", () => {
+    saveRemotePreferences();
+    renderRemoteModels(state.data?.remote_models || {});
+  });
+  $("#remote-models-table")?.addEventListener("click", (event) => onRemoteTableClick(event).catch(showError));
+  $("#downloads-table")?.addEventListener("click", (event) => onDownloadsTableClick(event).catch(showError));
+  $("#cleanup-downloads")?.addEventListener("click", (event) => cleanupDownloads(event.currentTarget).catch(showError));
+  $("#recover-downloads")?.addEventListener("click", (event) => recoverDownloads(event.currentTarget).catch(showError));
+  $("#cleanup-duplicate-downloads")?.addEventListener("click", (event) => cleanupDuplicateDownloads(event.currentTarget).catch(showError));
+  $("#delete-orphaned-artifacts")?.addEventListener("click", (event) => deleteOrphanedArtifacts(event.currentTarget).catch(showError));
+  $("#pause-download-queue")?.addEventListener("click", (event) => setDownloadQueuePaused(event.currentTarget, true).catch(showError));
+  $("#resume-download-queue")?.addEventListener("click", (event) => setDownloadQueuePaused(event.currentTarget, false).catch(showError));
+  $("#save-download-policy")?.addEventListener("click", (event) => saveDownloadPolicy(event.currentTarget).catch(showError));
+  $("#clear-download-queue")?.addEventListener("click", (event) => clearDownloadQueue(event.currentTarget).catch(showError));
   $("#refresh-all").addEventListener("click", (event) => withButtonBusy(event.currentTarget, "Refreshing...", async () => {
     await refreshState();
     await scanModels();
@@ -995,6 +1643,8 @@ function showError(error) {
 }
 
 async function main() {
+  loadCleanupRetentionPreference();
+  loadRemotePreferences();
   bindEvents();
   await refreshState();
   renderDiscovery(state.discovery);

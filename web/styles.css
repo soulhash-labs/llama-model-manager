@@ -970,3 +970,95 @@ input:focus {
     justify-content: flex-start;
   }
 }
+
+/* Remote model search and serialized download lifecycle controls. */
+.inline-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  min-height: 2.45rem;
+  padding: 0.22rem 0.58rem 0.22rem 0.72rem;
+  border: 1px solid rgba(27, 42, 70, 0.1);
+  border-radius: 0.86rem;
+  background: rgba(255, 255, 255, 0.68);
+  color: var(--muted-strong);
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.inline-field input {
+  width: 4.2rem;
+  padding: 0.42rem 0.52rem;
+  border-radius: 0.62rem;
+}
+
+.remote-controls .inline-field input.wide-input {
+  width: 12rem;
+}
+
+.remote-controls .inline-field input.wider-input {
+  width: min(18rem, 62vw);
+}
+
+.remote-controls .inline-field input[type="checkbox"] {
+  width: auto;
+}
+
+.panel-guidance {
+  margin-top: 0.55rem;
+  max-width: 72rem;
+  color: var(--muted-strong);
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.8rem;
+  padding: 0.28rem 0.54rem;
+  border: 1px solid rgba(27, 42, 70, 0.1);
+  border-radius: 999px;
+  background: rgba(90, 101, 120, 0.08);
+  color: var(--muted-strong);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.status-running,
+.status-queued,
+.status-likely-tight {
+  border-color: rgba(39, 99, 255, 0.18);
+  background: rgba(39, 99, 255, 0.08);
+  color: var(--accent-strong);
+}
+
+.status-good-fit,
+.status-completed {
+  border-color: rgba(31, 122, 86, 0.18);
+  background: rgba(31, 122, 86, 0.08);
+  color: #1f7a56;
+}
+
+.status-likely-incompatible,
+.status-failed,
+.status-cancelled {
+  border-color: rgba(208, 67, 97, 0.16);
+  background: rgba(208, 67, 97, 0.08);
+  color: var(--danger);
+}
+
+.progress-track {
+  width: min(12rem, 100%);
+  height: 0.52rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(27, 42, 70, 0.08);
+}
+
+.progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), #1f7a56);
+}

@@ -64,6 +64,15 @@ LLAMA_MODEL_SYNC_CLAUDE="${LLAMA_MODEL_SYNC_CLAUDE:-0}"
 LLAMA_MODEL_SYNC_OPENCLAW="${LLAMA_MODEL_SYNC_OPENCLAW:-0}"
 LLAMA_MODEL_SYNC_GLYPHOS="${LLAMA_MODEL_SYNC_GLYPHOS:-0}"
 
+PHASE0_SCHEMA_VERSION=1
+REMOTE_MODELS_FILE="$STATE_DIR/remote-models.json"
+DOWNLOAD_JOBS_FILE="$STATE_DIR/download-jobs.json"
+VALIDATION_RESULTS_FILE="$STATE_DIR/validation-results.json"
+HOST_CAPABILITY_FILE="$STATE_DIR/host-capability.json"
+RUNTIME_PROFILES_FILE="$CONFIG_DIR/runtime-profiles.json"
+LLAMA_MODEL_WEB_HOST="${LLAMA_MODEL_WEB_HOST:-$DASHBOARD_SERVICE_HOST}"
+LLAMA_MODEL_WEB_PORT="${LLAMA_MODEL_WEB_PORT:-$DASHBOARD_SERVICE_PORT}"
+
 if [[ -f "$DEFAULTS_FILE" ]]; then
     # User-tunable runtime defaults live here, not in the wrapper itself.
     # shellcheck disable=SC1090
@@ -113,6 +122,9 @@ Usage:
   llama-model sync-claude [model-id]
   llama-model sync-glyphos [alias|/path/to/model.gguf]
   llama-model claude-gateway start|stop|restart|status|logs
+  llama-model download-jobs
+  llama-model download-cancel <job_id>
+  llama-model download-retry <job_id>
   llama-model stop
   llama-model logs [lines]
   llama-model dashboard-service install|enable|disable|start|stop|restart|status|logs|uninstall
@@ -135,6 +147,7 @@ Examples:
   llama-model switch /absolute/path/to/model.gguf --no-warmup
   llama-model dashboard-service status
   llama-model dashboard-service install
+  llama-model download-jobs
 
 Registry format:
   alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes
@@ -147,6 +160,7 @@ Notes:
   - If no safe binary is available, run: llama-model build-runtime
   - opencode, OpenClaw, Claude Code, and GlyphOS keep their own client settings.
   - sync-opencode, sync-openclaw, sync-claude, and sync-glyphos align those settings with the active llama-model runtime.
+  - Download lifecycle commands use the llama-model-web API when available at http://${LLAMA_MODEL_WEB_HOST:-127.0.0.1}:${LLAMA_MODEL_WEB_PORT:-8765}.
 EOF
 }
 
@@ -165,6 +179,415 @@ iso_timestamp() {
     else
         date '+%Y-%m-%dT%H:%M:%S%z'
     fi
+}
+
+ensure_phase0_store_files() {
+    mkdir -p "$STATE_DIR"
+    if [[ ! -f "$REMOTE_MODELS_FILE" ]]; then
+        cat >"$REMOTE_MODELS_FILE" <<EOF
+{
+  "schema_version": ${PHASE0_SCHEMA_VERSION},
+  "provider": "huggingface",
+  "query": "",
+  "fetched_at": "",
+  "items": []
+}
+EOF
+    fi
+    if [[ ! -f "$DOWNLOAD_JOBS_FILE" ]]; then
+        cat >"$DOWNLOAD_JOBS_FILE" <<EOF
+{
+  "schema_version": ${PHASE0_SCHEMA_VERSION},
+  "updated_at": "",
+  "items": []
+}
+EOF
+    fi
+    if [[ ! -f "$VALIDATION_RESULTS_FILE" ]]; then
+        cat >"$VALIDATION_RESULTS_FILE" <<EOF
+{
+  "schema_version": ${PHASE0_SCHEMA_VERSION},
+  "items": []
+}
+EOF
+    fi
+}
+
+write_runtime_profiles_store() {
+    mkdir -p "$CONFIG_DIR"
+    command_available python3 || return 0
+    python3 - "$LLAMA_SERVER_RUNTIME_DIR" "$RUNTIME_PROFILES_FILE" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+runtime_dir = Path(sys.argv[1])
+root = runtime_dir / "llama-server"
+out_path = Path(sys.argv[2])
+
+def parse_env_file(path: Path) -> dict[str, str]:
+    data: dict[str, str] = {}
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return data
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip().strip('"').strip("'")
+        data[key.strip()] = value
+    return data
+
+items: list[dict[str, str]] = []
+if root.is_dir():
+    for compat in sorted(root.glob("*/llama-server.compat.env")):
+        meta = parse_env_file(compat)
+        profile_id = compat.parent.name
+        items.append({
+            "id": profile_id,
+            "os": meta.get("LLAMA_BUNDLE_OS", ""),
+            "arch": meta.get("LLAMA_BUNDLE_ARCH", ""),
+            "backend": meta.get("LLAMA_BUNDLE_BACKEND", ""),
+            "label": meta.get("LLAMA_BUNDLE_LABEL", profile_id),
+            "source_ref": meta.get("LLAMA_BUNDLE_SOURCE_REF", ""),
+            "built_at": meta.get("LLAMA_BUNDLE_BUILT_AT", ""),
+            "binary_path": str((compat.parent / "llama-server").resolve()),
+            "manifest_path": str(compat.resolve()),
+        })
+
+payload = {"schema_version": 1, "items": items}
+out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+write_host_capability_store() {
+    mkdir -p "$STATE_DIR"
+    command_available python3 || return 0
+    python3 - \
+        "$HOST_CAPABILITY_FILE" \
+        "$SELECTED_LLAMA_SERVER_HOST_OS" \
+        "$SELECTED_LLAMA_SERVER_HOST_ARCH" \
+        "$SELECTED_LLAMA_SERVER_HOST_BACKENDS" \
+        "$SELECTED_LLAMA_SERVER_BACKEND" \
+        "$binary_ok" \
+        "$SELECTED_LLAMA_SERVER_BIN" \
+        "$SELECTED_LLAMA_SERVER_SOURCE" \
+        "$SELECTED_LLAMA_SERVER_STATUS" \
+        "$SELECTED_LLAMA_SERVER_LABEL" \
+        "$SELECTED_LLAMA_SERVER_MESSAGE" \
+        "$SELECTED_LLAMA_SERVER_BUNDLE_MANIFEST" \
+        "$(detect_system_available_mib || printf 0)" \
+        "$(system_memory_report || printf '0 B')" <<'PY'
+import json
+import sys
+
+out_path = sys.argv[1]
+host_os = sys.argv[2]
+host_arch = sys.argv[3]
+host_backends_raw = sys.argv[4]
+backend = sys.argv[5]
+binary_ok = sys.argv[6]
+bin_path = sys.argv[7]
+bin_source = sys.argv[8]
+bin_status = sys.argv[9]
+bin_label = sys.argv[10]
+bin_message = sys.argv[11]
+manifest_path = sys.argv[12]
+memory_mib_raw = sys.argv[13]
+memory_human_raw = sys.argv[14]
+try:
+    memory_bytes = max(0, int(memory_mib_raw)) * 1024 * 1024
+except ValueError:
+    memory_bytes = 0
+
+host_backends = [part.strip().lower() for part in (host_backends_raw or "").split(",") if part.strip()]
+preferred_backend = (backend or "").strip().lower()
+if not preferred_backend:
+    preferred_backend = "cuda" if "cuda" in host_backends else (host_backends[0] if host_backends else "")
+
+payload = {
+    "schema_version": 1,
+    "host_os": host_os,
+    "host_arch": host_arch,
+    "host_backends": host_backends,
+    "preferred_backend": preferred_backend,
+    "memory_bytes": memory_bytes,
+    "memory_human": memory_human_raw if memory_bytes else "0 B",
+    "binary_ok": binary_ok or "unknown",
+    "selected_binary": {
+        "path": bin_path or "",
+        "source": bin_source or "none",
+        "backend": (backend or "").strip().lower(),
+        "status": bin_status or "unavailable",
+        "label": bin_label or "",
+        "message": bin_message or "",
+        "manifest_path": manifest_path or "",
+    },
+}
+
+with open(out_path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, indent=2)
+    handle.write("\n")
+PY
+}
+
+write_phase0_contract_stores() {
+    ensure_phase0_store_files
+    write_runtime_profiles_store || true
+    write_host_capability_store || true
+}
+
+web_api_post_json() {
+    local path="$1"
+    local json_payload="$2"
+    local url="http://${LLAMA_MODEL_WEB_HOST}:${LLAMA_MODEL_WEB_PORT}${path}"
+
+    if command_available curl; then
+        curl -fsS --max-time 2 -H "Content-Type: application/json" -d "$json_payload" "$url" 2>/dev/null
+        return $?
+    fi
+
+    if command_available python3; then
+        python3 - "$url" "$json_payload" <<'PY'
+import sys
+import urllib.request
+
+url = sys.argv[1]
+payload = sys.argv[2].encode("utf-8")
+req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+with urllib.request.urlopen(req, timeout=2) as resp:
+    sys.stdout.write(resp.read().decode("utf-8"))
+PY
+        return $?
+    fi
+
+    return 1
+}
+
+print_job_payload() {
+    local note="${1:-}"
+    local json_payload
+
+    command_available python3 || die "python3 is required for download lifecycle commands"
+    json_payload="$(cat)"
+    python3 - "$note" "$json_payload" <<'PY'
+import json
+import sys
+
+note = sys.argv[1]
+try:
+    data = json.loads(sys.argv[2] or "{}")
+except json.JSONDecodeError:
+    data = {}
+job = data.get("job", data) if isinstance(data, dict) else {}
+if not isinstance(job, dict):
+    job = {}
+
+def emit(key, value):
+    value = "" if value is None else value
+    print(f"{key}: {value}")
+
+emit("id", job.get("id", ""))
+emit("status", job.get("status", ""))
+emit("repo_id", job.get("repo_id", ""))
+emit("artifact_name", job.get("artifact_name", ""))
+emit("error", job.get("error", ""))
+if note:
+    emit("note", note)
+PY
+}
+
+download_jobs() {
+    ensure_phase0_store_files
+    if ! command_available python3; then
+        printf 'no jobs\n'
+        return 0
+    fi
+    python3 - "$DOWNLOAD_JOBS_FILE" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+except Exception:
+    print("no jobs")
+    raise SystemExit(0)
+
+items = payload.get("items", [])
+if not isinstance(items, list):
+    items = []
+
+jobs = [item for item in items if isinstance(item, dict)]
+if not jobs:
+    print("no jobs")
+    raise SystemExit(0)
+
+print(f"{'ID':<12} {'STATUS':<10} REPO ARTIFACT")
+for job in jobs:
+    job_id = str(job.get("id", ""))
+    status = str(job.get("status", ""))
+    repo = str(job.get("repo_id", ""))
+    artifact = str(job.get("artifact_name", ""))
+    print(f"{job_id:<12} {status:<10} {repo} {artifact}")
+PY
+}
+
+download_cancel_local() {
+    local job_id="$1"
+    ensure_phase0_store_files
+    command_available python3 || die "python3 is required for download lifecycle commands"
+    python3 - "$DOWNLOAD_JOBS_FILE" "$job_id" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+
+path = sys.argv[1]
+job_id = sys.argv[2]
+
+def iso_now():
+    return datetime.now(timezone.utc).isoformat()
+
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+except Exception:
+    payload = None
+
+if not isinstance(payload, dict):
+    print(f"Download job not found: {job_id}", file=sys.stderr)
+    raise SystemExit(1)
+
+items = payload.get("items", [])
+if not isinstance(items, list):
+    items = []
+
+target = None
+for entry in items:
+    if isinstance(entry, dict) and str(entry.get("id", "")) == job_id:
+        target = entry
+        break
+
+if target is None:
+    print(f"Download job not found: {job_id}", file=sys.stderr)
+    raise SystemExit(1)
+
+target["cancel_requested"] = True
+target["status"] = "cancelled"
+target["error"] = "Download was cancelled by operator."
+target["completed_at"] = iso_now()
+payload["updated_at"] = iso_now()
+
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, indent=2)
+    handle.write("\n")
+
+print(json.dumps({"job": target}))
+PY
+}
+
+download_retry_local() {
+    local job_id="$1"
+    ensure_phase0_store_files
+    command_available python3 || die "python3 is required for download lifecycle commands"
+    python3 - "$DOWNLOAD_JOBS_FILE" "$job_id" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from uuid import uuid4
+
+path = sys.argv[1]
+job_id = sys.argv[2]
+
+def iso_now():
+    return datetime.now(timezone.utc).isoformat()
+
+def new_id():
+    return uuid4().hex[:12]
+
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+except Exception:
+    payload = None
+
+if not isinstance(payload, dict):
+    print(f"Download job not found: {job_id}", file=sys.stderr)
+    raise SystemExit(1)
+
+items = payload.get("items", [])
+if not isinstance(items, list):
+    items = []
+
+source = None
+for entry in items:
+    if isinstance(entry, dict) and str(entry.get("id", "")) == job_id:
+        source = entry
+        break
+
+if source is None:
+    print(f"Download job not found: {job_id}", file=sys.stderr)
+    raise SystemExit(1)
+
+job = dict(source)
+job["id"] = new_id()
+job["status"] = "queued"
+job["cancel_requested"] = False
+job["bytes_downloaded"] = 0
+job["progress"] = 0.0
+job["error"] = ""
+job["verification_summary"] = ""
+job["mmproj_verification_summary"] = ""
+job["local_path"] = ""
+job["mmproj_local_path"] = ""
+job["imported_alias"] = ""
+job["notes"] = ""
+job["created_at"] = iso_now()
+job.pop("started_at", None)
+job.pop("completed_at", None)
+
+items.insert(0, job)
+payload["items"] = items
+payload["updated_at"] = iso_now()
+
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, indent=2)
+    handle.write("\n")
+
+print(json.dumps({"job": job}))
+PY
+}
+
+download_cancel() {
+    local job_id="$1"
+    local payload
+    payload="$(web_api_post_json "/api/downloads/cancel" "$(printf '{\"id\":\"%s\"}' "$job_id")" || true)"
+    if [[ -n "$payload" ]]; then
+        printf '%s' "$payload" | print_job_payload "cancelled via llama-model-web API"
+        return 0
+    fi
+    if ! payload="$(download_cancel_local "$job_id")"; then
+        return $?
+    fi
+    printf '%s' "$payload" | print_job_payload ""
+}
+
+download_retry() {
+    local job_id="$1"
+    local payload
+    payload="$(web_api_post_json "/api/downloads/retry" "$(printf '{\"id\":\"%s\"}' "$job_id")" || true)"
+    if [[ -n "$payload" ]]; then
+        printf '%s' "$payload" | print_job_payload "retried via llama-model-web API"
+        return 0
+    fi
+    if ! payload="$(download_retry_local "$job_id")"; then
+        return $?
+    fi
+    printf '%s' "$payload" | print_job_payload ""
 }
 
 ensure_models_file() {
@@ -4002,6 +4425,20 @@ main() {
         claude-gateway)
             shift
             claude_gateway_command "$@"
+            ;;
+        download-jobs)
+            shift
+            download_jobs "$@"
+            ;;
+        download-cancel)
+            shift
+            [[ $# -ge 1 ]] || die "download-cancel requires a job id"
+            download_cancel "$@"
+            ;;
+        download-retry)
+            shift
+            [[ $# -ge 1 ]] || die "download-retry requires a job id"
+            download_retry "$@"
             ;;
         stop)
             shift

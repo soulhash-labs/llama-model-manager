@@ -29,6 +29,9 @@ Commands:
   llama-model sync-claude [model-id]
   llama-model claude-gateway start|stop|restart|status|logs
   llama-model sync-glyphos [alias|/path/to/model.gguf]
+  llama-model download-jobs
+  llama-model download-cancel <job_id>
+  llama-model download-retry <job_id>
   llama-model-web
 
 Registry file:
@@ -73,8 +76,14 @@ Startup mitigation:
 
 Dashboard:
   Run llama-model-web or launch "LLM Model Manager" from the desktop or app menu.
-  The browser UI can switch models, scan/import new GGUFs, edit presets, save defaults, and inspect runtime/binary diagnostics.
+  The browser UI can switch models, scan/import local GGUFs, search cached Hugging Face GGUF artifacts, manage serialized downloads, edit presets, save defaults, and inspect runtime/binary diagnostics.
   It also tells you when the registry or defaults files do not exist yet, instead of showing an empty editor with no context.
+
+Remote downloads:
+  Search remote GGUF artifacts from the dashboard, then queue downloads through the managed lifecycle. Jobs are persisted under ~/.local/state/llama-server/download-jobs.json and can be inspected or recovered with:
+    llama-model download-jobs
+    llama-model download-cancel <job_id>
+    llama-model download-retry <job_id>
 
 Optional background service:
   The dashboard stays on-demand by default.
