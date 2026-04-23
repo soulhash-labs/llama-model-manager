@@ -21,7 +21,11 @@ POSTER_PATH = OUT_DIR / "glyphos-encoding-demo-poster.png"
 WIDTH = 1280
 HEIGHT = 720
 FPS = 12
-FRAMES = 72
+ANIMATION_FRAMES = 72
+CTA_HOLD_FRAMES = 24
+CTA_FADE_FRAMES = 14
+CTA_START_FRAME = ANIMATION_FRAMES - CTA_FADE_FRAMES
+FRAMES = ANIMATION_FRAMES + CTA_HOLD_FRAMES
 SCALE = 1
 
 COLORS = {
@@ -222,7 +226,7 @@ def draw_footer(draw: ImageDraw.ImageDraw, progress: float) -> None:
 
 
 def draw_frame(frame_index: int) -> Image.Image:
-    progress = frame_index / (FRAMES - 1)
+    progress = min(frame_index, ANIMATION_FRAMES - 1) / (ANIMATION_FRAMES - 1)
     img = make_background(frame_index)
     draw = ImageDraw.Draw(img)
     draw_header(draw)
@@ -231,13 +235,22 @@ def draw_frame(frame_index: int) -> Image.Image:
     draw_glyph_panel(img, progress)
     draw_footer(draw, progress)
 
-    if frame_index > FRAMES - 13:
-        fade = int(170 * (frame_index - (FRAMES - 13)) / 12)
-        overlay = Image.new("RGBA", img.size, (252, 249, 240, fade))
-        img.alpha_composite(overlay)
-        d = ImageDraw.Draw(img)
-        text_center(d, (640, 328), "Stay local. Stay private. Stay fast.", FONT_TITLE, COLORS["ink"])
-        text_center(d, (640, 384), "llama-model-manager + GlyphOS AI Compute", FONT_BODY, COLORS["blue"])
+    if frame_index >= CTA_START_FRAME:
+        cta_progress = ease((frame_index - CTA_START_FRAME) / CTA_FADE_FRAMES)
+        wash = Image.new("RGBA", img.size, (255, 255, 255, int(238 * cta_progress)))
+        img.alpha_composite(wash)
+
+        cta = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        cd = ImageDraw.Draw(cta)
+        card_alpha = int(245 * cta_progress)
+        text_alpha = int(255 * cta_progress)
+        shadow_alpha = int(36 * cta_progress)
+        cd.rounded_rectangle((264, 246, 1016, 472), radius=34, fill=(26, 39, 48, shadow_alpha))
+        cd.rounded_rectangle((250, 232, 1030, 456), radius=34, fill=(255, 255, 255, card_alpha), outline=(202, 190, 168, card_alpha), width=2)
+        text_center(cd, (640, 320), "Stay local. Stay private. Stay fast.", FONT_TITLE, COLORS["ink"] + (text_alpha,))
+        text_center(cd, (640, 378), "llama-model-manager + GlyphOS AI Compute", FONT_BODY, COLORS["blue"] + (text_alpha,))
+        text_center(cd, (640, 420), "compact glyph encoding -> active local llama.cpp endpoint", FONT_SMALL, COLORS["muted"] + (text_alpha,))
+        img.alpha_composite(cta)
     return img.convert("RGB")
 
 
