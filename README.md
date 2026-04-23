@@ -2,7 +2,7 @@
 
 **by soulhash.ai**
 
-llama-model-manager is a local AI operations dashboard for `llama.cpp` and GlyphOS AI Compute. It gives you one browser-first control surface to discover GGUFs, switch models, tune runtime posture, inspect health, sync local coding tools, and route GlyphOS workloads into the active local endpoint, with CLI and desktop launchers included.
+llama-model-manager is a local AI operations dashboard for `llama.cpp` and GlyphOS AI Compute. It gives you a browser-first control surface to discover GGUFs, switch models, tune runtime posture, inspect health, sync local coding tools, and route supported GlyphOS workloads through the active local endpoint with compact glyph encoding designed to reduce token payloads by 60-90% and speed transport. CLI and desktop launchers are included.
 
 ![Dashboard overview](docs/screenshots/dashboard-overview.png)
 
