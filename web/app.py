@@ -99,6 +99,12 @@ DEMO_STATE = {
         "offload": "offloaded 41/41 layers to GPU",
         "kv_buffer": "2500.00 MiB",
         "graph_splits": "2",
+        "gpu_memory": "NVIDIA RTX: 14.3 GiB used / 24.0 GiB total (9.7 GiB free)",
+        "gpu_process_count": "1",
+        "gpu_processes": "pid=28142 port=8081 context=128000 ngl=999 model=/models/qwen/Qwen3.6-35-Q2_M.gguf",
+        "startup_category": "",
+        "startup_diagnosis": "",
+        "startup_suggested_fix": "",
         "server": "http://127.0.0.1:8081",
     },
     "mode": {
@@ -375,6 +381,29 @@ class Manager:
         alias = re.sub(r"-{2,}", "-", alias)
         return alias
 
+    def model_family_token(self, path: str) -> str:
+        name = Path(path).name.lower().replace("_", "-").replace(".", "-")
+        match = re.search(r"qwen3-5-([0-9]+b)", name) or re.search(r"qwen35-([0-9]+b)", name)
+        if match:
+            return f"qwen3.5-{match.group(1)}"
+        match = re.search(r"gemma-4-(e[0-9]+b)", name) or re.search(r"gemma4-(e[0-9]+b)", name)
+        if match:
+            return f"gemma4-{match.group(1)}"
+        match = re.search(r"(?:^|[^a-z0-9])(e?[0-9]+b)(?:[^a-z0-9]|$)", name)
+        return match.group(1) if match else ""
+
+    def mmproj_matches_model_filename(self, model_path: str, mmproj_path: str) -> bool:
+        model_token = self.model_family_token(model_path)
+        mmproj_token = self.model_family_token(mmproj_path)
+        return not model_token or not mmproj_token or model_token == mmproj_token
+
+    def validate_mmproj_for_model(self, model_path: str, mmproj_path: str) -> None:
+        if mmproj_path and not self.mmproj_matches_model_filename(model_path, mmproj_path):
+            raise ValueError(
+                "mmproj appears to target a different model family: "
+                f"{Path(mmproj_path).name} for {Path(model_path).name}"
+            )
+
     def split_extra(self, extra: str) -> dict[str, str]:
         extra = extra.strip()
         if not extra:
@@ -440,6 +469,7 @@ class Manager:
             mmproj = str(Path(mmproj).expanduser().resolve())
             if not Path(mmproj).is_file():
                 raise ValueError(f"mmproj not found: {mmproj}")
+            self.validate_mmproj_for_model(resolved_model_path, mmproj)
 
         model = {
             "alias": alias,

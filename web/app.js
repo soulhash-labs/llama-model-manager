@@ -374,6 +374,14 @@ function renderStatus(data) {
       doctor.graph_splits ? `splits ${doctor.graph_splits}` : "",
     ]) || "-",
   );
+  setText("#metric-gpu-memory", doctor.gpu_memory || "not reported");
+  setText(
+    "#metric-gpu-processes",
+    doctor.gpu_process_count && doctor.gpu_process_count !== "0"
+      ? `${doctor.gpu_process_count} llama-server process${doctor.gpu_process_count === "1" ? "" : "es"}`
+      : "no llama-server GPU peers detected",
+  );
+  setTitle("#metric-gpu-processes", doctor.gpu_processes || "");
   setText("#metric-endpoint", data.api_base || "-");
   setText(
     "#metric-build",

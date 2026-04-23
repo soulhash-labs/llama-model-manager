@@ -73,6 +73,18 @@ run_doctor() {
         "$BIN" doctor
 }
 
+run_cli() {
+    local tmp="$1"
+    shift
+    env \
+        HOME="$tmp/home" \
+        PATH="/usr/bin:/bin" \
+        XDG_CONFIG_HOME="$tmp/config" \
+        XDG_STATE_HOME="$tmp/state" \
+        LLAMA_SERVER_RUNTIME_DIR="$tmp/runtime" \
+        "$BIN" "$@"
+}
+
 test_host_match_accepts_bundled_backend() {
     local tmp
     local output
@@ -293,8 +305,8 @@ test_state_and_shell_split_helpers() {
     STATE_FILE="$tmp/state/llama-server/current.env"
 
     write_state "demo" "/tmp/My Models/model.gguf" "1234" "8192" "999" "128" "16" "1" "cuda0"
-    assert_contains "$(cmd_arg_from_pid $$ -m || true)" "/tmp/My Models/model.gguf"
-    assert_contains "$(cmd_arg_from_pid $$ --threads || true)" "16"
+    assert_contains "$(cmd_arg_from_pid 1234 -m || true)" "/tmp/My Models/model.gguf"
+    assert_contains "$(cmd_arg_from_pid 1234 --threads || true)" "16"
 
     parsed="$(split_shell_words "--mmproj '/tmp/My Models/mmproj.gguf' --flag value" | tr '\0' '\n')"
     assert_contains "$parsed" "--mmproj"
@@ -337,6 +349,103 @@ PY
     assert_contains "$output" "/tmp/My Models/mmproj.gguf"
     assert_contains "$output" "--flag 'two words'"
     assert_contains "$output" "--mmproj '/tmp/My Models/mmproj.gguf'"
+}
+
+
+test_cuda_cc_parsing_rejects_non_numeric_values() {
+    # shellcheck disable=SC1090
+    source "$BIN"
+    if cc_to_int "NVIDIA-SMI failed" >/dev/null 2>&1; then
+        fail "expected non-numeric CUDA compute capability to be rejected"
+    fi
+    LLAMA_HOST_CUDA_CC="NVIDIA-SMI failed"
+    if detect_host_cuda_cc >/dev/null 2>&1; then
+        fail "expected invalid LLAMA_HOST_CUDA_CC to be ignored"
+    fi
+}
+
+test_startup_log_classifier_emits_actionable_categories() {
+    local tmp
+    local output
+
+    tmp="$(mktemp -d)"
+    cat >"$tmp/llama-server.log" <<'EOF'
+llama_context: n_ctx = 983552
+ggml_backend_cuda_buffer_type_alloc_buffer: allocating 30736.00 MiB on device 0: cudaMalloc failed: out of memory
+llama_init_from_model: failed to initialize the context: failed to allocate buffer for kv cache
+EOF
+    # shellcheck disable=SC1090
+    source "$BIN"
+    output="$(startup_failure_message "$tmp/llama-server.log" 983304)"
+    assert_contains "$output" "startup_category: kv-cache-oom"
+    assert_contains "$output" "requested_context: 983304"
+    assert_contains "$output" "lower context"
+
+    cat >"$tmp/llama-server.log" <<'EOF'
+mtmd_init_from_file: error: mismatch between text model (n_embd = 2560) and mmproj (n_embd = 2048)
+hint: you may be using wrong mmproj
+EOF
+    output="$(startup_failure_message "$tmp/llama-server.log" 32768)"
+    assert_contains "$output" "startup_category: mmproj-mismatch"
+    assert_contains "$output" "matching mmproj"
+}
+
+test_add_blocks_obvious_mmproj_family_mismatch() {
+    local tmp
+    local model
+    local wrong_mmproj
+    local right_mmproj
+    local err
+    local output
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    model="$tmp/models/Qwen3.5-4B-Q6_K.gguf"
+    wrong_mmproj="$tmp/models/mmproj-Qwen3.5-2B-f16.gguf"
+    right_mmproj="$tmp/models/mmproj-Qwen3.5-4B-BF16.gguf"
+    make_model "$model"
+    make_model "$wrong_mmproj"
+    make_model "$right_mmproj"
+
+    err="$tmp/add.err"
+    if run_cli "$tmp" add qwen4 "$model" --mmproj "$wrong_mmproj" >"$tmp/add.out" 2>"$err"; then
+        fail "expected mismatched mmproj add to fail"
+    fi
+    assert_contains "$(cat "$err")" "mmproj appears to target a different model family"
+
+    output="$(run_cli "$tmp" add qwen4 "$model" --mmproj "$wrong_mmproj" --force-mmproj 2>/dev/null)"
+    assert_contains "$output" "added qwen4"
+
+    output="$(run_cli "$tmp" add qwen4 "$model" --mmproj "$right_mmproj")"
+    assert_contains "$output" "updated qwen4"
+}
+
+test_doctor_reports_gpu_pressure_and_process_rows() {
+    local tmp
+    local output
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    : >"$tmp/llama-server.log"
+
+    # shellcheck disable=SC1090
+    source "$BIN"
+    find_pid() { return 1; }
+    probe_server_binary() { return 1; }
+    gpu_memory_report() { printf 'NVIDIA GTX 1080 Ti: 6.3 GiB used / 11.0 GiB total (4.6 GiB free)\n'; }
+    llama_server_process_rows() { printf 'pid=1491 port=8080 context=131072 ngl=99 model=/models/gemma.gguf\n'; }
+
+    HOME="$tmp/home"
+    XDG_CONFIG_HOME="$tmp/config"
+    XDG_STATE_HOME="$tmp/state"
+    LLAMA_SERVER_RUNTIME_DIR="$tmp/runtime"
+    LLAMA_SERVER_PORT=19081
+    LLAMA_SERVER_LOG="$tmp/llama-server.log"
+
+    output="$(show_doctor)"
+    assert_contains "$output" "gpu_memory: NVIDIA GTX 1080 Ti"
+    assert_contains "$output" "gpu_process_count: 1"
+    assert_contains "$output" "pid=1491 port=8080 context=131072 ngl=99 model=/models/gemma.gguf"
 }
 
 test_registry_parsing_preserves_empty_columns() {
@@ -736,12 +845,25 @@ main() {
     test_dependency_install_preview_exists
     test_state_and_shell_split_helpers
     test_web_round_trip_for_quoted_values
+    test_cuda_cc_parsing_rejects_non_numeric_values
+    test_startup_log_classifier_emits_actionable_categories
+    test_add_blocks_obvious_mmproj_family_mismatch
+    test_doctor_reports_gpu_pressure_and_process_rows
     test_registry_parsing_preserves_empty_columns
     test_doctor_tolerates_missing_log_markers
     test_dashboard_service_unit_rendering
     test_dashboard_service_status_reports_unsupported_without_systemctl
     test_doctor_reports_external_systemd_owner
     test_bundled_glyphos_public_package_exists
+    test_integration_sync_cli_glyphos_entrypoint
+    test_sync_opencode_updates_config_and_state
+    test_sync_opencode_long_run_preset
+    test_sync_openclaw_updates_profile_config
+    test_sync_glyphos_updates_config
+    test_sync_claude_updates_settings
+    test_claude_gateway_detects_existing_listener
+    test_claude_gateway_timeout_default_visible
+    test_claude_gateway_status_without_runtime_is_clean
     printf 'All portability tests passed.\n'
 }
 

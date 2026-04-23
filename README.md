@@ -11,7 +11,7 @@ If you're running Claude Code, OpenClaw, or opencode, this is where your stabili
 Key capabilities:
 
 - 📦 **GGUF Discovery & Management:** Find, register, and hot-swap local models.
-- ⚙️ **Runtime Posture Tuning:** Real-time control over context limits, GPU offload, batch, threads, and health metrics.
+- ⚙️ **Runtime Posture Tuning:** Real-time control over context limits, GPU offload, batch, threads, health metrics, and guarded startup auto-fit.
 - 🛠️ **Dev-Tool Sync:** Native integration for local coding environments, with CLI and desktop launchers included.
 - 🧬 **GlyphOS™ Routing:** Route workloads through the active local endpoint with 🔱 𝚿 Glyph Encoding, reducing token payloads by 60-90% for faster transport and stronger long-context stability.
 
@@ -156,9 +156,10 @@ If `doctor` reports `binary_status: unavailable`, install the missing build depe
 - browser dashboard for switching models, importing discovered GGUFs, editing presets, and checking runtime health
 - structured registry entries with per-model overrides for context, `ngl`, batch, threads, parallel, device, and notes
 - automatic discovery of `.gguf` models plus same-directory `mmproj` sidecars
-- CLI diagnostics via `llama-model doctor`
+- CLI diagnostics via `llama-model doctor`, including startup failure categories and GPU pressure visibility
 - manifest-driven runtime selection that only accepts validated bundled binaries
 - local `llama.cpp` bootstrap via `llama-model build-runtime`
+- guarded auto-fit for known CUDA/KV-cache/projector startup failures without silently persisting downgraded settings
 - OpenAI-compatible endpoint summary plus sync wiring for local harnesses such as `opencode`, `OpenClaw`, and `Claude Code`
 - bundled GlyphOS AI Compute support for routing glyph-driven workloads to the active local model
 - Modern Operator dashboard treatment with toasts, busy states, and first-run empty states
@@ -214,6 +215,7 @@ These integrations are optional. The default product behavior remains the local 
 - the runtime build script fetches `llama.cpp` source automatically, but system dependencies must already be present
 - the scripts use XDG-style config/state locations under `~/.config/llama-server` and `~/.local/state/llama-server`
 - `LLAMA_SERVER_PARALLEL=1` is recommended for a single coding harness because it avoids parallel slot pressure without reducing context length
+- `LLAMA_MODEL_AUTO_FIT=1` is the default guarded startup mitigation; use `--no-auto-fit` for a strict launch
 - set `LLAMA_MODEL_UI=zenity` if you want to force the old Zenity UI instead of the browser dashboard
 
 ## Bundled Local Packages

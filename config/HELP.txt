@@ -5,7 +5,7 @@ Local Runtime Control
 Commands:
   llama-model list
   llama-model show <alias>
-  llama-model add <alias> <path> [--mmproj <path>] [--extra "<args>"] [--context N] [--ngl N] [--batch N] [--threads N] [--parallel auto|N] [--device NAME] [--notes TEXT]
+  llama-model add <alias> <path> [--mmproj <path>] [--force-mmproj] [--extra "<args>"] [--context N] [--ngl N] [--batch N] [--threads N] [--parallel auto|N] [--device NAME] [--notes TEXT]
   llama-model remove <alias>
   llama-model discover [root]
   llama-model current
@@ -14,7 +14,7 @@ Commands:
   llama-model mode
   llama-model set-mode single --restart
   llama-model set-mode multi --restart
-  llama-model switch qwen35-9b-q8
+  llama-model switch qwen35-9b-q8 --auto-fit
   llama-model switch qwen36-35b-iq3
   llama-model switch gemma4-e4b-q8
   llama-model switch /absolute/path/to/model.gguf
@@ -50,6 +50,7 @@ Useful defaults:
   LLAMA_SERVER_DEVICE=
   LLAMA_SERVER_PARALLEL=
   LLAMA_SERVER_EXTRA_ARGS=
+  LLAMA_MODEL_AUTO_FIT=1
 
 Binary portability:
   llama.cpp source is portable. Built binaries are not universal.
@@ -66,6 +67,9 @@ For single-client coding harnesses, a good optional tweak is:
   LLAMA_SERVER_PARALLEL=1
 
 That does not increase context. It simply reduces slot count so the server is more deterministic for one active client.
+
+Startup mitigation:
+  switch/restart default to guarded auto-fit. When llama.cpp hits known CUDA/KV-cache/projector startup failures, llama-model prints the category and may retry with safer runtime-only settings. Use --no-auto-fit to disable this for a launch, --require-mmproj to prevent text-only projector fallback, or --force-mmproj only when you intentionally accept a filename-family mismatch.
 
 Dashboard:
   Run llama-model-web or launch "LLM Model Manager" from the desktop or app menu.
