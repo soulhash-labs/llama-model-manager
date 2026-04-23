@@ -2,7 +2,20 @@
 
 **by soulhash.ai**
 
-llama-model-manager is a local AI operations dashboard for `llama.cpp` and GlyphOS AI Compute. It gives you a browser-first control surface to discover GGUFs, switch models, tune runtime posture, inspect health, sync local coding tools, and route supported GlyphOS workloads through the active local endpoint with compact glyph encoding designed to reduce token payloads by 60-90% and speed transport. CLI and desktop launchers are included.
+## 🔱 The Engine Room for Local AI
+
+llama-model-manager is a production-grade operations dashboard for `llama.cpp` and GlyphOS™ AI Compute. It transforms local inference from a brittle CLI experiment into a resilient, browser-first control surface.
+
+If you're running Claude Code, OpenClaw, or opencode, this is where your stability lives.
+
+Key capabilities:
+
+- 📦 **GGUF Discovery & Management:** Find, register, and hot-swap local models.
+- ⚙️ **Runtime Posture Tuning:** Real-time control over context limits, GPU offload, batch, threads, and health metrics.
+- 🛠️ **Dev-Tool Sync:** Native integration for local coding environments, with CLI and desktop launchers included.
+- 🧬 **GlyphOS™ Routing:** Route workloads through the active local endpoint with 🔱 𝚿 Glyph Encoding, reducing token payloads by 60-90% for faster transport and stronger long-context stability.
+
+Stay local. Stay sovereign. Stay fast.
 
 ![Dashboard overview](docs/screenshots/dashboard-overview.png)
 
