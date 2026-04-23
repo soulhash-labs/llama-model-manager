@@ -231,6 +231,10 @@ These integrations are optional. The default product behavior remains the local 
 - `llama-model sync-glyphos` writes `~/.glyphos/config.yaml` so the bundled public GlyphOS AI Compute package can target the active local `llama.cpp` endpoint directly.
 - the dashboard exposes direct sync actions for all three tools and gateway controls for Claude Code.
 
+## Roadmap
+
+Planned follow-up is tracked in [docs/ROADMAP.md](docs/ROADMAP.md), including long-run session handoff: persistent run state, completion summaries, artifacts, and optional local notifications for extended agent sessions.
+
 ## Common Commands
 
 ```bash
