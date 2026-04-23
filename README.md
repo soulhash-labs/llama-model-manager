@@ -228,10 +228,13 @@ These integrations are optional. The default product behavior remains the local 
 ## Client Sync
 
 - `opencode` keeps its own local client config in `~/.config/opencode/opencode.json`, so it can keep pointing at a stale GGUF even after `llama-model switch`.
+- successful model switches auto-run the OpenCode sync by default with `LLAMA_MODEL_SYNC_OPENCODE=1`; set it to `0` for manual-only sync.
 - `llama-model sync-opencode` updates the `llamacpp` provider endpoint, default model, and local model-state wiring to match `llama-model current`.
 - `llama-model sync-openclaw` updates `~/.openclaw/openclaw.json` or `~/.openclaw-<profile>/openclaw.json` so OpenClaw points directly at the live local endpoint.
 - `llama-model sync-claude` writes `~/.claude/settings.json` for Claude Code, and `llama-model claude-gateway` runs a local Anthropic-compatible bridge in front of the current llama.cpp server.
 - `llama-model sync-glyphos` writes `~/.glyphos/config.yaml` so the bundled public GlyphOS AI Compute package can target the active local `llama.cpp` endpoint directly.
+- post-switch sync for Claude Code, OpenClaw, and GlyphOS is opt-in with `LLAMA_MODEL_SYNC_CLAUDE=1`, `LLAMA_MODEL_SYNC_OPENCLAW=1`, and `LLAMA_MODEL_SYNC_GLYPHOS=1`.
+- post-switch sync is non-fatal; a client-config error warns but does not roll back a successfully started local model.
 - the dashboard exposes direct sync actions for all three tools and gateway controls for Claude Code.
 
 ## Roadmap

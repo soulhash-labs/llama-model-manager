@@ -88,6 +88,12 @@ def sync_opencode(args: argparse.Namespace) -> None:
         else:
             normalized_recent.append(item)
     state["recent"] = normalized_recent
+    # OpenCode state has used multiple shapes across releases. Keep the
+    # compatibility fields aligned so an old UI cache cannot pin a stale model.
+    state["providerID"] = "llamacpp"
+    state["modelID"] = model_name
+    state["id"] = provider_model
+    state["provider"] = "llamacpp"
     variant = state.get("variant")
     if not isinstance(variant, dict):
         variant = {}

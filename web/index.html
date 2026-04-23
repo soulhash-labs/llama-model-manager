@@ -418,6 +418,22 @@
               Extra Args
               <input name="LLAMA_SERVER_EXTRA_ARGS" id="default-extra">
             </label>
+            <label title="1 keeps OpenCode aligned after each successful model switch. Use 0 if you want manual sync only.">
+              Auto Sync OpenCode
+              <input name="LLAMA_MODEL_SYNC_OPENCODE" id="default-sync-opencode" placeholder="1">
+            </label>
+            <label title="Opt-in. Set to 1 to update Claude Code settings after each successful model switch.">
+              Auto Sync Claude
+              <input name="LLAMA_MODEL_SYNC_CLAUDE" id="default-sync-claude" placeholder="0">
+            </label>
+            <label title="Opt-in. Set to 1 to update the configured OpenClaw profile after each successful model switch.">
+              Auto Sync OpenClaw
+              <input name="LLAMA_MODEL_SYNC_OPENCLAW" id="default-sync-openclaw" placeholder="0">
+            </label>
+            <label title="Opt-in. Set to 1 to update ~/.glyphos/config.yaml after each successful model switch.">
+              Auto Sync GlyphOS
+              <input name="LLAMA_MODEL_SYNC_GLYPHOS" id="default-sync-glyphos" placeholder="0">
+            </label>
             <label title="Optional OpenClaw profile name. Leave blank to target the main profile.">
               OpenClaw Profile
               <input name="OPENCLAW_PROFILE" id="default-openclaw-profile" placeholder="blank for main">

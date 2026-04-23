@@ -590,6 +590,10 @@ function renderDefaults(defaults) {
   $("#default-parallel").value = defaults.LLAMA_SERVER_PARALLEL || "";
   $("#default-log").value = defaults.LLAMA_SERVER_LOG || "";
   $("#default-extra").value = defaults.LLAMA_SERVER_EXTRA_ARGS || "";
+  $("#default-sync-opencode").value = defaults.LLAMA_MODEL_SYNC_OPENCODE || "1";
+  $("#default-sync-claude").value = defaults.LLAMA_MODEL_SYNC_CLAUDE || "0";
+  $("#default-sync-openclaw").value = defaults.LLAMA_MODEL_SYNC_OPENCLAW || "0";
+  $("#default-sync-glyphos").value = defaults.LLAMA_MODEL_SYNC_GLYPHOS || "0";
   $("#default-openclaw-profile").value = defaults.OPENCLAW_PROFILE || "";
   $("#default-openclaw-api-key").value = defaults.OPENCLAW_API_KEY || "";
   $("#default-claude-gateway-host").value = defaults.CLAUDE_GATEWAY_HOST || "";
@@ -755,6 +759,10 @@ async function saveDefaults(event) {
     LLAMA_SERVER_PARALLEL: $("#default-parallel").value.trim(),
     LLAMA_SERVER_LOG: $("#default-log").value.trim(),
     LLAMA_SERVER_EXTRA_ARGS: $("#default-extra").value.trim(),
+    LLAMA_MODEL_SYNC_OPENCODE: $("#default-sync-opencode").value.trim(),
+    LLAMA_MODEL_SYNC_CLAUDE: $("#default-sync-claude").value.trim(),
+    LLAMA_MODEL_SYNC_OPENCLAW: $("#default-sync-openclaw").value.trim(),
+    LLAMA_MODEL_SYNC_GLYPHOS: $("#default-sync-glyphos").value.trim(),
     OPENCLAW_PROFILE: $("#default-openclaw-profile").value.trim(),
     OPENCLAW_API_KEY: $("#default-openclaw-api-key").value.trim(),
     CLAUDE_GATEWAY_HOST: $("#default-claude-gateway-host").value.trim(),

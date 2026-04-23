@@ -479,6 +479,10 @@ test_auto_fit_uses_ram_aware_hybrid_gpu_layers() {
     LLAMA_SERVER_PARALLEL="auto"
     LLAMA_SERVER_DEVICE="cuda0"
     LLAMA_MODEL_AUTO_FIT="1"
+    LLAMA_MODEL_SYNC_OPENCODE="0"
+    LLAMA_MODEL_SYNC_CLAUDE="0"
+    LLAMA_MODEL_SYNC_OPENCLAW="0"
+    LLAMA_MODEL_SYNC_GLYPHOS="0"
 
     output="$(start_server demo "$model" "" "128000" "999" "128" "16" "auto" "cuda0")"
     state="$(cat "$tmp/state.out")"
@@ -667,6 +671,10 @@ EOF
 EOF
     cat >"$tmp/state/opencode/model.json" <<'EOF'
 {
+  "providerID": "llamacpp",
+  "modelID": "old.gguf",
+  "id": "llamacpp/old.gguf",
+  "provider": "llamacpp",
   "recent": ["llamacpp/old.gguf", "other/model"],
   "variant": {
     "llamacpp/old.gguf": "default"
@@ -691,6 +699,9 @@ EOF
     assert_contains "$config" '"timeout": 1800000'
     assert_contains "$config" '"chunkTimeout": 60000'
     assert_contains "$config" '"other"'
+    assert_contains "$state_json" '"providerID": "llamacpp"'
+    assert_contains "$state_json" '"modelID": "Qwen3.5-9B-Q8_0.gguf"'
+    assert_contains "$state_json" '"id": "llamacpp/Qwen3.5-9B-Q8_0.gguf"'
     assert_contains "$state_json" '"llamacpp/Qwen3.5-9B-Q8_0.gguf"'
     assert_contains "$state_json" '"favorite"'
 }
@@ -718,6 +729,174 @@ EOF
     config="$(cat "$tmp/config/opencode/opencode.json")"
     assert_contains "$config" '"timeout": 7200000'
     assert_contains "$config" '"chunkTimeout": 300000'
+}
+
+test_switch_auto_syncs_opencode_by_default() {
+    local tmp
+    local model
+    local output
+    local config
+    local state_json
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    mkdir -p "$tmp/models" "$tmp/config/opencode" "$tmp/state/opencode" "$tmp/state/llama-server"
+    model="$tmp/models/Qwen3.5-4B-Q6_K.gguf"
+    make_model "$model"
+    : >"$tmp/llama-server.log"
+
+    # shellcheck disable=SC1090
+    source "$BIN"
+    probe_server_binary() {
+        SELECTED_LLAMA_SERVER_BIN="/bin/true"
+        SELECTED_LLAMA_SERVER_BACKEND="cpu"
+        SELECTED_LLAMA_SERVER_SOURCE="test"
+        SELECTED_LLAMA_SERVER_STATUS="compatible"
+        return 0
+    }
+    validate_mmproj_for_model() { return 0; }
+    setsid() { return 0; }
+    wait_for_health() { return 0; }
+    find_pid() { return 1; }
+
+    APP_ROOT="$ROOT_DIR"
+    HOME="$tmp/home"
+    XDG_CONFIG_HOME="$tmp/config"
+    XDG_STATE_HOME="$tmp/state"
+    STATE_FILE="$tmp/state/llama-server/current.env"
+    OPENCODE_CONFIG_FILE="$tmp/config/opencode/opencode.json"
+    OPENCODE_MODEL_STATE_FILE="$tmp/state/opencode/model.json"
+    LLAMA_SERVER_HOST="127.0.0.1"
+    LLAMA_SERVER_PORT="19081"
+    LLAMA_SERVER_LOG="$tmp/llama-server.log"
+    LLAMA_SERVER_CONTEXT="32768"
+    LLAMA_SERVER_NGL="0"
+    LLAMA_SERVER_BATCH="128"
+    LLAMA_SERVER_THREADS="16"
+    LLAMA_SERVER_PARALLEL="1"
+    LLAMA_SERVER_DEVICE=""
+    LLAMA_MODEL_AUTO_FIT="1"
+    LLAMA_MODEL_SYNC_OPENCODE="1"
+    LLAMA_MODEL_SYNC_CLAUDE="0"
+    LLAMA_MODEL_SYNC_OPENCLAW="0"
+    LLAMA_MODEL_SYNC_GLYPHOS="0"
+
+    output="$(start_server qwen4 "$model" "" "32768" "0" "128" "16" "1" "")"
+    assert_contains "$output" "synced_opencode_model: llamacpp/Qwen3.5-4B-Q6_K.gguf"
+    assert_contains "$output" "opencode_reload_note: restart or reload OpenCode"
+    assert_contains "$output" "skipped_claude_sync: disabled"
+    assert_contains "$output" "started qwen4 on port 19081"
+
+    config="$(cat "$OPENCODE_CONFIG_FILE")"
+    state_json="$(cat "$OPENCODE_MODEL_STATE_FILE")"
+    assert_contains "$config" '"model": "llamacpp/Qwen3.5-4B-Q6_K.gguf"'
+    assert_contains "$config" '"Qwen3.5-4B-Q6_K.gguf"'
+    assert_contains "$config" '"baseURL": "http://127.0.0.1:19081/v1"'
+    assert_contains "$state_json" '"llamacpp/Qwen3.5-4B-Q6_K.gguf"'
+}
+
+test_switch_skips_opencode_when_auto_sync_disabled() {
+    local tmp
+    local model
+    local output
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    mkdir -p "$tmp/models" "$tmp/config/opencode" "$tmp/state/opencode" "$tmp/state/llama-server"
+    model="$tmp/models/Qwen3.5-4B-Q6_K.gguf"
+    make_model "$model"
+    : >"$tmp/llama-server.log"
+
+    # shellcheck disable=SC1090
+    source "$BIN"
+    probe_server_binary() {
+        SELECTED_LLAMA_SERVER_BIN="/bin/true"
+        SELECTED_LLAMA_SERVER_BACKEND="cpu"
+        SELECTED_LLAMA_SERVER_SOURCE="test"
+        SELECTED_LLAMA_SERVER_STATUS="compatible"
+        return 0
+    }
+    validate_mmproj_for_model() { return 0; }
+    setsid() { return 0; }
+    wait_for_health() { return 0; }
+    find_pid() { return 1; }
+
+    APP_ROOT="$ROOT_DIR"
+    STATE_FILE="$tmp/state/llama-server/current.env"
+    OPENCODE_CONFIG_FILE="$tmp/config/opencode/opencode.json"
+    OPENCODE_MODEL_STATE_FILE="$tmp/state/opencode/model.json"
+    LLAMA_SERVER_HOST="127.0.0.1"
+    LLAMA_SERVER_PORT="19081"
+    LLAMA_SERVER_LOG="$tmp/llama-server.log"
+    LLAMA_SERVER_CONTEXT="32768"
+    LLAMA_SERVER_NGL="0"
+    LLAMA_SERVER_BATCH="128"
+    LLAMA_SERVER_THREADS="16"
+    LLAMA_SERVER_PARALLEL="1"
+    LLAMA_SERVER_DEVICE=""
+    LLAMA_MODEL_SYNC_OPENCODE="0"
+    LLAMA_MODEL_SYNC_CLAUDE="0"
+    LLAMA_MODEL_SYNC_OPENCLAW="0"
+    LLAMA_MODEL_SYNC_GLYPHOS="0"
+
+    output="$(start_server qwen4 "$model" "" "32768" "0" "128" "16" "1" "")"
+    assert_contains "$output" "skipped_opencode_sync: disabled"
+    assert_not_contains "$output" "synced_opencode_model:"
+    [[ ! -e "$OPENCODE_CONFIG_FILE" ]] || fail "expected disabled OpenCode sync not to create config"
+}
+
+test_switch_opencode_sync_failure_is_non_fatal() {
+    local tmp
+    local model
+    local output
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    mkdir -p "$tmp/models" "$tmp/config/opencode" "$tmp/state/opencode" "$tmp/state/llama-server"
+    model="$tmp/models/Qwen3.5-4B-Q6_K.gguf"
+    make_model "$model"
+    : >"$tmp/llama-server.log"
+    printf '%s\n' '{ invalid json' >"$tmp/config/opencode/opencode.json"
+
+    # shellcheck disable=SC1090
+    source "$BIN"
+    probe_server_binary() {
+        SELECTED_LLAMA_SERVER_BIN="/bin/true"
+        SELECTED_LLAMA_SERVER_BACKEND="cpu"
+        SELECTED_LLAMA_SERVER_SOURCE="test"
+        SELECTED_LLAMA_SERVER_STATUS="compatible"
+        return 0
+    }
+    validate_mmproj_for_model() { return 0; }
+    setsid() { return 0; }
+    wait_for_health() { return 0; }
+    find_pid() { return 1; }
+
+    APP_ROOT="$ROOT_DIR"
+    HOME="$tmp/home"
+    XDG_CONFIG_HOME="$tmp/config"
+    XDG_STATE_HOME="$tmp/state"
+    STATE_FILE="$tmp/state/llama-server/current.env"
+    OPENCODE_CONFIG_FILE="$tmp/config/opencode/opencode.json"
+    OPENCODE_MODEL_STATE_FILE="$tmp/state/opencode/model.json"
+    LLAMA_SERVER_HOST="127.0.0.1"
+    LLAMA_SERVER_PORT="19081"
+    LLAMA_SERVER_LOG="$tmp/llama-server.log"
+    LLAMA_SERVER_CONTEXT="32768"
+    LLAMA_SERVER_NGL="0"
+    LLAMA_SERVER_BATCH="128"
+    LLAMA_SERVER_THREADS="16"
+    LLAMA_SERVER_PARALLEL="1"
+    LLAMA_SERVER_DEVICE=""
+    LLAMA_MODEL_SYNC_OPENCODE="1"
+    LLAMA_MODEL_SYNC_CLAUDE="0"
+    LLAMA_MODEL_SYNC_OPENCLAW="0"
+    LLAMA_MODEL_SYNC_GLYPHOS="0"
+
+    output="$(start_server qwen4 "$model" "" "32768" "0" "128" "16" "1" "" 2>&1)"
+    assert_contains "$output" "warn_opencode_sync:"
+    assert_contains "$output" "invalid JSON"
+    assert_contains "$output" "started qwen4 on port 19081"
 }
 
 test_sync_openclaw_updates_profile_config() {
@@ -937,6 +1116,9 @@ main() {
     test_integration_sync_cli_glyphos_entrypoint
     test_sync_opencode_updates_config_and_state
     test_sync_opencode_long_run_preset
+    test_switch_auto_syncs_opencode_by_default
+    test_switch_skips_opencode_when_auto_sync_disabled
+    test_switch_opencode_sync_failure_is_non_fatal
     test_sync_openclaw_updates_profile_config
     test_sync_glyphos_updates_config
     test_sync_claude_updates_settings

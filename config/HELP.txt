@@ -89,17 +89,18 @@ Optional background service:
 
 Client integrations:
   opencode keeps its own config under ~/.config/opencode/opencode.json and state under ~/.local/state/opencode/model.json.
+  Successful model switches sync OpenCode by default via LLAMA_MODEL_SYNC_OPENCODE=1. Set it to 0 for manual-only sync.
   Run `llama-model sync-opencode --preset balanced|long-run` to align it with the active llama.cpp runtime.
 
   OpenClaw keeps its provider config under ~/.openclaw/openclaw.json or ~/.openclaw-<profile>/openclaw.json.
-  Run `llama-model sync-openclaw` to point it at the live local endpoint.
+  Run `llama-model sync-openclaw` to point it at the live local endpoint. Set LLAMA_MODEL_SYNC_OPENCLAW=1 to also update it after successful switches.
 
   Claude Code keeps settings in ~/.claude/settings.json and expects an Anthropic-style API.
-  Run `llama-model sync-claude` and, when needed, start the local bridge with `llama-model claude-gateway start`.
+  Run `llama-model sync-claude` and, when needed, start the local bridge with `llama-model claude-gateway start`. Set LLAMA_MODEL_SYNC_CLAUDE=1 to update settings after successful switches.
 
   GlyphOS AI Compute can target the same local llama.cpp endpoint.
   A bundled public copy lives under integrations/public-glyphos-ai-compute/ in the repo and under ~/.local/share/llama-model-manager/integrations/ after install.
-  Run `llama-model sync-glyphos` to align ~/.glyphos/config.yaml with the active local runtime.
+  Run `llama-model sync-glyphos` to align ~/.glyphos/config.yaml with the active local runtime. Set LLAMA_MODEL_SYNC_GLYPHOS=1 to update it after successful switches.
 
 Legacy UI:
   Set LLAMA_MODEL_UI=zenity if you want to force the old Zenity launcher.
