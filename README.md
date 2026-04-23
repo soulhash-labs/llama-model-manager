@@ -167,6 +167,8 @@ If `doctor` reports `binary_status: unavailable`, install the missing build depe
 
 GlyphOS AI Compute is bundled as a public local integration lane. It turns glyph state into model-ready prompts and routes those requests through the same local `llama.cpp` endpoint managed by Llama Model Manager.
 
+![Animated demo showing a verbose local AI request being converted into compact GlyphOS tokens, reducing the displayed payload by 60-90%, then routing through a local llama.cpp endpoint at 127.0.0.1:8081/v1. The final frame reads: Stay local. Stay private. Stay fast.](docs/branding/glyphos-encoding-demo.gif)
+
 Benefits:
 
 - local-first routing through `http://127.0.0.1:8081/v1`
