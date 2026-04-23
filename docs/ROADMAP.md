@@ -24,6 +24,11 @@ Initial focus:
 - keep user data local by default
 - avoid turning LMM into a full agent runner before the handoff layer is proven
 
+Terran evidence:
+
+- Terran sustained a `4h 8m` GlyphOS AI Compute coding run on `Qwen3.5-9B-Q8_0.gguf` at `context 128000` and `parallel 1` through `opencode` + local LMM
+- this increases the value of completion handoff, recent-run history, and end-of-run notification surfaces because multi-hour local sessions are now practical
+
 Non-goals for the first pass:
 
 - replacing Claude Code, OpenClaw, opencode, or GlyphOS AI Compute as the agent UI

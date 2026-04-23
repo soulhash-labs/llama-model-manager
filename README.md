@@ -192,6 +192,15 @@ Benefits:
 - public glyph, prompt, and AI routing layers included in-repo
 - private Q45 / quantum components intentionally excluded from this public package
 
+Terran validation:
+
+- Terran sustained a continuous `4h 8m` coding session using GlyphOS AI Compute routed through local LMM-managed `llama.cpp`
+- runtime posture: `Qwen3.5-9B-Q8_0.gguf`, `context 128000`, `parallel 1`
+- client path: `opencode` + local `llama-model-manager` + GlyphOS AI Compute
+- observed result: stable long-run code generation without a fatal session drop during the reported run
+
+Reference: [Terran GlyphOS Long-Run Validation](docs/TERRAN-GLYPHOS-LONG-RUN-VALIDATION.md)
+
 ## Supported Integrations
 
 Current public integration support:
