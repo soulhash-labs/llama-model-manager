@@ -29,3 +29,12 @@ Non-goals for the first pass:
 - replacing Claude Code, OpenClaw, opencode, or GlyphOS AI Compute as the agent UI
 - uploading session contents to hosted services
 - guaranteeing semantic task success when the upstream tool only exposes process-level status
+
+
+## Update Watcher
+
+Status: planned
+
+LMM should optionally check for updates to both `soulhash-labs/llama-model-manager` and upstream `ggml-org/llama.cpp` without silently installing or rebuilding anything. The proposed design is notify-only, opt-in for 12-hour background checks, and air-gap friendly.
+
+Plan: [UPDATE-WATCHER-PLAN.md](UPDATE-WATCHER-PLAN.md)
