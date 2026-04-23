@@ -2,7 +2,7 @@
 
 **by soulhash.ai**
 
-llama-model-manager is a browser-first control surface for local llama.cpp setups. Switch models, scan GGUFs, tune runtime defaults, inspect live health, and manage single- or multi-client mode from one clean dashboard, with CLI and desktop launchers included.
+llama-model-manager is a local AI operations dashboard for `llama.cpp` and GlyphOS AI Compute. It gives you one browser-first control surface to discover GGUFs, switch models, tune runtime posture, inspect health, sync local coding tools, and route GlyphOS workloads into the active local endpoint, with CLI and desktop launchers included.
 
 ![Dashboard overview](docs/screenshots/dashboard-overview.png)
 
@@ -17,6 +17,7 @@ llama-model-manager is a browser-first control surface for local llama.cpp setup
 - `desktop/llama-model-manager.desktop`: desktop launcher
 - `desktop/llama-model-manager-icon.svg`: desktop icon asset used by the installer
 - `scripts/build-llama-server.sh`: wrapper for fetching and compiling a host-specific llama.cpp runtime
+- `integrations/public-glyphos-ai-compute/`: bundled public GlyphOS AI Compute lane
 - `web/`: browser dashboard assets and Python server
 - `LICENSE`: Apache License 2.0
 - `NOTICE`: copyright and attribution notice
@@ -146,7 +147,21 @@ If `doctor` reports `binary_status: unavailable`, install the missing build depe
 - manifest-driven runtime selection that only accepts validated bundled binaries
 - local `llama.cpp` bootstrap via `llama-model build-runtime`
 - OpenAI-compatible endpoint summary plus sync wiring for local harnesses such as `opencode`, `OpenClaw`, and `Claude Code`
+- bundled GlyphOS AI Compute support for routing glyph-driven workloads to the active local model
 - Modern Operator dashboard treatment with toasts, busy states, and first-run empty states
+
+## GlyphOS AI Compute
+
+GlyphOS AI Compute is bundled as a public local integration lane. It turns glyph state into model-ready prompts and routes those requests through the same local `llama.cpp` endpoint managed by Llama Model Manager.
+
+Benefits:
+
+- local-first routing through `http://127.0.0.1:8081/v1`
+- one-command sync with `llama-model sync-glyphos`
+- generated config at `~/.glyphos/config.yaml`
+- shared active model selection with the dashboard and CLI
+- public glyph, prompt, and AI routing layers included in-repo
+- private Q45 / quantum components intentionally excluded from this public package
 
 ## Supported Integrations
 
