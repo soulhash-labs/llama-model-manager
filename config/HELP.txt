@@ -69,7 +69,7 @@ For single-client coding harnesses, a good optional tweak is:
 That does not increase context. It simply reduces slot count so the server is more deterministic for one active client.
 
 Startup mitigation:
-  switch/restart default to guarded auto-fit. When llama.cpp hits known CUDA/KV-cache/projector startup failures, llama-model prints the category and may retry with safer runtime-only settings. Use --no-auto-fit to disable this for a launch, --require-mmproj to prevent text-only projector fallback, or --force-mmproj only when you intentionally accept a filename-family mismatch.
+  switch/restart default to guarded GPU/RAM-aware auto-fit. When llama.cpp hits known CUDA/KV-cache/projector startup failures, llama-model prints the category and may retry with safer runtime-only settings. High system RAM can enable slower hybrid CPU/GPU fallback when VRAM is tight, but it is not treated as extra VRAM. Use --no-auto-fit to disable this for a launch, --require-mmproj to prevent text-only projector fallback, or --force-mmproj only when you intentionally accept a filename-family mismatch.
 
 Dashboard:
   Run llama-model-web or launch "LLM Model Manager" from the desktop or app menu.

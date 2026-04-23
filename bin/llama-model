@@ -407,6 +407,112 @@ detect_gpu_total_mib() {
     printf '%s\n' "$total"
 }
 
+detect_system_total_mib() {
+    local value
+
+    if [[ -n "${LLAMA_SYSTEM_TOTAL_MIB:-}" && "${LLAMA_SYSTEM_TOTAL_MIB}" =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$LLAMA_SYSTEM_TOTAL_MIB"
+        return 0
+    fi
+
+    [[ -r /proc/meminfo ]] || return 1
+    value="$(awk '/^MemTotal:/ { printf "%d", $2 / 1024; exit }' /proc/meminfo)"
+    [[ "$value" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$value"
+}
+
+detect_system_available_mib() {
+    local value
+
+    if [[ -n "${LLAMA_SYSTEM_AVAILABLE_MIB:-}" && "${LLAMA_SYSTEM_AVAILABLE_MIB}" =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$LLAMA_SYSTEM_AVAILABLE_MIB"
+        return 0
+    fi
+
+    [[ -r /proc/meminfo ]] || return 1
+    value="$(awk '/^MemAvailable:/ { printf "%d", $2 / 1024; exit }' /proc/meminfo)"
+    [[ "$value" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$value"
+}
+
+system_memory_report() {
+    local total
+    local available
+
+    if [[ -n "${LLAMA_SYSTEM_MEMORY_REPORT:-}" ]]; then
+        printf '%s\n' "$LLAMA_SYSTEM_MEMORY_REPORT"
+        return 0
+    fi
+
+    total="$(detect_system_total_mib || true)"
+    available="$(detect_system_available_mib || true)"
+    [[ "$total" =~ ^[0-9]+$ && "$available" =~ ^[0-9]+$ ]] || return 1
+    awk -v total="$total" -v available="$available" \
+        'BEGIN { printf "RAM: %.1f GiB available / %.1f GiB total", available / 1024, total / 1024 }'
+}
+
+autofit_memory_posture() {
+    local gpu_total_mib="${1:-0}"
+    local system_available_mib="${2:-0}"
+
+    [[ "$gpu_total_mib" =~ ^[0-9]+$ ]] || gpu_total_mib=0
+    [[ "$system_available_mib" =~ ^[0-9]+$ ]] || system_available_mib=0
+
+    if (( gpu_total_mib <= 0 )); then
+        if (( system_available_mib >= 32768 )); then
+            printf 'cpu-fit\n'
+        elif (( system_available_mib >= 16384 )); then
+            printf 'ram-risk\n'
+        else
+            printf 'no-fit\n'
+        fi
+    elif (( gpu_total_mib >= 16384 )); then
+        printf 'gpu-fit\n'
+    elif (( system_available_mib >= 32768 )); then
+        printf 'hybrid-fit\n'
+    elif (( system_available_mib >= 16384 )); then
+        printf 'ram-risk\n'
+    else
+        printf 'no-fit\n'
+    fi
+}
+
+autofit_memory_guidance() {
+    case "${1:-}" in
+        gpu-fit)
+            printf 'GPU-fit: enough VRAM for a GPU-heavy posture; still lower context if KV cache allocation fails.\n'
+            ;;
+        hybrid-fit)
+            printf 'Hybrid-fit: VRAM is tight but system RAM is available for partial CPU/GPU offload; expect slower runs but better startup stability.\n'
+            ;;
+        cpu-fit)
+            printf 'CPU-fit: no GPU memory signal is available, but system RAM can carry CPU execution; expect much slower runs than GPU offload.\n'
+            ;;
+        ram-risk)
+            printf 'RAM-risk: partial offload may run, but limited available system RAM can swap or stall; prefer smaller models, lower context, or fewer GPU layers.\n'
+            ;;
+        no-fit)
+            printf 'No-fit: both VRAM and available system RAM are tight; avoid aggressive launches and use a smaller model/context.\n'
+            ;;
+        *)
+            printf '\n'
+            ;;
+    esac
+}
+
+hybrid_ngl_for_system_memory() {
+    local system_available_mib="${1:-0}"
+
+    [[ "$system_available_mib" =~ ^[0-9]+$ ]] || system_available_mib=0
+    if (( system_available_mib >= 32768 )); then
+        printf '24\n'
+    elif (( system_available_mib >= 16384 )); then
+        printf '12\n'
+    else
+        printf '0\n'
+    fi
+}
+
 STARTUP_FAILURE_CATEGORY=""
 STARTUP_FAILURE_SUMMARY=""
 STARTUP_FAILURE_ACTION=""
@@ -2095,6 +2201,10 @@ start_server() {
     local attempt=1
     local max_attempts=3
     local gpu_total=""
+    local system_available=""
+    local fit_posture=""
+    local fit_guidance=""
+    local hybrid_ngl=""
     local recommended_context=""
     local competing_rows=""
     local exit_status=0
@@ -2154,6 +2264,14 @@ ${SELECTED_LLAMA_SERVER_GUIDANCE}"
 
     if [[ "$SELECTED_LLAMA_SERVER_BACKEND" == "cuda" || "$device" == cuda* ]]; then
         gpu_total="$(detect_gpu_total_mib || true)"
+        system_available="$(detect_system_available_mib || true)"
+        fit_posture="$(autofit_memory_posture "$gpu_total" "$system_available")"
+        fit_guidance="$(autofit_memory_guidance "$fit_posture")"
+        hybrid_ngl="$(hybrid_ngl_for_system_memory "$system_available")"
+        if [[ "$auto_fit" == "1" && "$fit_posture" != "gpu-fit" && -n "$fit_guidance" ]]; then
+            printf 'auto_fit_posture: %s\n' "$fit_posture"
+            printf 'auto_fit_tradeoff: %s\n' "$fit_guidance"
+        fi
         if [[ -n "$gpu_total" ]]; then
             recommended_context="$(safe_context_for_gpu_mib "$gpu_total")"
             if [[ "$context" =~ ^[0-9]+$ && "$recommended_context" =~ ^[0-9]+$ && "$context" -gt "$recommended_context" ]]; then
@@ -2172,9 +2290,18 @@ ${SELECTED_LLAMA_SERVER_GUIDANCE}"
             fi
         fi
         competing_rows="$(llama_server_process_rows | grep -v "port=${LLAMA_SERVER_PORT} " || true)"
-        if [[ -n "$competing_rows" && "$auto_fit" == "1" && "$gpu_total" =~ ^[0-9]+$ && "$gpu_total" -le 12288 && "$ngl" =~ ^[0-9]+$ && "$ngl" -gt 24 ]]; then
-            printf 'auto_fit: detected another llama-server using GPU memory; GPU layers %s -> 24 for safer coexistence\n' "$ngl"
-            ngl="24"
+        if [[ -n "$competing_rows" && "$auto_fit" == "1" && "$gpu_total" =~ ^[0-9]+$ && "$gpu_total" -le 12288 && "$ngl" =~ ^[0-9]+$ ]]; then
+            if [[ "$hybrid_ngl" =~ ^[0-9]+$ && "$hybrid_ngl" -gt 0 && "$ngl" -gt "$hybrid_ngl" ]]; then
+                printf 'auto_fit: detected another llama-server using GPU memory; GPU layers %s -> %s for safer hybrid CPU/GPU offload\n' "$ngl" "$hybrid_ngl"
+                printf 'auto_fit_tradeoff: system RAM will carry more model state; expect slower runs than full GPU offload\n'
+                ngl="$hybrid_ngl"
+            elif [[ "$hybrid_ngl" =~ ^[0-9]+$ && "$hybrid_ngl" -le 0 ]]; then
+                printf 'preflight_status: memory-risk\n' >&2
+                printf 'preflight_reason: another llama-server is using GPU memory and available system RAM is not enough for a safer hybrid downshift\n' >&2
+            else
+                printf 'preflight_status: gpu-pressure\n' >&2
+                printf 'preflight_reason: another llama-server is using GPU memory; current GPU layer count is already within the RAM-aware hybrid target\n' >&2
+            fi
         elif [[ -n "$competing_rows" ]]; then
             printf 'preflight_status: gpu-pressure\n' >&2
             printf 'preflight_reason: another llama-server process is already running; inspect llama-model doctor before using aggressive context/offload settings\n' >&2
@@ -2245,17 +2372,19 @@ ${SELECTED_LLAMA_SERVER_GUIDANCE}"
                 elif [[ -z "$parallel" || "$parallel" == "auto" || "$parallel" != "1" ]]; then
                     printf 'auto_fit: retrying after KV-cache OOM with parallel %s -> 1\n' "${parallel:-auto}"
                     parallel="1"
-                elif [[ "$ngl" =~ ^[0-9]+$ && "$ngl" -gt 24 ]]; then
-                    printf 'auto_fit: retrying after KV-cache OOM with GPU layers %s -> 24\n' "$ngl"
-                    ngl="24"
+                elif [[ "$ngl" =~ ^[0-9]+$ && "$hybrid_ngl" =~ ^[0-9]+$ && "$hybrid_ngl" -gt 0 && "$ngl" -gt "$hybrid_ngl" ]]; then
+                    printf 'auto_fit: retrying after KV-cache OOM with GPU layers %s -> %s for hybrid CPU/GPU offload\n' "$ngl" "$hybrid_ngl"
+                    printf 'auto_fit_tradeoff: system RAM improves startup headroom here, but generation will be slower than full GPU offload\n'
+                    ngl="$hybrid_ngl"
                 else
                     die "llama-server exited during startup"
                 fi
                 ;;
             cuda-oom)
-                if [[ "$ngl" =~ ^[0-9]+$ && "$ngl" -gt 24 ]]; then
-                    printf 'auto_fit: retrying after CUDA OOM with GPU layers %s -> 24\n' "$ngl"
-                    ngl="24"
+                if [[ "$ngl" =~ ^[0-9]+$ && "$hybrid_ngl" =~ ^[0-9]+$ && "$hybrid_ngl" -gt 0 && "$ngl" -gt "$hybrid_ngl" ]]; then
+                    printf 'auto_fit: retrying after CUDA OOM with GPU layers %s -> %s for hybrid CPU/GPU offload\n' "$ngl" "$hybrid_ngl"
+                    printf 'auto_fit_tradeoff: system RAM improves startup headroom here, but generation will be slower than full GPU offload\n'
+                    ngl="$hybrid_ngl"
                 elif [[ "$context" =~ ^[0-9]+$ && "$context" -gt 32768 ]]; then
                     printf 'auto_fit: retrying after CUDA OOM with context %s -> 32768\n' "$context"
                     context="32768"
@@ -2445,6 +2574,11 @@ show_doctor() {
     local startup_diagnosis=""
     local startup_suggested_fix=""
     local gpu_memory=""
+    local system_memory=""
+    local gpu_total_mib=""
+    local system_available_mib=""
+    local fit_posture=""
+    local fit_guidance=""
     local gpu_process_rows=""
     local gpu_process_count="0"
     local gpu_processes=""
@@ -2474,6 +2608,11 @@ show_doctor() {
     fi
 
     gpu_memory="$(gpu_memory_report || true)"
+    system_memory="$(system_memory_report || true)"
+    gpu_total_mib="$(detect_gpu_total_mib || true)"
+    system_available_mib="$(detect_system_available_mib || true)"
+    fit_posture="$(autofit_memory_posture "$gpu_total_mib" "$system_available_mib")"
+    fit_guidance="$(autofit_memory_guidance "$fit_posture")"
     gpu_process_rows="$(llama_server_process_rows || true)"
     if [[ -n "$gpu_process_rows" ]]; then
         gpu_process_count="$(printf '%s\n' "$gpu_process_rows" | grep -c . || true)"
@@ -2519,6 +2658,9 @@ show_doctor() {
     printf 'startup_diagnosis: %s\n' "$startup_diagnosis"
     printf 'startup_suggested_fix: %s\n' "$startup_suggested_fix"
     printf 'gpu_memory: %s\n' "$gpu_memory"
+    printf 'system_memory: %s\n' "$system_memory"
+    printf 'fit_posture: %s\n' "$fit_posture"
+    printf 'fit_guidance: %s\n' "$fit_guidance"
     printf 'gpu_process_count: %s\n' "$gpu_process_count"
     printf 'gpu_processes: %s\n' "$gpu_processes"
     printf 'endpoint: http://%s:%s/v1\n' "$LLAMA_SERVER_HOST" "$LLAMA_SERVER_PORT"

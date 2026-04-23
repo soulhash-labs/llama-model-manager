@@ -420,6 +420,77 @@ test_add_blocks_obvious_mmproj_family_mismatch() {
     assert_contains "$output" "updated qwen4"
 }
 
+
+test_system_memory_influences_fit_posture() {
+    local output
+
+    # shellcheck disable=SC1090
+    source "$BIN"
+    output="$(autofit_memory_posture 11264 65536)"
+    assert_contains "$output" "hybrid-fit"
+    output="$(autofit_memory_guidance hybrid-fit)"
+    assert_contains "$output" "slower runs"
+
+    output="$(autofit_memory_posture 0 65536)"
+    assert_contains "$output" "cpu-fit"
+    output="$(autofit_memory_guidance cpu-fit)"
+    assert_contains "$output" "much slower"
+
+    output="$(autofit_memory_posture 11264 12000)"
+    assert_contains "$output" "no-fit"
+}
+
+test_auto_fit_uses_ram_aware_hybrid_gpu_layers() {
+    local tmp
+    local model
+    local output
+    local state
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    model="$tmp/models/qwen4.gguf"
+    make_model "$model"
+    : >"$tmp/llama-server.log"
+
+    # shellcheck disable=SC1090
+    source "$BIN"
+    probe_server_binary() {
+        SELECTED_LLAMA_SERVER_BIN="/bin/true"
+        SELECTED_LLAMA_SERVER_BACKEND="cuda"
+        SELECTED_LLAMA_SERVER_SOURCE="test"
+        SELECTED_LLAMA_SERVER_STATUS="compatible"
+        return 0
+    }
+    validate_mmproj_for_model() { return 0; }
+    detect_gpu_total_mib() { printf '11264\n'; }
+    detect_system_available_mib() { printf '65536\n'; }
+    llama_server_process_rows() { printf 'pid=1491 port=8080 context=131072 ngl=99 model=/models/gemma.gguf\n'; }
+    setsid() { return 0; }
+    wait_for_health() { return 0; }
+    write_state() { printf 'context=%s ngl=%s parallel=%s\n' "$4" "$5" "$8" >"$tmp/state.out"; }
+
+    LLAMA_SERVER_HOST="127.0.0.1"
+    LLAMA_SERVER_PORT="19081"
+    LLAMA_SERVER_LOG="$tmp/llama-server.log"
+    LLAMA_SERVER_CONTEXT="128000"
+    LLAMA_SERVER_NGL="999"
+    LLAMA_SERVER_BATCH="128"
+    LLAMA_SERVER_THREADS="16"
+    LLAMA_SERVER_PARALLEL="auto"
+    LLAMA_SERVER_DEVICE="cuda0"
+    LLAMA_MODEL_AUTO_FIT="1"
+
+    output="$(start_server demo "$model" "" "128000" "999" "128" "16" "auto" "cuda0")"
+    state="$(cat "$tmp/state.out")"
+    assert_contains "$output" "auto_fit_posture: hybrid-fit"
+    assert_contains "$output" "auto_fit_tradeoff: Hybrid-fit: VRAM is tight but system RAM is available"
+    assert_contains "$output" "GPU layers 999 -> 24"
+    assert_contains "$output" "expect slower runs than full GPU offload"
+    assert_contains "$state" "context=32768"
+    assert_contains "$state" "ngl=24"
+    assert_contains "$state" "parallel=1"
+}
+
 test_doctor_reports_gpu_pressure_and_process_rows() {
     local tmp
     local output
@@ -433,6 +504,9 @@ test_doctor_reports_gpu_pressure_and_process_rows() {
     find_pid() { return 1; }
     probe_server_binary() { return 1; }
     gpu_memory_report() { printf 'NVIDIA GTX 1080 Ti: 6.3 GiB used / 11.0 GiB total (4.6 GiB free)\n'; }
+    system_memory_report() { printf 'RAM: 48.0 GiB available / 64.0 GiB total\n'; }
+    detect_gpu_total_mib() { printf '11264\n'; }
+    detect_system_available_mib() { printf '49152\n'; }
     llama_server_process_rows() { printf 'pid=1491 port=8080 context=131072 ngl=99 model=/models/gemma.gguf\n'; }
 
     HOME="$tmp/home"
@@ -444,6 +518,9 @@ test_doctor_reports_gpu_pressure_and_process_rows() {
 
     output="$(show_doctor)"
     assert_contains "$output" "gpu_memory: NVIDIA GTX 1080 Ti"
+    assert_contains "$output" "system_memory: RAM: 48.0 GiB available / 64.0 GiB total"
+    assert_contains "$output" "fit_posture: hybrid-fit"
+    assert_contains "$output" "fit_guidance: Hybrid-fit: VRAM is tight but system RAM is available"
     assert_contains "$output" "gpu_process_count: 1"
     assert_contains "$output" "pid=1491 port=8080 context=131072 ngl=99 model=/models/gemma.gguf"
 }
@@ -848,6 +925,8 @@ main() {
     test_cuda_cc_parsing_rejects_non_numeric_values
     test_startup_log_classifier_emits_actionable_categories
     test_add_blocks_obvious_mmproj_family_mismatch
+    test_system_memory_influences_fit_posture
+    test_auto_fit_uses_ram_aware_hybrid_gpu_layers
     test_doctor_reports_gpu_pressure_and_process_rows
     test_registry_parsing_preserves_empty_columns
     test_doctor_tolerates_missing_log_markers

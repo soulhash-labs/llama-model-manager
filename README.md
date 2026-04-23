@@ -159,7 +159,7 @@ If `doctor` reports `binary_status: unavailable`, install the missing build depe
 - CLI diagnostics via `llama-model doctor`, including startup failure categories and GPU pressure visibility
 - manifest-driven runtime selection that only accepts validated bundled binaries
 - local `llama.cpp` bootstrap via `llama-model build-runtime`
-- guarded auto-fit for known CUDA/KV-cache/projector startup failures without silently persisting downgraded settings
+- guarded GPU/RAM-aware auto-fit for known CUDA/KV-cache/projector startup failures without silently persisting downgraded settings
 - OpenAI-compatible endpoint summary plus sync wiring for local harnesses such as `opencode`, `OpenClaw`, and `Claude Code`
 - bundled GlyphOS AI Compute support for routing glyph-driven workloads to the active local model
 - Modern Operator dashboard treatment with toasts, busy states, and first-run empty states
@@ -215,7 +215,8 @@ These integrations are optional. The default product behavior remains the local 
 - the runtime build script fetches `llama.cpp` source automatically, but system dependencies must already be present
 - the scripts use XDG-style config/state locations under `~/.config/llama-server` and `~/.local/state/llama-server`
 - `LLAMA_SERVER_PARALLEL=1` is recommended for a single coding harness because it avoids parallel slot pressure without reducing context length
-- `LLAMA_MODEL_AUTO_FIT=1` is the default guarded startup mitigation; use `--no-auto-fit` for a strict launch
+- `LLAMA_MODEL_AUTO_FIT=1` is the default guarded GPU/RAM-aware startup mitigation; use `--no-auto-fit` for a strict launch
+- high system RAM helps hybrid CPU/GPU offload start successfully, but it is slower than full GPU offload and should not be treated as extra VRAM
 - set `LLAMA_MODEL_UI=zenity` if you want to force the old Zenity UI instead of the browser dashboard
 
 ## Bundled Local Packages
