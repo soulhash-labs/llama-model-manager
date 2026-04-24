@@ -194,10 +194,10 @@ Benefits:
 
 Terran validation:
 
-- Terran sustained a continuous `4h 8m` coding session using GlyphOS AI Compute routed through local LMM-managed `llama.cpp`
+- Terran sustained a continuous `8h 59m` coding session using GlyphOS AI Compute routed through local LMM-managed `llama.cpp`
 - runtime posture: `Qwen3.5-9B-Q8_0.gguf`, `context 128000`, `parallel 1`
 - client path: `opencode` + local `llama-model-manager` + GlyphOS AI Compute
-- observed result: stable long-run code generation without a fatal session drop during the reported run
+- observed result: stable long-run code generation without a fatal session drop during the reported run, with the operator reporting the task completed correctly
 
 Reference: [Terran GlyphOS Long-Run Validation](docs/TERRAN-GLYPHOS-LONG-RUN-VALIDATION.md)
 
