@@ -5,6 +5,7 @@ API clients for local and external AI backends.
 from __future__ import annotations
 
 import os
+import warnings
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -41,6 +42,63 @@ def _config_value(config: dict[str, Any], dotted: str, default: str = "") -> str
             return default
         current = current[part]
     return str(current).strip() if current is not None else default
+
+
+_RETIRED_ENV_VARS = [
+    "GLYPHOS_PREFERRED_LOCAL_BACKEND",
+    "GLYPHOS_OLLAMA_ENABLED",
+    "GLYPHOS_OLLAMA_URL",
+    "GLYPHOS_OLLAMA_MODEL",
+    "GLYPHOS_OLLAMA_TIMEOUT",
+    "QRBT_OLLAMA_BASE_URL",
+]
+for _lane in ("AURORA", "TERRAN", "STARLIGHT", "POLARIS"):
+    _RETIRED_ENV_VARS.extend(
+        [
+            f"GLYPHOS_OLLAMA_{_lane}_URL",
+            f"GLYPHOS_OLLAMA_{_lane}_MODEL",
+            f"GLYPHOS_OLLAMA_{_lane}_TIMEOUT",
+            f"QRBT_COUNCIL_OLLAMA_{_lane}_URL",
+        ]
+    )
+
+
+def _warn_on_retired_configuration(config: dict[str, Any]) -> None:
+    retired_config_keys: list[str] = []
+    for dotted in (
+        "ai_compute.local.preferred_local_backend",
+        "ai_compute.routing.preferred_local_backend",
+        "ai_compute.ollama.enabled",
+        "ai_compute.ollama.url",
+        "ai_compute.ollama.model",
+        "ai_compute.ollama.timeout",
+    ):
+        if _config_value(config, dotted):
+            retired_config_keys.append(dotted)
+    for lane in ("aurora", "terran", "starlight", "polaris"):
+        for suffix in ("ollama_url", "ollama_model", "ollama_timeout"):
+            dotted = f"ai_compute.lanes.{lane}.{suffix}"
+            if _config_value(config, dotted):
+                retired_config_keys.append(dotted)
+
+    retired_env_vars = [name for name in _RETIRED_ENV_VARS if os.environ.get(name, "").strip()]
+
+    if retired_config_keys:
+        warnings.warn(
+            "Ignoring retired GlyphOS AI Compute config keys: "
+            + ", ".join(sorted(retired_config_keys))
+            + ". Public AI Compute is now llama.cpp-only. Remove these keys to silence this warning.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    if retired_env_vars:
+        warnings.warn(
+            "Ignoring retired GlyphOS AI Compute environment variables: "
+            + ", ".join(sorted(retired_env_vars))
+            + ". Public AI Compute is now llama.cpp-only. Remove these variables to silence this warning.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
 
 class BaseChatClient:
@@ -115,46 +173,6 @@ class LlamaCppClient(BaseChatClient):
             return payload["choices"][0]["message"]["content"]
         except Exception as exc:
             return f"llama.cpp error: {exc}"
-
-
-class OllamaClient(BaseChatClient):
-    def __init__(self, base_url: str = "http://localhost:11434", model: str = "llama3:70b", max_tokens: int = 500, timeout: int = 30):
-        super().__init__(model=model, max_tokens=max_tokens, timeout=timeout)
-        self.base_url = base_url.rstrip("/")
-        self._available = False
-        self._check_availability()
-
-    def _check_availability(self) -> None:
-        try:
-            response = requests.get(f"{self.base_url}/api/tags", timeout=2)
-            self._available = response.status_code == 200
-        except Exception:
-            self._available = False
-
-    def is_available(self) -> bool:
-        return self._available
-
-    def generate(self, prompt: str, **kwargs) -> str:
-        if not self._available:
-            return f"[Ollama offline] Processing: {prompt[:50]}..."
-        try:
-            response = requests.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": kwargs.get("model", self.model),
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {
-                        "temperature": kwargs.get("temperature", 0.7),
-                        "num_predict": kwargs.get("max_tokens", self.max_tokens),
-                    },
-                },
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            return response.json().get("response", "")
-        except Exception as exc:
-            return f"Ollama error: {exc}"
 
 
 class OpenAIClient(BaseChatClient):
@@ -244,8 +262,7 @@ def create_configured_clients() -> Dict[str, Any]:
     config = _load_glyphos_config()
     clients: Dict[str, Any] = {}
 
-    preferred_local = _env_first('GLYPHOS_PREFERRED_LOCAL_BACKEND', default=_config_value(config, 'ai_compute.routing.preferred_local_backend', default='llamacpp'))
-    clients['_preferred_local_backend'] = preferred_local
+    _warn_on_retired_configuration(config)
 
     llama_url = _env_first('GLYPHOS_LLAMACPP_URL', default=_config_value(config, 'ai_compute.llamacpp.url', default='http://127.0.0.1:8081/v1'))
     llama_model = _env_first('GLYPHOS_LLAMACPP_MODEL', default=_config_value(config, 'ai_compute.llamacpp.model', default=''))
@@ -265,24 +282,6 @@ def create_configured_clients() -> Dict[str, Any]:
         client = LlamaCppClient(base_url=base_url, model=model, timeout=timeout)
         if client.is_available():
             clients[f'llamacpp-{lane}'] = client
-
-    ollama_url = _env_first('GLYPHOS_OLLAMA_URL', 'QRBT_OLLAMA_BASE_URL', default=_config_value(config, 'ai_compute.ollama.url', default='http://localhost:11434'))
-    ollama_model = _env_first('GLYPHOS_OLLAMA_MODEL', default=_config_value(config, 'ai_compute.ollama.model', default='llama3:70b'))
-    ollama_timeout = int(_env_first('GLYPHOS_OLLAMA_TIMEOUT', default=_config_value(config, 'ai_compute.ollama.timeout', default='30')) or '30')
-    if _env_first('GLYPHOS_OLLAMA_ENABLED', default=_config_value(config, 'ai_compute.ollama.enabled', default='true')).lower() != 'false':
-        ollama = OllamaClient(base_url=ollama_url, model=ollama_model, timeout=ollama_timeout)
-        if ollama.is_available():
-            clients['ollama'] = ollama
-
-    for lane in lane_keys:
-        base_url = _env_first(f'GLYPHOS_OLLAMA_{lane.upper()}_URL', f'QRBT_COUNCIL_OLLAMA_{lane.upper()}_URL', default=_config_value(config, f'ai_compute.lanes.{lane}.ollama_url', default=''))
-        if not base_url:
-            continue
-        model = _env_first(f'GLYPHOS_OLLAMA_{lane.upper()}_MODEL', default=_config_value(config, f'ai_compute.lanes.{lane}.ollama_model', default='llama3:70b'))
-        timeout = int(_env_first(f'GLYPHOS_OLLAMA_{lane.upper()}_TIMEOUT', default=_config_value(config, f'ai_compute.lanes.{lane}.ollama_timeout', default='30')) or '30')
-        client = OllamaClient(base_url=base_url, model=model, timeout=timeout)
-        if client.is_available():
-            clients[f'ollama-{lane}'] = client
 
     openai = OpenAIClient()
     if openai.is_available():

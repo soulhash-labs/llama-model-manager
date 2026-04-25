@@ -6,9 +6,10 @@ Pulse Service
 
 import hashlib
 import math
+import os
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Dict, Optional, List
 from enum import Enum
 
@@ -33,7 +34,7 @@ class PulseResponse:
     frequency_hz: float
     psi_coherence: float
     version: str = "1.0.0"
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat().replace("+00:00", "Z"))
     abc_chain_address: Optional[str] = None
     abc_anchor: Optional[str] = None
     license_entitlement: Optional[str] = None
@@ -53,7 +54,7 @@ class PulseService:
         license_service=None,
     ):
         self.instance_id = instance_id
-        self.private_key = private_key or "dev_key_change_in_production"
+        self.private_key = (private_key or os.environ.get("GLYPHOS_PULSE_PRIVATE_KEY", "")).strip()
         self.abc_driver = abc_driver
         self.license_service = license_service
         self._tick = 0
@@ -74,6 +75,8 @@ class PulseService:
     
     def _sign_pulse(self, tick: int, frequency: float, psi: float) -> str:
         """Create signature for pulse."""
+        if not self.private_key:
+            return ""
         payload = f"{tick}|{frequency}|{psi}|{self.private_key}"
         return hashlib.sha256(payload.encode()).hexdigest()
     
@@ -122,13 +125,14 @@ class PulseService:
             frequency_hz=frequency,
             psi_coherence=round(psi, 2),
             version="1.0.0",
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            timestamp=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             abc_chain_address=abc_address,
             license_entitlement=license_ent,
             metadata={
                 "instance_id": self.instance_id,
                 "time_skew_drift_us": self._calculate_time_skew_drift(tick),
-                "pulse_signature": signature[:16] + "...",
+                "pulse_signature": signature[:16] + "..." if signature else None,
+                "pulse_signing": "enabled" if signature else "disabled",
             },
         )
     
@@ -140,6 +144,8 @@ class PulseService:
         signature: str,
     ) -> bool:
         """Verify a pulse signature."""
+        if not signature or not self.private_key:
+            return False
         expected = self._sign_pulse(tick, frequency, psi)
         return signature == expected
     
@@ -149,11 +155,13 @@ class PulseService:
         frequency = self._calculate_frequency_fingerprint(tick)
         signature = self._sign_pulse(tick, frequency, 0.5)
         
-        return {
-            "X-Pulse-Sig": signature,
+        headers = {
             "X-Pulse-Tick": str(tick),
             "X-Pulse-Freq": str(frequency),
         }
+        if signature:
+            headers["X-Pulse-Sig"] = signature
+        return headers
 
 
 class PsiCoherenceService:

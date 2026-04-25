@@ -14,7 +14,6 @@ from glyphos_ai.ai_compute.api_client import (
     OpenAIClient,
     AnthropicClient,
     XAIClient,
-    OllamaClient,
     LlamaCppClient,
     create_configured_clients,
 )
@@ -39,8 +38,15 @@ __all__ = [
     "OpenAIClient",
     "AnthropicClient",
     "XAIClient",
-    "OllamaClient",
     "LlamaCppClient",
     "create_configured_clients",
     "glyph_to_prompt",
 ]
+
+
+def __getattr__(name: str):
+    if name == "OllamaClient":
+        from glyphos_ai.ai_compute.ollama_client import OllamaClient
+
+        return OllamaClient
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

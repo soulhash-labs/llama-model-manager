@@ -1,7 +1,8 @@
 import sys
 import unittest
+import warnings
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -9,7 +10,9 @@ sys.path.insert(0, str(ROOT))
 from glyphos_ai import (
     AdaptiveRouter,
     ComputeTarget,
+    PulseService,
     build_router_from_env,
+    create_configured_clients,
     create_packet,
     decode_packet,
     glyph_to_prompt,
@@ -66,38 +69,112 @@ class GlyphosPublicFlowTests(unittest.TestCase):
         self.assertEqual(result.target, ComputeTarget.EXTERNAL_XAI)
         self.assertIn('xai-ok', result.response)
 
-    def test_public_package_excludes_q45_exports(self):
+    def test_public_package_excludes_ollama_from_supported_exports(self):
         import glyphos_ai
+
         self.assertFalse(hasattr(glyphos_ai, 'Q45_AVAILABLE'))
         self.assertFalse(hasattr(glyphos_ai, 'create_q45_ai_compute_engine'))
+        self.assertNotIn('OllamaClient', glyphos_ai.__all__)
+
+    def test_top_level_ollama_import_is_guided_failure(self):
+        import glyphos_ai
+
+        removed_client = glyphos_ai.OllamaClient
+        with self.assertRaisesRegex(RuntimeError, 'llama.cpp runtime'):
+            removed_client()
+
+    def test_ollama_module_import_is_guided_failure(self):
+        from glyphos_ai.ai_compute.ollama_client import create_ollama_client
+
+        with self.assertRaisesRegex(RuntimeError, 'llama.cpp runtime'):
+            create_ollama_client()
 
     def test_route_with_configured_clients_prefers_llamacpp_lane(self):
         packet = GlyphPacket(instance_id='abc', psi_coherence=0.8, action='QUERY', time_slot='T07', destination='TERRAN')
         terran = DummyClient('llamacpp-terran-ok')
-        with patch('glyphos_ai.ai_compute.router.create_configured_clients', return_value={'llamacpp-terran': terran, '_preferred_local_backend': 'llamacpp'}):
+        with patch('glyphos_ai.ai_compute.router.create_configured_clients', return_value={'llamacpp-terran': terran}):
             result = route_with_configured_clients(packet)
         self.assertEqual(result.target, ComputeTarget.LOCAL_LLAMACPP)
         self.assertIn('llamacpp-terran-ok', result.response)
 
-    def test_route_with_configured_clients_fallbacks_to_ollama_lane(self):
-        packet = GlyphPacket(instance_id='abc', psi_coherence=0.8, action='QUERY', time_slot='T07', destination='POLARIS')
-        polaris = DummyClient('ollama-polaris-ok')
-        with patch('glyphos_ai.ai_compute.router.create_configured_clients', return_value={'ollama-polaris': polaris, '_preferred_local_backend': 'ollama'}):
-            result = route_with_configured_clients(packet)
-        self.assertEqual(result.target, ComputeTarget.LOCAL_OLLAMA)
-        self.assertIn('ollama-polaris-ok', result.response)
+    def test_create_configured_clients_warns_on_retired_config_keys(self):
+        disabled_client = Mock()
+        disabled_client.is_available.return_value = False
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            with patch('glyphos_ai.ai_compute.api_client._load_glyphos_config', return_value={
+                'ai_compute': {
+                    'local': {'preferred_local_backend': 'ollama'},
+                    'routing': {'preferred_local_backend': 'ollama'},
+                    'ollama': {
+                        'enabled': 'true',
+                        'url': 'http://localhost:11434',
+                    },
+                }
+            }), \
+                 patch('glyphos_ai.ai_compute.api_client.LlamaCppClient', return_value=disabled_client), \
+                 patch('glyphos_ai.ai_compute.api_client.OpenAIClient', return_value=disabled_client), \
+                 patch('glyphos_ai.ai_compute.api_client.AnthropicClient', return_value=disabled_client), \
+                 patch('glyphos_ai.ai_compute.api_client.XAIClient', return_value=disabled_client):
+                clients = create_configured_clients()
+        self.assertNotIn('_preferred_local_backend', clients)
+        messages = '\n'.join(str(item.message) for item in caught)
+        self.assertIn('preferred_local_backend', messages)
+        self.assertIn('ai_compute.ollama.url', messages)
+        self.assertIn('llama.cpp-only', messages)
 
-    def test_build_router_from_env(self):
-        with patch('glyphos_ai.ai_compute.router.create_configured_clients', return_value={'_preferred_local_backend': 'llamacpp'}):
+    def test_create_configured_clients_warns_on_retired_env_vars(self):
+        disabled_client = Mock()
+        disabled_client.is_available.return_value = False
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            with patch.dict('os.environ', {
+                'GLYPHOS_OLLAMA_URL': 'http://localhost:11434',
+                'GLYPHOS_PREFERRED_LOCAL_BACKEND': 'ollama',
+            }, clear=True), \
+                 patch('glyphos_ai.ai_compute.api_client._load_glyphos_config', return_value={}), \
+                 patch('glyphos_ai.ai_compute.api_client.LlamaCppClient', return_value=disabled_client), \
+                 patch('glyphos_ai.ai_compute.api_client.OpenAIClient', return_value=disabled_client), \
+                 patch('glyphos_ai.ai_compute.api_client.AnthropicClient', return_value=disabled_client), \
+                 patch('glyphos_ai.ai_compute.api_client.XAIClient', return_value=disabled_client):
+                create_configured_clients()
+        messages = '\n'.join(str(item.message) for item in caught)
+        self.assertIn('GLYPHOS_OLLAMA_URL', messages)
+        self.assertIn('GLYPHOS_PREFERRED_LOCAL_BACKEND', messages)
+
+    def test_build_router_from_env_is_llamacpp_only(self):
+        local = DummyClient('llamacpp-local-ok')
+        with patch('glyphos_ai.ai_compute.router.create_configured_clients', return_value={'llamacpp': local}):
             router = build_router_from_env()
         self.assertIsInstance(router, AdaptiveRouter)
+        self.assertTrue(router.get_status()['llamacpp'])
+        self.assertNotIn('ollama', router.get_status())
 
     def test_route_with_configured_clients_fallbacks_cleanly(self):
         packet = GlyphPacket(instance_id='abc', psi_coherence=0.8, action='QUERY', time_slot='T07', destination='MODEL')
-        with patch('glyphos_ai.ai_compute.router.create_configured_clients', return_value={'_preferred_local_backend': 'llamacpp'}):
+        with patch('glyphos_ai.ai_compute.router.create_configured_clients', return_value={}):
             result = route_with_configured_clients(packet)
         self.assertEqual(result.target, ComputeTarget.FALLBACK)
         self.assertEqual(result.routing_reason, 'no backends configured')
+
+    def test_pulse_service_is_unsigned_without_private_key(self):
+        with patch.dict('os.environ', {}, clear=True):
+            service = PulseService(instance_id='test-instance', private_key=None)
+        pulse = service.generate_pulse(psi_coherence=0.8)
+        headers = service.get_pulse_header()
+        self.assertEqual(service.private_key, '')
+        self.assertTrue(pulse.timestamp.endswith('Z'))
+        self.assertIsNone(pulse.metadata['pulse_signature'])
+        self.assertEqual(pulse.metadata['pulse_signing'], 'disabled')
+        self.assertNotIn('X-Pulse-Sig', headers)
+        self.assertFalse(service.verify_pulse_signature(1, pulse.frequency_hz, pulse.psi_coherence, 'anything'))
+
+    def test_pulse_service_reads_private_key_from_env(self):
+        with patch.dict('os.environ', {'GLYPHOS_PULSE_PRIVATE_KEY': 'secret-key'}, clear=True):
+            service = PulseService(instance_id='test-instance', private_key=None)
+        headers = service.get_pulse_header()
+        self.assertEqual(service.private_key, 'secret-key')
+        self.assertIn('X-Pulse-Sig', headers)
 
 
 if __name__ == '__main__':

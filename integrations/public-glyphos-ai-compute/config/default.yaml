@@ -1,20 +1,12 @@
-# Public GlyphOS AI Compute configuration
+# Public GlyphOS AI Compute configuration (llama.cpp-only runtime)
 
 ai_compute:
-  local:
-    preferred_local_backend: "llamacpp"
-
+  # Retired Ollama and preferred-local-backend keys are ignored with warnings.
   llamacpp:
     enabled: true
     url: "http://127.0.0.1:8081/v1"
     model: ""
     timeout: 300
-
-  ollama:
-    enabled: true
-    url: "http://localhost:11434"
-    model: "llama3:70b"
-    timeout: 30
 
   openai:
     enabled: false

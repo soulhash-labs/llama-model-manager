@@ -14,7 +14,6 @@ from .glyph_to_prompt import glyph_to_prompt
 
 class ComputeTarget(Enum):
     LOCAL_LLAMACPP = "llamacpp"
-    LOCAL_OLLAMA = "ollama"
     EXTERNAL_OPENAI = "openai"
     EXTERNAL_ANTHROPIC = "anthropic"
     EXTERNAL_XAI = "xai"
@@ -45,19 +44,15 @@ class AdaptiveRouter:
     def __init__(
         self,
         llamacpp_client=None,
-        ollama_client=None,
         openai_client=None,
         anthropic_client=None,
         xai_client=None,
-        preferred_local_backend: str = "llamacpp",
         config: Optional[RoutingConfig] = None,
     ):
         self.llamacpp = llamacpp_client
-        self.ollama = ollama_client
         self.openai = openai_client
         self.anthropic = anthropic_client
         self.xai = xai_client
-        self.preferred_local_backend = preferred_local_backend
         self.config = config or RoutingConfig()
 
     def route(self, glyph_packet, prompt: Optional[str] = None) -> RoutingResult:
@@ -66,16 +61,8 @@ class AdaptiveRouter:
         psi = self._packet_value(glyph_packet, "psi_coherence", "psiCoherence", 0.5)
         action = glyph_packet.action
 
-        if psi >= self.config.high_coherence_threshold:
-            local_targets = self._ordered_local_targets()
-            if local_targets[0] == "ollama" and self.ollama:
-                return self._route_ollama(prompt, "high coherence - prefer local Ollama")
-            if local_targets[0] == "llamacpp" and self.llamacpp:
-                return self._route_llamacpp(prompt, "high coherence - prefer local llama.cpp")
-            if self.llamacpp:
-                return self._route_llamacpp(prompt, "high coherence - fallback local llama.cpp")
-            if self.ollama:
-                return self._route_ollama(prompt, "high coherence - fallback local Ollama")
+        if psi >= self.config.high_coherence_threshold and self.llamacpp:
+            return self._route_llamacpp(prompt, "high coherence - prefer local llama.cpp")
 
         if action in self.config.complex_actions:
             if self.anthropic:
@@ -83,15 +70,8 @@ class AdaptiveRouter:
             if self.openai:
                 return self._route_openai(prompt, "complex action - prefer GPT")
 
-        local_targets = self._ordered_local_targets()
-        if local_targets[0] == "ollama" and self.ollama:
-            return self._route_ollama(prompt, "default - use local Ollama")
-        if local_targets[0] == "llamacpp" and self.llamacpp:
-            return self._route_llamacpp(prompt, "default - use local llama.cpp")
         if self.llamacpp:
-            return self._route_llamacpp(prompt, "default - fallback local llama.cpp")
-        if self.ollama:
-            return self._route_ollama(prompt, "default - fallback local Ollama")
+            return self._route_llamacpp(prompt, "default - use local llama.cpp")
         if self.openai:
             return self._route_openai(prompt, "fallback - use OpenAI")
         if self.anthropic:
@@ -100,24 +80,12 @@ class AdaptiveRouter:
             return self._route_xai(prompt, "fallback - use xAI")
         return RoutingResult(target=ComputeTarget.FALLBACK, response="No compute backend available", routing_reason="no backends configured")
 
-    def _ordered_local_targets(self) -> list[str]:
-        if self.preferred_local_backend == "ollama":
-            return ["ollama", "llamacpp"]
-        return ["llamacpp", "ollama"]
-
     def _route_llamacpp(self, prompt: str, reason: str) -> RoutingResult:
         try:
             response = self.llamacpp.generate(prompt)
             return RoutingResult(target=ComputeTarget.LOCAL_LLAMACPP, response=response, routing_reason=reason)
         except Exception as exc:
             return RoutingResult(target=ComputeTarget.LOCAL_LLAMACPP, response=f"llama.cpp error: {exc}", routing_reason=f"{reason} - error")
-
-    def _route_ollama(self, prompt: str, reason: str) -> RoutingResult:
-        try:
-            response = self.ollama.generate(prompt)
-            return RoutingResult(target=ComputeTarget.LOCAL_OLLAMA, response=response, routing_reason=reason)
-        except Exception as exc:
-            return RoutingResult(target=ComputeTarget.LOCAL_OLLAMA, response=f"Ollama error: {exc}", routing_reason=f"{reason} - error")
 
     def _route_openai(self, prompt: str, reason: str) -> RoutingResult:
         try:
@@ -153,7 +121,6 @@ class AdaptiveRouter:
     def get_status(self) -> Dict[str, bool]:
         return {
             "llamacpp": self.llamacpp is not None,
-            "ollama": self.ollama is not None,
             "openai": self.openai is not None,
             "anthropic": self.anthropic is not None,
             "xai": self.xai is not None,
@@ -180,15 +147,11 @@ def _select_lane(clients: Dict[str, Any], prefix: str, glyph_packet: Any):
 def build_router_from_env(config: Optional[RoutingConfig] = None, glyph_packet: Any | None = None) -> AdaptiveRouter:
     clients = create_configured_clients()
     selected_llamacpp = _select_lane(clients, 'llamacpp', glyph_packet) if glyph_packet is not None else clients.get('llamacpp')
-    selected_ollama = _select_lane(clients, 'ollama', glyph_packet) if glyph_packet is not None else clients.get('ollama')
-    preferred = clients.get('_preferred_local_backend', 'llamacpp')
     return AdaptiveRouter(
         llamacpp_client=selected_llamacpp,
-        ollama_client=selected_ollama,
         openai_client=clients.get('openai'),
         anthropic_client=clients.get('anthropic'),
         xai_client=clients.get('xai'),
-        preferred_local_backend=preferred,
         config=config,
     )
 
