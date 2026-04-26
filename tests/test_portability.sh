@@ -29,6 +29,7 @@ LLAMA_SERVER_BIN=
 LLAMA_SERVER_DEVICE=
 LLAMA_SERVER_PORT=19081
 LLAMA_SERVER_LOG=
+GGML_CUDA_ENABLE_UNIFIED_MEMORY=
 EOF
 }
 
@@ -193,10 +194,12 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$defaults" "OPENCLAW_PROFILE="
     assert_contains "$defaults" "CLAUDE_GATEWAY_PORT=4000"
     assert_contains "$defaults" "CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS=1800"
+    assert_contains "$defaults" "GGML_CUDA_ENABLE_UNIFIED_MEMORY="
     assert_not_contains "$defaults" "LLAMA_SERVER_DEVICE=cuda0"
     assert_contains "$web_index" "Claude Gateway Timeout (s)"
     assert_contains "$web_index" "Remote Models"
     assert_contains "$web_index" "Download Jobs"
+    assert_contains "$web_index" "CUDA Unified Memory (experimental)"
     assert_not_contains "$web_index" "GPU-aware defaults"
     assert_contains "$install_script" "Would you like to check/install build dependencies"
     assert_contains "$install_script" "llama-model sync-opencode"
@@ -206,6 +209,7 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$readme" "integrations/public-glyphos-ai-compute/"
     assert_contains "$help" "bundled public copy lives under integrations/public-glyphos-ai-compute/"
     assert_contains "$install_script" "Bundled public GlyphOS AI Compute package"
+    assert_contains "$install_script" "GGML_CUDA_ENABLE_UNIFIED_MEMORY=1"
 }
 
 test_installers_support_bootstrap_tty_handoff_and_empty_registry_seed() {
@@ -230,14 +234,18 @@ test_installers_support_bootstrap_tty_handoff_and_empty_registry_seed() {
         bash "$ROOT_DIR/install.sh" >/dev/null
 
     models="$(cat "$tmp/config/llama-server/models.tsv")"
+    defaults_installed="$(cat "$tmp/config/llama-server/defaults.env")"
     assert_contains "$models" "# alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes"
+    assert_contains "$defaults_installed" "GGML_CUDA_ENABLE_UNIFIED_MEMORY="
     assert_not_contains "$models" "qwen36-35b-q2"
     assert_not_contains "$models" "gemma4-e4b-q8"
 
     app_py="$(cat "$ROOT_DIR/web/app.py")"
     app_js="$(cat "$ROOT_DIR/web/app.js")"
     assert_contains "$app_py" '"home_dir": str(self.home)'
+    assert_contains "$app_py" 'GGML_CUDA_ENABLE_UNIFIED_MEMORY'
     assert_contains "$app_js" 'function displayPath(path) {'
+    assert_contains "$app_js" 'default-cuda-unified-memory'
     assert_contains "$app_js" 'return `~/${value.slice(homeDir.length + 1)}`;'
 }
 
@@ -497,6 +505,156 @@ test_auto_fit_uses_ram_aware_hybrid_gpu_layers() {
     assert_contains "$state" "context=32768"
     assert_contains "$state" "ngl=24"
     assert_contains "$state" "parallel=1"
+}
+
+
+test_install_reports_unified_memory_upgrade_note_for_existing_defaults() {
+    local tmp
+    local output
+
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/home/Desktop" "$tmp/config/llama-server" "$tmp/data"
+    cat >"$tmp/config/llama-server/defaults.env" <<'EOF'
+LLAMA_SERVER_CONTEXT=128000
+LLAMA_SERVER_PARALLEL=1
+EOF
+
+    output="$(env \
+        HOME="$tmp/home" \
+        XDG_CONFIG_HOME="$tmp/config" \
+        XDG_DATA_HOME="$tmp/data" \
+        bash "$ROOT_DIR/install.sh")"
+
+    assert_contains "$output" "existing defaults.env does not include the experimental CUDA unified-memory toggle"
+    assert_contains "$output" "GGML_CUDA_ENABLE_UNIFIED_MEMORY=1"
+    assert_contains "$output" "should usually be paired with LLAMA_SERVER_PARALLEL=1"
+}
+
+test_cuda_unified_memory_preserves_requested_context_and_exports_env() {
+    local tmp
+    local model
+    local output
+    local state
+    local env_value
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    model="$tmp/models/qwen27b.gguf"
+    make_model "$model"
+    : >"$tmp/llama-server.log"
+
+    # shellcheck disable=SC1090
+    source "$BIN"
+    probe_server_binary() {
+        SELECTED_LLAMA_SERVER_BIN="/bin/true"
+        SELECTED_LLAMA_SERVER_BACKEND="cuda"
+        SELECTED_LLAMA_SERVER_SOURCE="test"
+        SELECTED_LLAMA_SERVER_STATUS="compatible"
+        return 0
+    }
+    validate_mmproj_for_model() { return 0; }
+    detect_gpu_total_mib() { printf '24576\n'; }
+    detect_system_available_mib() { printf '112640\n'; }
+    llama_server_process_rows() { return 0; }
+    env() {
+        while (($#)) && [[ "$1" == *=* ]]; do
+            export "$1"
+            shift
+        done
+        "$@"
+    }
+    setsid() {
+        printf '%s\n' "${GGML_CUDA_ENABLE_UNIFIED_MEMORY:-}" >"$tmp/unified-memory.env"
+        return 0
+    }
+    wait_for_health() { return 0; }
+    write_state() { printf 'context=%s parallel=%s unified=%s override=%s\n' "$4" "$8" "${10}" "${11}" >"$tmp/state.out"; }
+
+    LLAMA_SERVER_HOST="127.0.0.1"
+    LLAMA_SERVER_PORT="19081"
+    LLAMA_SERVER_LOG="$tmp/llama-server.log"
+    LLAMA_SERVER_CONTEXT="128000"
+    LLAMA_SERVER_NGL="999"
+    LLAMA_SERVER_BATCH="128"
+    LLAMA_SERVER_THREADS="16"
+    LLAMA_SERVER_PARALLEL="auto"
+    LLAMA_SERVER_DEVICE="cuda0"
+    LLAMA_MODEL_AUTO_FIT="1"
+    LLAMA_MODEL_SYNC_OPENCODE="0"
+    LLAMA_MODEL_SYNC_CLAUDE="0"
+    LLAMA_MODEL_SYNC_OPENCLAW="0"
+    LLAMA_MODEL_SYNC_GLYPHOS="0"
+    GGML_CUDA_ENABLE_UNIFIED_MEMORY="1"
+
+    output="$(start_server demo "$model" "" "128000" "999" "128" "16" "auto" "cuda0")"
+    state="$(cat "$tmp/state.out")"
+    env_value="$(cat "$tmp/unified-memory.env")"
+
+    assert_contains "$output" "preflight_status: unified-memory-risk"
+    assert_contains "$output" "recommended_context: 65536"
+    assert_contains "$output" "performance_warning: CUDA unified memory may be substantially slower on discrete GPUs"
+    assert_not_contains "$output" "context 128000 -> 65536"
+    assert_contains "$state" "context=128000"
+    assert_contains "$state" "parallel=1"
+    assert_contains "$state" "unified=enabled"
+    assert_contains "$state" "override=unified-memory"
+    assert_contains "$env_value" "1"
+}
+
+test_current_and_doctor_report_cuda_unified_memory() {
+    local tmp
+    local current_output
+    local doctor_output
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    : >"$tmp/llama-server.log"
+
+    # shellcheck disable=SC1090
+    source "$BIN"
+    HOME="$tmp/home"
+    XDG_CONFIG_HOME="$tmp/config"
+    XDG_STATE_HOME="$tmp/state"
+    STATE_FILE="$tmp/state/current.env"
+    LLAMA_SERVER_RUNTIME_DIR="$tmp/runtime"
+    LLAMA_SERVER_PORT=19081
+    LLAMA_SERVER_LOG="$tmp/llama-server.log"
+    GGML_CUDA_ENABLE_UNIFIED_MEMORY="1"
+    cat >"$STATE_FILE" <<EOF
+CURRENT_PID=$$
+CURRENT_CUDA_UNIFIED_MEMORY=enabled
+CURRENT_AUTO_FIT_OVERRIDE_REASON=unified-memory
+EOF
+    find_pid() { printf '%s\n' "$$"; }
+    lookup_alias_for_path() { printf 'demo\n'; }
+    active_parallel_value() { printf '1\n'; }
+    active_mode_name() { printf 'single-client\n'; }
+    cmd_arg_from_pid() {
+        case "$2" in
+            -m) printf '%s\n' '/models/demo.gguf' ;;
+            -c) printf '128000\n' ;;
+            -ngl) printf '999\n' ;;
+            -b) printf '128\n' ;;
+            --threads) printf '16\n' ;;
+            --device) printf 'cuda0\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    curl() { return 0; }
+    probe_server_binary() { return 1; }
+    gpu_memory_report() { printf 'NVIDIA RTX: 14.3 GiB used / 24.0 GiB total (9.7 GiB free)\n'; }
+    system_memory_report() { printf 'RAM: 96.0 GiB available / 110.0 GiB total\n'; }
+    detect_gpu_total_mib() { printf '24576\n'; }
+    detect_system_available_mib() { printf '98304\n'; }
+    llama_server_process_rows() { return 0; }
+
+    current_output="$(show_current)"
+    doctor_output="$(show_doctor)"
+
+    assert_contains "$current_output" "cuda_unified_memory: enabled"
+    assert_contains "$current_output" "auto_fit_override_reason: unified-memory"
+    assert_contains "$doctor_output" "cuda_unified_memory: enabled"
+    assert_contains "$doctor_output" "auto_fit_override_reason: unified-memory"
 }
 
 test_doctor_reports_gpu_pressure_and_process_rows() {
@@ -1156,7 +1314,10 @@ main() {
     test_cuda_cc_parsing_rejects_non_numeric_values
     test_startup_log_classifier_emits_actionable_categories
     test_add_blocks_obvious_mmproj_family_mismatch
+    test_install_reports_unified_memory_upgrade_note_for_existing_defaults
     test_system_memory_influences_fit_posture
+    test_cuda_unified_memory_preserves_requested_context_and_exports_env
+    test_current_and_doctor_report_cuda_unified_memory
     test_auto_fit_uses_ram_aware_hybrid_gpu_layers
     test_doctor_reports_gpu_pressure_and_process_rows
     test_registry_parsing_preserves_empty_columns

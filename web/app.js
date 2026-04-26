@@ -304,7 +304,8 @@ function renderHero(data) {
   const activeLanes = laneLabel(mode.active_parallel);
   const health = healthLabel(current.health);
 
-  setText("#status-subtitle", `${health}. ${activeMode}. ${activeLanes}. ${registryLabel(registryCount)} in registry.`);
+  const unifiedMemoryLabel = (current.cuda_unified_memory || doctor.cuda_unified_memory) === "enabled" ? "Unified memory enabled." : "Unified memory disabled.";
+  setText("#status-subtitle", `${health}. ${activeMode}. ${activeLanes}. ${registryLabel(registryCount)} in registry. ${unifiedMemoryLabel}`);
   setText("#hero-current-model", current.alias || "stopped");
   setText("#hero-current-path", basename(current.model) || "No model loaded");
   setText("#hero-current-mode", activeMode);
@@ -428,12 +429,17 @@ function renderStatus(data) {
     joinNotes([
       doctor.gpu_memory || "",
       doctor.system_memory || "",
+      doctor.cuda_unified_memory ? `UM ${doctor.cuda_unified_memory}` : "",
       doctor.gpu_process_count && doctor.gpu_process_count !== "0"
         ? `${doctor.gpu_process_count} llama-server process${doctor.gpu_process_count === "1" ? "" : "es"}`
         : "no llama-server GPU peers detected",
     ]),
   );
-  setTitle("#metric-gpu-processes", joinNotes([doctor.fit_guidance || "", doctor.gpu_processes || ""]));
+  setTitle("#metric-gpu-processes", joinNotes([
+    doctor.fit_guidance || "",
+    doctor.auto_fit_override_reason ? `override ${doctor.auto_fit_override_reason}` : "",
+    doctor.gpu_processes || "",
+  ]));
   setText("#metric-endpoint", data.api_base || "-");
   setText(
     "#metric-build",
@@ -982,6 +988,7 @@ function renderDefaults(defaults) {
   $("#default-batch").value = defaults.LLAMA_SERVER_BATCH || "";
   $("#default-threads").value = defaults.LLAMA_SERVER_THREADS || "";
   $("#default-parallel").value = defaults.LLAMA_SERVER_PARALLEL || "";
+  $("#default-cuda-unified-memory").checked = String(defaults.GGML_CUDA_ENABLE_UNIFIED_MEMORY || "").trim() === "1";
   $("#default-log").value = defaults.LLAMA_SERVER_LOG || "";
   $("#default-extra").value = defaults.LLAMA_SERVER_EXTRA_ARGS || "";
   $("#default-sync-opencode").value = defaults.LLAMA_MODEL_SYNC_OPENCODE || "1";
@@ -1157,6 +1164,7 @@ async function saveDefaults(event) {
     LLAMA_SERVER_BATCH: $("#default-batch").value.trim(),
     LLAMA_SERVER_THREADS: $("#default-threads").value.trim(),
     LLAMA_SERVER_PARALLEL: $("#default-parallel").value.trim(),
+    GGML_CUDA_ENABLE_UNIFIED_MEMORY: $("#default-cuda-unified-memory").checked ? "1" : "",
     LLAMA_SERVER_LOG: $("#default-log").value.trim(),
     LLAMA_SERVER_EXTRA_ARGS: $("#default-extra").value.trim(),
     LLAMA_MODEL_SYNC_OPENCODE: $("#default-sync-opencode").value.trim(),

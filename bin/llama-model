@@ -31,6 +31,7 @@ LLAMA_SERVER_NGL="999"
 LLAMA_SERVER_BATCH="128"
 LLAMA_SERVER_THREADS="16"
 LLAMA_SERVER_PARALLEL=""
+GGML_CUDA_ENABLE_UNIFIED_MEMORY="${GGML_CUDA_ENABLE_UNIFIED_MEMORY:-}"
 LLAMA_SERVER_LOG="$HOME/models/llama-server.log"
 LLAMA_SERVER_WAIT_SECONDS="300"
 LLAMA_SERVER_EXTRA_ARGS=""
@@ -654,6 +655,43 @@ detect_host_arch() {
 
 command_available() {
     command -v "$1" >/dev/null 2>&1
+}
+
+cuda_unified_memory_enabled() {
+    case "${GGML_CUDA_ENABLE_UNIFIED_MEMORY:-}" in
+        1|true|TRUE|yes|YES|on|ON)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+cuda_unified_memory_mode() {
+    if cuda_unified_memory_enabled; then
+        printf 'enabled\n'
+    else
+        printf 'disabled\n'
+    fi
+}
+
+active_cuda_unified_memory_value() {
+    local pid="${1:-}"
+
+    if [[ -n "$pid" ]] && read_state_file && [[ "${CURRENT_PID:-}" == "$pid" ]]; then
+        printf '%s\n' "${CURRENT_CUDA_UNIFIED_MEMORY:-$(cuda_unified_memory_mode)}"
+        return 0
+    fi
+    cuda_unified_memory_mode
+}
+
+active_auto_fit_override_reason() {
+    local pid="${1:-}"
+
+    if [[ -n "$pid" ]] && read_state_file && [[ "${CURRENT_PID:-}" == "$pid" ]]; then
+        printf '%s\n' "${CURRENT_AUTO_FIT_OVERRIDE_REASON:-}"
+    fi
 }
 
 read_state_file() {
@@ -2592,6 +2630,8 @@ write_state() {
     local threads="$7"
     local parallel="$8"
     local device="$9"
+    local cuda_unified_memory="${10:-$(cuda_unified_memory_mode)}"
+    local auto_fit_override_reason="${11:-}"
 
     {
         printf 'CURRENT_ALIAS=%q\n' "$alias"
@@ -2605,6 +2645,8 @@ write_state() {
         printf 'CURRENT_THREADS=%q\n' "$threads"
         printf 'CURRENT_PARALLEL=%q\n' "$parallel"
         printf 'CURRENT_DEVICE=%q\n' "$device"
+        printf 'CURRENT_CUDA_UNIFIED_MEMORY=%q\n' "$cuda_unified_memory"
+        printf 'CURRENT_AUTO_FIT_OVERRIDE_REASON=%q\n' "$auto_fit_override_reason"
         printf 'CURRENT_STARTED_AT=%q\n' "$(iso_timestamp)"
     } >"$STATE_FILE"
 }
@@ -2644,6 +2686,8 @@ start_server() {
     local hybrid_ngl=""
     local recommended_context=""
     local competing_rows=""
+    local cuda_unified_memory="$(cuda_unified_memory_mode)"
+    local auto_fit_override_reason=""
     local exit_status=0
 
     while (($#)); do
@@ -2712,7 +2756,17 @@ ${SELECTED_LLAMA_SERVER_GUIDANCE}"
         if [[ -n "$gpu_total" ]]; then
             recommended_context="$(safe_context_for_gpu_mib "$gpu_total")"
             if [[ "$context" =~ ^[0-9]+$ && "$recommended_context" =~ ^[0-9]+$ && "$context" -gt "$recommended_context" ]]; then
-                if [[ "$auto_fit" == "1" ]]; then
+                if cuda_unified_memory_enabled; then
+                    auto_fit_override_reason="unified-memory"
+                    printf 'preflight_status: unified-memory-risk\n'
+                    printf 'preflight_reason: requested context %s exceeds the normal VRAM-safe heuristic for %s MiB, but GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 is enabled so the launch will be attempted\n' "$context" "$gpu_total"
+                    printf 'recommended_context: %s\n' "$recommended_context"
+                    printf 'performance_warning: CUDA unified memory may be substantially slower on discrete GPUs\n'
+                    if [[ -z "$parallel" || "$parallel" == "auto" ]]; then
+                        parallel="1"
+                        printf 'auto_fit: parallel auto -> 1 to preserve a single context budget while unified memory is enabled\n'
+                    fi
+                elif [[ "$auto_fit" == "1" ]]; then
                     printf 'auto_fit: context %s -> %s based on detected GPU memory (%s MiB)\n' "$context" "$recommended_context" "$gpu_total"
                     context="$recommended_context"
                     if [[ -z "$parallel" || "$parallel" == "auto" ]]; then
@@ -2774,12 +2828,16 @@ ${SELECTED_LLAMA_SERVER_GUIDANCE}"
             cmd+=("${passthrough_args[@]}")
         fi
 
-        setsid "${cmd[@]}" >"$LLAMA_SERVER_LOG" 2>&1 < /dev/null &
+        if cuda_unified_memory_enabled; then
+            env GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 setsid "${cmd[@]}" >"$LLAMA_SERVER_LOG" 2>&1 < /dev/null &
+        else
+            setsid "${cmd[@]}" >"$LLAMA_SERVER_LOG" 2>&1 < /dev/null &
+        fi
         pid=$!
         disown "$pid" 2>/dev/null || true
 
         if wait_for_health "$pid" "$context"; then
-            write_state "$alias" "$model_path" "$pid" "$context" "$ngl" "$batch" "$threads" "${parallel:-auto}" "$device"
+            write_state "$alias" "$model_path" "$pid" "$context" "$ngl" "$batch" "$threads" "${parallel:-auto}" "$device" "$cuda_unified_memory" "$auto_fit_override_reason"
             post_switch_client_sync "$alias" "$model_path" "$context"
 
             if [[ -n "$SELECTED_LLAMA_SERVER_MESSAGE" ]]; then
@@ -2950,6 +3008,8 @@ show_current() {
     local url="http://${LLAMA_SERVER_HOST}:${LLAMA_SERVER_PORT}/health"
     local active_parallel
     local active_mode
+    local cuda_unified_memory
+    local auto_fit_override_reason
 
     pid="$(find_pid)"
     if [[ -z "$pid" ]]; then
@@ -2960,6 +3020,7 @@ show_current() {
         else
             printf 'configured_parallel: auto\n'
         fi
+        printf 'cuda_unified_memory: %s\n' "$(cuda_unified_memory_mode)"
         return 0
     fi
 
@@ -2968,6 +3029,8 @@ show_current() {
     [[ -n "$alias" ]] || alias="custom"
     active_parallel="$(active_parallel_value "$pid")"
     active_mode="$(active_mode_name "$active_parallel")"
+    cuda_unified_memory="$(active_cuda_unified_memory_value "$pid")"
+    auto_fit_override_reason="$(active_auto_fit_override_reason "$pid")"
 
     printf 'pid: %s\n' "$pid"
     printf 'alias: %s\n' "$alias"
@@ -2986,6 +3049,10 @@ show_current() {
     printf 'active_batch: %s\n' "$(cmd_arg_from_pid "$pid" -b || printf unknown)"
     printf 'active_threads: %s\n' "$(cmd_arg_from_pid "$pid" --threads || printf unknown)"
     printf 'active_device: %s\n' "$(cmd_arg_from_pid "$pid" --device || printf unknown)"
+    printf 'cuda_unified_memory: %s\n' "$cuda_unified_memory"
+    if [[ -n "$auto_fit_override_reason" ]]; then
+        printf 'auto_fit_override_reason: %s\n' "$auto_fit_override_reason"
+    fi
     if curl -fsS "$url" >/dev/null 2>&1; then
         printf 'health: ok (%s)\n' "$url"
     else
@@ -3020,12 +3087,16 @@ show_doctor() {
     local gpu_process_rows=""
     local gpu_process_count="0"
     local gpu_processes=""
+    local cuda_unified_memory="$(cuda_unified_memory_mode)"
+    local auto_fit_override_reason=""
 
     pid="$(find_pid)"
     if [[ -n "$pid" ]]; then
         model_path="$(cmd_arg_from_pid "$pid" -m || true)"
         alias="$(lookup_alias_for_path "$model_path" || true)"
         [[ -n "$alias" ]] || alias="custom"
+        cuda_unified_memory="$(active_cuda_unified_memory_value "$pid")"
+        auto_fit_override_reason="$(active_auto_fit_override_reason "$pid")"
         if curl -fsS "$url" >/dev/null 2>&1; then
             health="ok"
         fi
@@ -3099,6 +3170,8 @@ show_doctor() {
     printf 'system_memory: %s\n' "$system_memory"
     printf 'fit_posture: %s\n' "$fit_posture"
     printf 'fit_guidance: %s\n' "$fit_guidance"
+    printf 'cuda_unified_memory: %s\n' "$cuda_unified_memory"
+    printf 'auto_fit_override_reason: %s\n' "$auto_fit_override_reason"
     printf 'gpu_process_count: %s\n' "$gpu_process_count"
     printf 'gpu_processes: %s\n' "$gpu_processes"
     printf 'endpoint: http://%s:%s/v1\n' "$LLAMA_SERVER_HOST" "$LLAMA_SERVER_PORT"

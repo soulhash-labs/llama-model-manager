@@ -53,6 +53,11 @@ if [[ ! -f "$CONFIG_DIR/defaults.env" ]]; then
     printf 'installed %s\n' "$CONFIG_DIR/defaults.env"
 else
     printf 'kept existing %s\n' "$CONFIG_DIR/defaults.env"
+    if ! grep -Eq '^[[:space:]]*GGML_CUDA_ENABLE_UNIFIED_MEMORY=' "$CONFIG_DIR/defaults.env"; then
+        printf 'note: existing defaults.env does not include the experimental CUDA unified-memory toggle\n'
+        printf 'note: add GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 to %s/defaults.env if you want to test RAM fallback for oversized CUDA context/KV allocations\n' "$CONFIG_DIR"
+        printf 'note: this may be slower on discrete GPUs and should usually be paired with LLAMA_SERVER_PARALLEL=1\n'
+    fi
 fi
 
 if [[ ! -f "$CONFIG_DIR/models.tsv" ]]; then
@@ -104,6 +109,8 @@ fi
 printf '  9. Optional local Claude gateway: llama-model claude-gateway start\n'
 printf ' 10. Sync GlyphOS AI Compute if you use it: llama-model sync-glyphos\n'
 printf ' 11. Bundled public GlyphOS AI Compute package: %s/integrations/public-glyphos-ai-compute\n' "$APP_SHARE_DIR"
+printf ' 12. Experimental CUDA unified-memory fallback: set GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 in %s/defaults.env to try larger context/KV/compute allocations through system RAM\n' "$CONFIG_DIR"
+printf '     on discrete GPUs this can be much slower; usually pair it with LLAMA_SERVER_PARALLEL=1\n'
 
 if [[ -t 0 && -t 1 ]]; then
     printf '\nWould you like to check/install build dependencies and compile a local llama.cpp runtime now? [Y/n] '

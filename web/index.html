@@ -545,6 +545,13 @@
               Parallel
               <input name="LLAMA_SERVER_PARALLEL" id="default-parallel" placeholder="blank for auto">
             </label>
+            <label class="span-2 checkbox-field" title="Allows CUDA runs to fall back to system RAM when larger context, KV, or compute allocations exceed VRAM. Can enable larger contexts, but may be much slower on discrete GPUs.">
+              CUDA Unified Memory (experimental)
+              <div class="checkbox-row">
+                <input name="GGML_CUDA_ENABLE_UNIFIED_MEMORY" id="default-cuda-unified-memory" type="checkbox" aria-label="Enable experimental CUDA unified memory fallback">
+                <span class="field-note">Allows CUDA runs to fall back to system RAM when larger context, KV, or compute allocations exceed VRAM. This can enable larger contexts, but it may be much slower on discrete GPUs.</span>
+              </div>
+            </label>
             <label class="span-2" title="Where the live llama-server log is written on disk.">
               Log File
               <input name="LLAMA_SERVER_LOG" id="default-log">

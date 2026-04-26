@@ -238,6 +238,7 @@ These integrations are optional. The default product behavior remains the local 
 - the scripts use XDG-style config/state locations under `~/.config/llama-server` and `~/.local/state/llama-server`
 - `LLAMA_SERVER_PARALLEL=1` is recommended for a single coding harness because it avoids parallel slot pressure without reducing context length
 - `LLAMA_MODEL_AUTO_FIT=1` is the default guarded GPU/RAM-aware startup mitigation; use `--no-auto-fit` for a strict launch
+- `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1` is an experimental CUDA-only escape hatch for oversized context/KV/compute allocations; it can preserve larger context attempts, but it may be much slower on discrete GPUs
 - high system RAM helps hybrid CPU/GPU offload start successfully, but it is slower than full GPU offload and should not be treated as extra VRAM
 - set `LLAMA_MODEL_UI=zenity` if you want to force the old Zenity UI instead of the browser dashboard
 
