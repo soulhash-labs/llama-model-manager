@@ -508,6 +508,26 @@ test_auto_fit_uses_ram_aware_hybrid_gpu_layers() {
 }
 
 
+test_install_next_steps_sanitize_home_paths() {
+    local tmp
+    local output
+    local next_steps
+
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/home/Desktop"
+
+    output="$(env \
+        HOME="$tmp/home" \
+        bash "$ROOT_DIR/install.sh")"
+    next_steps="$(printf '%s\n' "$output" | grep -E '^[[:space:]]+(4|11|12)\.')"
+
+    assert_contains "$next_steps" 'Edit ~/.config/llama-server/defaults.env if needed'
+    assert_contains "$next_steps" 'Bundled public GlyphOS AI Compute package: ~/.local/share/llama-model-manager/integrations/public-glyphos-ai-compute'
+    assert_contains "$next_steps" 'GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 in ~/.config/llama-server/defaults.env'
+    assert_not_contains "$next_steps" "$tmp/home"
+}
+
+
 test_install_reports_unified_memory_upgrade_note_for_existing_defaults() {
     local tmp
     local output
@@ -1314,6 +1334,7 @@ main() {
     test_cuda_cc_parsing_rejects_non_numeric_values
     test_startup_log_classifier_emits_actionable_categories
     test_add_blocks_obvious_mmproj_family_mismatch
+    test_install_next_steps_sanitize_home_paths
     test_install_reports_unified_memory_upgrade_note_for_existing_defaults
     test_system_memory_influences_fit_posture
     test_cuda_unified_memory_preserves_requested_context_and_exports_env

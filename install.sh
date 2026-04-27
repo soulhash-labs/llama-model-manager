@@ -26,6 +26,17 @@ is_placeholder_seed_registry() {
     [[ "$current_seed" == "$expected_seed" ]]
 }
 
+compact_home_path() {
+    local value="$1"
+    if [[ "$value" == "$HOME" ]]; then
+        printf "~\n"
+    elif [[ "$value" == "$HOME/"* ]]; then
+        printf "~/%s\n" "${value#"$HOME/"}"
+    else
+        printf "%s\n" "$value"
+    fi
+}
+
 mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$APP_DIR" "$APP_SHARE_DIR"
 
 install -m 0755 "$ROOT_DIR/bin/llama-model" "$BIN_DIR/llama-model"
@@ -55,7 +66,7 @@ else
     printf 'kept existing %s\n' "$CONFIG_DIR/defaults.env"
     if ! grep -Eq '^[[:space:]]*GGML_CUDA_ENABLE_UNIFIED_MEMORY=' "$CONFIG_DIR/defaults.env"; then
         printf 'note: existing defaults.env does not include the experimental CUDA unified-memory toggle\n'
-        printf 'note: add GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 to %s/defaults.env if you want to test RAM fallback for oversized CUDA context/KV allocations\n' "$CONFIG_DIR"
+        printf 'note: add GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 to %s/defaults.env if you want to test RAM fallback for oversized CUDA context/KV allocations\n' "$(compact_home_path "$CONFIG_DIR")"
         printf 'note: this may be slower on discrete GPUs and should usually be paired with LLAMA_SERVER_PARALLEL=1\n'
     fi
 fi
@@ -86,7 +97,7 @@ printf 'Next steps:\n'
 printf '  1. Open the dashboard: llama-model-web\n'
 printf '  2. Or use the launcher: llama-model-gui\n'
 printf '  3. Build a local runtime if needed: llama-model build-runtime --backend auto\n'
-printf '  4. Edit %s/defaults.env if needed\n' "$CONFIG_DIR"
+printf '  4. Edit %s/defaults.env if needed\n' "$(compact_home_path "$CONFIG_DIR")"
 printf '  5. Run: llama-model current\n'
 OPENCODE_CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"
 OPENCLAW_MAIN_CONFIG="$HOME/.openclaw/openclaw.json"
@@ -108,8 +119,8 @@ else
 fi
 printf '  9. Optional local Claude gateway: llama-model claude-gateway start\n'
 printf ' 10. Sync GlyphOS AI Compute if you use it: llama-model sync-glyphos\n'
-printf ' 11. Bundled public GlyphOS AI Compute package: %s/integrations/public-glyphos-ai-compute\n' "$APP_SHARE_DIR"
-printf ' 12. Experimental CUDA unified-memory fallback: set GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 in %s/defaults.env to try larger context/KV/compute allocations through system RAM\n' "$CONFIG_DIR"
+printf ' 11. Bundled public GlyphOS AI Compute package: %s/integrations/public-glyphos-ai-compute\n' "$(compact_home_path "$APP_SHARE_DIR")"
+printf ' 12. Experimental CUDA unified-memory fallback: set GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 in %s/defaults.env to try larger context/KV/compute allocations through system RAM\n' "$(compact_home_path "$CONFIG_DIR")"
 printf '     on discrete GPUs this can be much slower; usually pair it with LLAMA_SERVER_PARALLEL=1\n'
 
 if [[ -t 0 && -t 1 ]]; then
