@@ -1,0 +1,44 @@
+{
+  "name": "context-mode-mcp",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "node ./scripts/build.js",
+    "build:mcp": "node ./scripts/build.js mcp",
+    "build:dashboard": "node ./scripts/build.js dashboard",
+    "build:all": "node ./scripts/build.js all",
+    "start": "node ./dist/index.js",
+    "dashboard:dev": "vite --config dashboard/vite.config.ts --host",
+    "dashboard:build": "vite build --config dashboard/vite.config.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^0.6.1",
+    "zod": "^3.24.4",
+    "turndown": "^7.2.0",
+    "domino": "^2.1.6"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.9.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.7",
+    "typescript": "^5.7.3",
+    "vite": "^6.2.3",
+    "@vitejs/plugin-react": "^5.0.1",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "@types/react": "^19.0.12",
+    "@types/react-dom": "^19.0.12",
+    "tailwindcss": "^4.0.17",
+    "postcss": "^8.5.6",
+    "autoprefixer": "^10.4.20",
+    "@tanstack/react-router": "^1.131.9",
+    "lucide-react": "^0.537.0",
+    "recharts": "^2.15.3",
+    "@types/node": "^24.2.0"
+  }
+}
