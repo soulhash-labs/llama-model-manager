@@ -90,6 +90,22 @@ All tools are defined in Zod-first schemas in `src/schemas/context-tools.ts`:
     - `confirm=true` clears project docs/chunks/events rows and optional cache/db path cleanup.
   - Both tools include run telemetry in `runs` only when DB writes are still available.
 
+## Automated lifecycle matrix
+Run a full lifecycle matrix in one command from `integrations/context-mode-mcp`:
+
+```bash
+npm run lifecycle-matrix
+```
+
+The script checks:
+
+- `ctx_doctor`
+- `ctx_execute`
+- `ctx_upgrade` (both deny path and confirm+rebuild+reconfigure path)
+- `ctx_purge` (both deny path and confirm path)
+- `ctx_index`
+- `ctx_search`
+
 ## Dependency hygiene
 - Non-blocking advisories observed during smoke verification (environment/localized):
   - `npm ci` may emit a high-severity advisory for transitive packages.

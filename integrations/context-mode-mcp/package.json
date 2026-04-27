@@ -12,6 +12,7 @@
     "build:dashboard": "node ./scripts/build.js dashboard",
     "build:all": "node ./scripts/build.js all",
     "start": "node ./dist/index.js",
+    "lifecycle-matrix": "node ./scripts/lifecycle-matrix.mjs",
     "dashboard:dev": "vite --config dashboard/vite.config.ts --host",
     "dashboard:build": "vite build --config dashboard/vite.config.ts"
   },
