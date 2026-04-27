@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import hashlib
 import json
 import os
@@ -28,6 +29,9 @@ APP_TITLE = "LLM Model Manager"
 APP_BRAND = "Local Control Surface"
 HEADER_LINE = "# alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes"
 PHASE0_SCHEMA_VERSION = 1
+MAX_ACTIVITY_EVENTS = 100
+DEFAULT_MAX_REQUEST_BYTES = 2 * 1024 * 1024
+DEFAULT_CLI_TIMEOUT_SECONDS = 60
 KNOWN_DEFAULT_KEYS = [
     "LLAMA_SERVER_BIN",
     "LLAMA_SERVER_HOST",
@@ -57,6 +61,183 @@ KNOWN_DEFAULT_KEYS = [
     "CLAUDE_AUTH_TOKEN",
     "CLAUDE_API_KEY",
 ]
+
+
+class ValidationError(ValueError):
+    """Structured validation failure for request/route payload validation."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+class CommandTimeoutError(RuntimeError):
+    def __init__(self, command: str, timeout_seconds: int):
+        self.code = "command_timeout"
+        self.command = command
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            f"Command timed out after {timeout_seconds}s: {command}"
+        )
+
+
+def env_int(name: str, fallback: int) -> int:
+    raw_value = os.environ.get(name, "").strip()
+    if not raw_value:
+        return fallback
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def parse_api_token() -> str:
+    return os.environ.get("LLAMA_MODEL_WEB_API_TOKEN", "").strip()
+
+
+def parse_allowed_hosts() -> set[str]:
+    raw_hosts = os.environ.get("LLAMA_MODEL_WEB_ALLOWED_HOSTS", "").strip()
+    if not raw_hosts:
+        return set()
+    return {
+        item.strip().lower()
+        for item in raw_hosts.split(",")
+        if item.strip()
+    }
+
+
+def default_operation_activity_store() -> dict[str, Any]:
+    return {
+        "schema_version": PHASE0_SCHEMA_VERSION,
+        "updated_at": "",
+        "events": [],
+    }
+
+
+def parse_cli_timeout_seconds() -> int:
+    return max(5, env_int("LLAMA_MODEL_WEB_CLI_TIMEOUT_SECONDS", DEFAULT_CLI_TIMEOUT_SECONDS))
+
+
+def parse_max_request_bytes() -> int:
+    return max(1024, env_int("LLAMA_MODEL_WEB_MAX_REQUEST_BYTES", DEFAULT_MAX_REQUEST_BYTES))
+
+
+API_POST_PAYLOAD_SCHEMAS: dict[str, dict[str, Any]] = {
+    "/api/models/save": {
+        "allowed": {
+            "alias", "path", "mmproj", "extra_args", "context", "ngl", "batch", "threads", "parallel", "device", "notes", "extra",
+        },
+        "required": {"path"},
+    },
+    "/api/models/delete": {
+        "allowed": {"alias"},
+        "required": {"alias"},
+    },
+    "/api/discover": {
+        "allowed": {"root"},
+    },
+    "/api/remote/search": {
+        "allowed": {"query", "limit", "cache_ttl_seconds"},
+        "int_fields": {"limit", "cache_ttl_seconds"},
+    },
+    "/api/switch": {
+        "allowed": {"target"},
+        "required": {"target"},
+    },
+    "/api/restart": {
+        "allowed": set(),
+    },
+    "/api/stop": {
+        "allowed": set(),
+    },
+    "/api/mode": {
+        "allowed": {"mode"},
+        "required": {"mode"},
+    },
+    "/api/defaults/save": {
+        "allowed": set(KNOWN_DEFAULT_KEYS),
+    },
+    "/api/dashboard-service": {
+        "allowed": {"action"},
+        "required": set(),
+    },
+    "/api/opencode/sync": {
+        "allowed": {"preset"},
+    },
+    "/api/openclaw/sync": {
+        "allowed": set(),
+    },
+    "/api/claude/sync": {
+        "allowed": set(),
+    },
+    "/api/glyphos/sync": {
+        "allowed": set(),
+    },
+    "/api/claude-gateway": {
+        "allowed": {"action"},
+    },
+    "/api/downloads/start": {
+        "allowed": {"repo_id", "artifact_name", "destination_root", "resume_partial_path", "resume_source_job_id"},
+        "required": {"repo_id", "artifact_name"},
+    },
+    "/api/downloads/cancel": {
+        "allowed": {"id"},
+        "required": {"id"},
+        "str_fields": {"id"},
+    },
+    "/api/downloads/retry": {
+        "allowed": {"id"},
+        "required": {"id"},
+        "str_fields": {"id"},
+    },
+    "/api/downloads/resume": {
+        "allowed": {"id"},
+        "required": {"id"},
+        "str_fields": {"id"},
+    },
+    "/api/downloads/cleanup": {
+        "allowed": {"max_age_seconds"},
+        "int_fields": {"max_age_seconds"},
+    },
+    "/api/downloads/cleanup-duplicates": {
+        "allowed": set(),
+    },
+    "/api/downloads/delete-orphans": {
+        "allowed": {"paths"},
+    },
+    "/api/downloads/recover": {
+        "allowed": set(),
+    },
+    "/api/downloads/pause-queue": {
+        "allowed": set(),
+    },
+    "/api/downloads/resume-queue": {
+        "allowed": set(),
+    },
+    "/api/downloads/policy": {
+        "allowed": {"max_active_downloads"},
+        "int_fields": {"max_active_downloads"},
+        "required": {"max_active_downloads"},
+    },
+    "/api/downloads/remove-queued": {
+        "allowed": {"id"},
+        "required": {"id"},
+        "str_fields": {"id"},
+    },
+    "/api/downloads/clear-queued": {
+        "allowed": set(),
+    },
+    "/api/downloads/prioritize-queued": {
+        "allowed": {"id"},
+        "required": {"id"},
+        "str_fields": {"id"},
+    },
+    "/api/downloads/deprioritize-queued": {
+        "allowed": {"id"},
+        "required": {"id"},
+        "str_fields": {"id"},
+    },
+}
 
 DEMO_STATE = {
     "title": APP_TITLE,
@@ -281,9 +462,11 @@ class Manager:
         self.remote_models_file = self.xdg_state_home / "llama-server" / "remote-models.json"
         self.download_jobs_file = self.xdg_state_home / "llama-server" / "download-jobs.json"
         self.download_policy_file = self.xdg_state_home / "llama-server" / "download-policy.json"
+        self.operation_activity_file = self.xdg_state_home / "llama-server" / "operation-activity.json"
         self.runtime_profiles_file = self.config_dir / "runtime-profiles.json"
         self.validation_results_file = self.xdg_state_home / "llama-server" / "validation-results.json"
         self.host_capability_file = self.xdg_state_home / "llama-server" / "host-capability.json"
+        self.operation_activity_lock = threading.RLock()
         self.runtime_root = Path(os.environ.get("LLAMA_SERVER_RUNTIME_DIR", self.app_root.parent / "runtime")) / "llama-server"
         self.cli_bin = self._resolve_cli_bin()
         self.download_lock = threading.RLock()
@@ -315,8 +498,14 @@ class Manager:
         if not self.cli_bin.exists():
             raise RuntimeError(f"llama-model not found: {self.cli_bin}")
 
+        timeout_seconds = parse_cli_timeout_seconds()
+
         command = [str(self.cli_bin), *args]
-        result = subprocess.run(command, capture_output=True, text=True)
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            command_text = " ".join(shlex.quote(item) for item in command)
+            raise CommandTimeoutError(command_text, timeout_seconds) from exc
         if result.returncode != 0:
             message = result.stderr.strip() or result.stdout.strip() or "unknown llama-model error"
             raise RuntimeError(message)
@@ -746,6 +935,69 @@ class Manager:
             self.write_json_store(path, store)
         return store
 
+    def read_operation_activity_store(self) -> dict[str, Any]:
+        store = self.read_json_store(self.operation_activity_file, default_operation_activity_store())
+        raw_events = store.get("events")
+        if isinstance(raw_events, list):
+            source = raw_events
+            needs_write = False
+        else:
+            source = store.get("items") if isinstance(store.get("items"), list) else []
+            needs_write = True
+
+        normalized_events = [
+            event for event in source
+            if isinstance(event, dict)
+        ]
+        normalized = {
+            "schema_version": PHASE0_SCHEMA_VERSION,
+            "updated_at": str(store.get("updated_at", "")),
+            "events": normalized_events[:MAX_ACTIVITY_EVENTS],
+        }
+        if needs_write or normalized_events != source:
+            self.write_json_store(self.operation_activity_file, normalized)
+        return normalized
+
+    def record_operation_activity(
+        self,
+        *,
+        route: str,
+        action: str,
+        actor_source: str,
+        status: str,
+        duration_ms: float,
+        retry_count: int = 0,
+        error_code: str = "",
+        error_message: str = "",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        payload = {
+            "id": str(uuid4()),
+            "route": route,
+            "action": action,
+            "actor_source": actor_source,
+            "status": status,
+            "duration_ms": float(duration_ms),
+            "retry_count": retry_count,
+            "error_code": error_code,
+            "error_message": error_message,
+            "details": details or {},
+            "happened_at": self.iso_now(),
+        }
+        with self.operation_activity_lock:
+            store = self.read_operation_activity_store()
+            events = list(store.get("events", []))
+            events.insert(0, payload)
+            del events[MAX_ACTIVITY_EVENTS:]
+            self.write_json_store(
+                self.operation_activity_file,
+                {
+                    "schema_version": PHASE0_SCHEMA_VERSION,
+                    "updated_at": self.iso_now(),
+                    "events": events,
+                },
+            )
+
     def runtime_profile_from_manifest(self, manifest_path: Path) -> dict[str, Any]:
         metadata = self.parse_env_file(manifest_path)
         profile_id = manifest_path.parent.name
@@ -902,6 +1154,7 @@ class Manager:
             "download_jobs": download_jobs,
             "download_storage": self.download_storage_summary(download_jobs),
             "download_policy": self.download_policy_summary(download_jobs),
+            "operation_activity": self.read_operation_activity_store(),
             "runtime_profiles": runtime_profiles,
             "validation_results": validation_results,
             "host_capability": host_capability,
@@ -2250,6 +2503,7 @@ class Manager:
                 claude_gateway_status = {}
         claude_model_id = defaults.get("CLAUDE_MODEL_ID", "").strip() or current_alias
         claude_base_url = defaults.get("CLAUDE_BASE_URL", "").strip() or f"http://{defaults.get('CLAUDE_GATEWAY_HOST', '127.0.0.1')}:{defaults.get('CLAUDE_GATEWAY_PORT', '4000')}"
+        glyphos_telemetry = self.glyphos_telemetry_snapshot(limit=12)
         return {
             "opencode_model": f"llamacpp/{current_model_name}" if current_model_name else "",
             "opencode_config_file": str(self.opencode_config_file),
@@ -2274,7 +2528,52 @@ class Manager:
             "glyphos_config_exists": self.glyphos_config_file.exists(),
             "glyphos_model": current_model_name,
             "glyphos_routing_preference": "llamacpp",
+            "glyphos_telemetry": glyphos_telemetry,
         }
+
+    def glyphos_telemetry_snapshot(self, *, limit: int = 10) -> dict[str, Any]:
+        baseline_routing = {
+            "attempts_by_target": {},
+            "fallback_reason_counts": {},
+            "total_attempts": 0,
+            "recent_attempts": [],
+        }
+        snapshot: dict[str, Any] = {"available": False, "routing": baseline_routing}
+        if self.demo:
+            return snapshot
+
+        # Prefer installed package import; fall back to repo-local integration path.
+        integration_root = (self.app_root.parent / "integrations" / "public-glyphos-ai-compute").resolve()
+        candidates: list[str] = []
+        if str(integration_root) not in sys.path and integration_root.is_dir():
+            candidates.append(str(integration_root))
+        candidates.append("")
+
+        last_error: Exception | None = None
+        for prepend in candidates:
+            try:
+                if prepend:
+                    sys.path.insert(0, prepend)
+                from glyphos_ai.ai_compute.router import routing_telemetry_snapshot  # type: ignore
+                routing = routing_telemetry_snapshot(limit=int(limit))
+                if not isinstance(routing, dict):
+                    routing = dict(baseline_routing)
+                else:
+                    routing = {**baseline_routing, **routing}
+                snapshot = {"available": True, "routing": routing}
+                return snapshot
+            except Exception as exc:
+                last_error = exc
+            finally:
+                if prepend:
+                    try:
+                        sys.path.remove(prepend)
+                    except ValueError:
+                        pass
+
+        if last_error is not None:
+            snapshot["error"] = str(last_error)
+        return snapshot
 
     def sync_opencode(self, preset: str = "balanced") -> dict[str, str]:
         return self.parse_key_values(self.run_cli("sync-opencode", "--preset", preset))
@@ -2359,6 +2658,7 @@ class Manager:
                 "claude_model_id": "qwen35-9b-q8",
                 "claude_base_url": "http://127.0.0.1:4000",
                 "claude_gateway": {"running": "yes", "url": "http://127.0.0.1:4000", "model_id": "qwen35-9b-q8", "log": "/var/log/claude-gateway.log", "upstream_timeout_seconds": "1800"},
+                "glyphos_telemetry": {"available": False, "routing": {"attempts_by_target": {}, "fallback_reason_counts": {}, "total_attempts": 0, "recent_attempts": []}},
             }
         current = self.parse_key_values(self.run_cli("current"))
         doctor = self.parse_key_values(self.run_cli("doctor"))
@@ -2446,136 +2746,356 @@ def remote_and_download_post_route_payload(path: str, manager: Manager, payload:
     handler = REMOTE_AND_DOWNLOAD_POST_ROUTES.get(path)
     if handler is None:
         return None
-    return handler(manager, payload)
+    try:
+        return handler(manager, payload)
+    except ValueError as exc:
+        raise ValidationError("invalid_request", str(exc)) from exc
 
 
 class AppHandler(BaseHTTPRequestHandler):
     manager: Manager
     web_root: Path
 
+    def _is_local_client(self) -> bool:
+        host = str(self.client_address[0]).strip()
+        if not host:
+            return False
+        if host in {"127.0.0.1", "::1", "localhost"}:
+            return True
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            return False
+
+    def _normalize_allowed_host(self, raw_host: str) -> str:
+        return raw_host.strip().lower().strip("[]")
+
+    def _is_allowed_client(self) -> bool:
+        allowed_hosts = parse_allowed_hosts()
+        if not allowed_hosts:
+            return True
+        host = str(self.client_address[0]).strip().lower()
+        normalized_host = self._normalize_allowed_host(host)
+
+        for allowed in allowed_hosts:
+            allowed_host = self._normalize_allowed_host(allowed)
+            if allowed_host in {"localhost", "127.0.0.1", "::1"} and self._is_local_client():
+                return True
+            if allowed_host == normalized_host:
+                return True
+            try:
+                if ipaddress.ip_address(normalized_host) == ipaddress.ip_address(allowed_host):
+                    return True
+            except ValueError:
+                continue
+
+        return False
+
+    def _request_token(self) -> str:
+        token = parse_api_token()
+        if not token:
+            return ""
+        supplied = self.headers.get("X-LLAMA-MODEL-MANAGER-TOKEN", "")
+        if supplied:
+            return supplied.strip()
+        auth_header = self.headers.get("Authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            return auth_header[7:].strip()
+        return ""
+
+    def _authorize_api_request(self, route: str) -> None:
+        if route not in {
+            "/api/state",
+            "/api/logs",
+            "/api/dashboard-service/logs",
+            "/api/claude-gateway/logs",
+        }:
+            if not self._is_allowed_client():
+                raise ValidationError("client_not_allowed", "Client host not allowed to call the API")
+
+        token = parse_api_token()
+        if not token:
+            return
+        if self._is_local_client():
+            return
+
+        provided = self._request_token()
+        if not provided:
+            raise ValidationError("missing_api_token", "Missing or empty API token")
+        if provided != token:
+            raise ValidationError("invalid_api_token", "Invalid API token")
+
+    @staticmethod
+    def _route_activity_action(route: str) -> str:
+        return route.split("/")[-1].replace("-", "_") or "api"
+
+    def _response_summary(self, payload: dict[str, Any]) -> dict[str, Any]:
+        summary: dict[str, Any] = {}
+        if "job" in payload and isinstance(payload["job"], dict):
+            summary["job_id"] = str(payload["job"].get("id", ""))
+        if "remote_models" in payload and isinstance(payload["remote_models"], dict):
+            summary["remote_count"] = len(payload["remote_models"].get("items", []))
+        if "result" in payload and isinstance(payload["result"], dict):
+            summary["result_keys"] = sorted(payload["result"].keys())
+        return summary
+
+    def _validate_post_payload(self, route: str, payload: dict[str, Any]) -> dict[str, Any]:
+        schema = API_POST_PAYLOAD_SCHEMAS.get(route)
+        if not schema:
+            return payload
+
+        allowed = schema.get("allowed", set())
+        required = schema.get("required", set())
+        int_fields = schema.get("int_fields", set())
+        str_fields = schema.get("str_fields", set())
+
+        if allowed:
+            unknown = [key for key in payload if key not in allowed]
+            if unknown:
+                raise ValidationError("unknown_field", f"Unknown field(s) for {route}: {', '.join(sorted(unknown))}")
+
+        for field in required:
+            if field not in payload:
+                raise ValidationError("missing_required_field", f"Missing required field: {field}")
+            if field in str_fields:
+                continue
+            if str(payload.get(field, "")).strip() == "":
+                raise ValidationError("missing_required_field", f"Missing required field: {field}")
+
+        for field in str_fields:
+            if field not in payload:
+                continue
+            value = payload.get(field)
+            if not isinstance(value, str) or value.strip() == "":
+                raise ValidationError("invalid_field_type", f"Field '{field}' must be a non-empty string")
+            payload[field] = value.strip()
+
+        for field in int_fields:
+            if field not in payload:
+                continue
+            try:
+                payload[field] = int(payload[field])
+            except (TypeError, ValueError):
+                raise ValidationError("invalid_field_type", f"Field '{field}' must be an integer")
+
+        return payload
+
+    def _parse_lines_query(self, raw_lines: str | None, *, default: int = 80) -> int:
+        value_text = (str(raw_lines).strip() if raw_lines is not None else str(default))
+        try:
+            value = int(value_text)
+        except ValueError as exc:
+            raise ValidationError("invalid_query_param", "Query parameter 'lines' must be an integer") from exc
+        if value < 0:
+            raise ValidationError("invalid_query_param", "Query parameter 'lines' must be non-negative")
+        return value
+
+    def _track_api_activity(
+        self,
+        *,
+        route: str,
+        start: float,
+        response: dict[str, Any] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        if os.environ.get("LLAMA_MODEL_WEB_DISABLE_ACTIVITY_LOG", "").strip().lower() in {"1", "true", "yes"}:
+            return
+        if not hasattr(self.manager, "record_operation_activity"):
+            return
+        duration_ms = (time.perf_counter() - start) * 1000.0
+        action = self._route_activity_action(route)
+        status = "success" if error is None else "error"
+        error_code = getattr(error, "code", "") if error is not None else ""
+        error_message = str(error) if error is not None else ""
+
+        actor_source = "local" if self._is_local_client() else "remote"
+        if status == "error":
+            self.manager.record_operation_activity(
+                route=route,
+                action=action,
+                actor_source=actor_source,
+                status=status,
+                duration_ms=duration_ms,
+                retry_count=0,
+                error_code=error_code,
+                error_message=error_message,
+                details={"error": error_message},
+            )
+            return
+
+        if status == "success" and response is not None:
+            self.manager.record_operation_activity(
+                route=route,
+                action=action,
+                actor_source=actor_source,
+                status=status,
+                duration_ms=duration_ms,
+                retry_count=0,
+                details=self._response_summary(response),
+            )
+
+    def _dispatch_post_route(self, route: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if route == "/api/models/save":
+            model = self.manager.save_model(payload)
+            return {"ok": True, "model": model}
+        if route == "/api/models/delete":
+            self.manager.remove_model(str(payload.get("alias", "")))
+            return {"ok": True}
+        if route == "/api/discover":
+            root = str(payload.get("root") or self.manager.discovery_root)
+            return {"ok": True, "items": self.manager.discover(root)}
+
+        route_payload = remote_and_download_post_route_payload(route, self.manager, payload)
+        if route_payload is not None:
+            return {"ok": True, **route_payload}
+        if route == "/api/switch":
+            target = str(payload.get("target", "")).strip()
+            self.manager.run_cli("switch", target)
+            return {"ok": True}
+        if route == "/api/restart":
+            self.manager.run_cli("restart")
+            return {"ok": True}
+        if route == "/api/stop":
+            self.manager.run_cli("stop")
+            return {"ok": True}
+        if route == "/api/mode":
+            target_mode = str(payload.get("mode", "")).strip()
+            self.manager.run_cli("set-mode", target_mode, "--restart")
+            return {"ok": True}
+        if route == "/api/defaults/save":
+            updates = {
+                key: str(payload.get(key, ""))
+                for key in KNOWN_DEFAULT_KEYS
+                if key in payload
+            }
+            self.manager.save_defaults(updates)
+            return {"ok": True}
+        if route == "/api/dashboard-service":
+            action = str(payload.get("action", "status")).strip()
+            self.manager.run_cli("dashboard-service", action)
+            return {"ok": True, "service": self.manager.dashboard_service_status()}
+        if route == "/api/opencode/sync":
+            preset = str(payload.get("preset", "balanced")).strip() or "balanced"
+            result = self.manager.sync_opencode(preset)
+            return {"ok": True, "result": result}
+        if route == "/api/openclaw/sync":
+            result = self.manager.sync_openclaw()
+            return {"ok": True, "result": result}
+        if route == "/api/claude/sync":
+            result = self.manager.sync_claude()
+            return {"ok": True, "result": result}
+        if route == "/api/glyphos/sync":
+            result = self.manager.sync_glyphos()
+            return {"ok": True, "result": result}
+        if route == "/api/claude-gateway":
+            action = str(payload.get("action", "status")).strip()
+            result = self.parse_key_values(self.manager.run_cli("claude-gateway", action))
+            return {"ok": True, "result": result}
+        raise ValidationError("unknown_route", f"Unknown API route: {route}")
+
+    def _status_for_error(self, error: Exception) -> HTTPStatus:
+        if isinstance(error, ValidationError):
+            if error.code in {"missing_api_token", "invalid_api_token"}:
+                return HTTPStatus.UNAUTHORIZED
+            if error.code == "unknown_route":
+                return HTTPStatus.NOT_FOUND
+            if error.code == "payload_too_large":
+                return HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+            if error.code == "client_not_allowed":
+                return HTTPStatus.FORBIDDEN
+            return HTTPStatus.BAD_REQUEST
+        if isinstance(error, CommandTimeoutError):
+            return HTTPStatus.GATEWAY_TIMEOUT
+        if isinstance(error, ValueError):
+            return HTTPStatus.BAD_REQUEST
+        if isinstance(error, RuntimeError):
+            return HTTPStatus.BAD_GATEWAY
+        return HTTPStatus.INTERNAL_SERVER_ERROR
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/healthz":
             self.send_json({"status": "ok"})
             return
-        if parsed.path == "/api/state":
-            self.send_json(self.manager.state())
-            return
-        if parsed.path == "/api/logs":
-            query = urllib.parse.parse_qs(parsed.query)
-            lines = int(query.get("lines", ["80"])[0])
-            logs = self.manager.run_cli("logs", str(lines))
-            self.send_json({"lines": lines, "content": logs})
-            return
-        if parsed.path == "/api/dashboard-service/logs":
-            query = urllib.parse.parse_qs(parsed.query)
-            lines = int(query.get("lines", ["100"])[0])
-            logs = self.manager.run_cli("dashboard-service", "logs", str(lines))
-            self.send_json({"lines": lines, "content": logs})
-            return
-        if parsed.path == "/api/claude-gateway/logs":
-            query = urllib.parse.parse_qs(parsed.query)
-            lines = int(query.get("lines", ["100"])[0])
-            logs = self.manager.run_cli("claude-gateway", "logs", str(lines))
-            self.send_json({"lines": lines, "content": logs})
+        if parsed.path.startswith("/api/"):
+            try:
+                self._authorize_api_request(parsed.path)
+                if parsed.path == "/api/state":
+                    self.send_json(self.manager.state())
+                    return
+                if parsed.path == "/api/logs":
+                    query = urllib.parse.parse_qs(parsed.query)
+                    lines = self._parse_lines_query(query.get("lines", [None])[0], default=80)
+                    logs = self.manager.run_cli("logs", str(lines))
+                    self.send_json({"lines": lines, "content": logs})
+                    return
+                if parsed.path == "/api/dashboard-service/logs":
+                    query = urllib.parse.parse_qs(parsed.query)
+                    lines = self._parse_lines_query(query.get("lines", [None])[0], default=100)
+                    logs = self.manager.run_cli("dashboard-service", "logs", str(lines))
+                    self.send_json({"lines": lines, "content": logs})
+                    return
+                if parsed.path == "/api/claude-gateway/logs":
+                    query = urllib.parse.parse_qs(parsed.query)
+                    lines = self._parse_lines_query(query.get("lines", [None])[0], default=100)
+                    logs = self.manager.run_cli("claude-gateway", "logs", str(lines))
+                    self.send_json({"lines": lines, "content": logs})
+                    return
+                raise ValidationError("unknown_route", f"Unknown API route: {parsed.path}")
+            except Exception as exc:
+                status = self._status_for_error(exc)
+                self.send_error_json(status, str(exc), code=getattr(exc, "code", "unknown_error"))
             return
         self.serve_static(parsed.path)
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
+        route = parsed.path
+        started = time.perf_counter()
+        response: dict[str, Any] | None = None
+        response_error: Exception | None = None
         try:
+            self._authorize_api_request(route)
             payload = self.read_json_body()
-            if parsed.path == "/api/models/save":
-                model = self.manager.save_model(payload)
-                self.send_json({"ok": True, "model": model})
-                return
-            if parsed.path == "/api/models/delete":
-                self.manager.remove_model(str(payload.get("alias", "")))
-                self.send_json({"ok": True})
-                return
-            if parsed.path == "/api/discover":
-                root = str(payload.get("root") or self.manager.discovery_root)
-                self.send_json({"ok": True, "items": self.manager.discover(root)})
-                return
-            route_payload = remote_and_download_post_route_payload(parsed.path, self.manager, payload)
-            if route_payload is not None:
-                self.send_json({"ok": True, **route_payload})
-                return
-            if parsed.path == "/api/switch":
-                target = str(payload.get("target", "")).strip()
-                self.manager.run_cli("switch", target)
-                self.send_json({"ok": True})
-                return
-            if parsed.path == "/api/restart":
-                self.manager.run_cli("restart")
-                self.send_json({"ok": True})
-                return
-            if parsed.path == "/api/stop":
-                self.manager.run_cli("stop")
-                self.send_json({"ok": True})
-                return
-            if parsed.path == "/api/mode":
-                target_mode = str(payload.get("mode", "")).strip()
-                self.manager.run_cli("set-mode", target_mode, "--restart")
-                self.send_json({"ok": True})
-                return
-            if parsed.path == "/api/defaults/save":
-                updates = {
-                    key: str(payload.get(key, ""))
-                    for key in KNOWN_DEFAULT_KEYS
-                    if key in payload
-                }
-                self.manager.save_defaults(updates)
-                self.send_json({"ok": True})
-                return
-            if parsed.path == "/api/dashboard-service":
-                action = str(payload.get("action", "status")).strip()
-                self.manager.run_cli("dashboard-service", action)
-                self.send_json({"ok": True, "service": self.manager.dashboard_service_status()})
-                return
-            if parsed.path == "/api/opencode/sync":
-                preset = str(payload.get("preset", "balanced")).strip() or "balanced"
-                result = self.manager.sync_opencode(preset)
-                self.send_json({"ok": True, "result": result})
-                return
-            if parsed.path == "/api/openclaw/sync":
-                result = self.manager.sync_openclaw()
-                self.send_json({"ok": True, "result": result})
-                return
-            if parsed.path == "/api/claude/sync":
-                result = self.manager.sync_claude()
-                self.send_json({"ok": True, "result": result})
-                return
-            if parsed.path == "/api/glyphos/sync":
-                result = self.manager.sync_glyphos()
-                self.send_json({"ok": True, "result": result})
-                return
-            if parsed.path == "/api/claude-gateway":
-                action = str(payload.get("action", "status")).strip()
-                result = self.parse_key_values(self.manager.run_cli("claude-gateway", action))
-                self.send_json({"ok": True, "result": result})
-                return
-            self.send_error_json(HTTPStatus.NOT_FOUND, "Unknown API route")
-        except ValueError as exc:
-            self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
-        except RuntimeError as exc:
-            self.send_error_json(HTTPStatus.BAD_GATEWAY, str(exc))
-        except Exception as exc:  # pragma: no cover - last-resort handler
-            self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+            payload = self._validate_post_payload(route, payload)
+            response = self._dispatch_post_route(route, payload)
+            self.send_json(response)
+        except Exception as exc:
+            response_error = exc
+            status = self._status_for_error(exc)
+            self.send_error_json(status, str(exc), code=getattr(exc, "code", "unknown_error"))
+        finally:
+            if route.startswith("/api/"):
+                if response_error is not None:
+                    self._track_api_activity(route=route, start=started, error=response_error)
+                elif response is not None:
+                    self._track_api_activity(route=route, start=started, response=response)
 
     def read_json_body(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0"))
+        raw_length = self.headers.get("Content-Length", "0")
+        try:
+            length = int(raw_length)
+        except ValueError as exc:
+            raise ValidationError("invalid_content_length", "Content-Length must be an integer") from exc
+
+        if length < 0:
+            raise ValidationError("invalid_content_length", "Content-Length must be non-negative")
+
+        max_bytes = parse_max_request_bytes()
+        if length > max_bytes:
+            raise ValidationError("payload_too_large", f"Request body exceeds limit of {max_bytes} bytes")
+
         body = self.rfile.read(length) if length else b"{}"
         if not body:
             return {}
         try:
             payload = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError("Invalid JSON body") from exc
+            raise ValidationError("invalid_body", "Invalid JSON body") from exc
         if payload is None:
             return {}
         if not isinstance(payload, dict):
-            raise ValueError("JSON body must be an object")
+            raise ValidationError("invalid_body", "JSON body must be an object")
         return payload
 
     def serve_static(self, raw_path: str) -> None:
@@ -2609,8 +3129,11 @@ class AppHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def send_error_json(self, status: HTTPStatus, message: str) -> None:
-        self.send_json({"ok": False, "error": message}, status=status)
+    def send_error_json(self, status: HTTPStatus, message: str, code: str | None = None) -> None:
+        payload = {"ok": False, "error": message}
+        if code:
+            payload["code"] = code
+        self.send_json(payload, status=status)
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
         return

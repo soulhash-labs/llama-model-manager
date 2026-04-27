@@ -79,7 +79,7 @@
         </div>
       </header>
 
-      <section id="top-notice" class="notice-banner hidden" aria-live="polite"></section>
+        <section id="top-notice" class="notice-banner hidden" aria-live="polite"></section>
 
       <details class="help-strip" open>
         <summary>
@@ -189,6 +189,17 @@
           </div>
 
           <pre id="logs-output" class="log-box hidden"></pre>
+        </section>
+
+        <section class="panel activity-panel">
+          <div class="panel-head panel-head-anchored">
+            <div>
+              <span class="panel-tag">Audit</span>
+              <h2>Recent Activity</h2>
+              <p>Recent API actions, including downloads, mode toggles, and sync operations.</p>
+            </div>
+          </div>
+          <div id="activity-feed" class="activity-feed" aria-live="polite"></div>
         </section>
 
         <section class="panel">
@@ -684,6 +695,9 @@
               <span class="metric-label">GlyphOS AI Compute</span>
               <code id="glyphos-model">-</code>
               <span id="glyphos-path" class="metric-note">-</span>
+              <span id="glyphos-telemetry-summary" class="metric-note">-</span>
+              <div id="glyphos-telemetry-reasons" class="chip-row"></div>
+              <div id="glyphos-telemetry-recent" class="telemetry-list"></div>
               <div class="inline-actions integration-actions">
                 <button id="sync-glyphos" class="button button-small button-primary" title="Sync GlyphOS AI Compute to the active local llama.cpp runtime.">Sync GlyphOS</button>
               </div>

@@ -40,6 +40,14 @@ function joinNotes(parts) {
   return parts.filter(Boolean).join(" · ");
 }
 
+function formatLocalTime(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const parsed = new Date(text);
+  if (!Number.isFinite(parsed.getTime())) return text;
+  return parsed.toLocaleString();
+}
+
 function titleize(value) {
   return String(value || "")
     .split("-")
@@ -403,6 +411,8 @@ function renderStatus(data) {
   renderHero(data);
   renderDashboardService(data.dashboard_service || {});
   renderOwnershipConflict(doctor);
+  renderOperationActivity(data.operation_activity || {});
+  renderGlyphosTelemetry(data.glyphos_telemetry || {});
 
   setText("#metric-model", current.alias || "stopped");
   setText("#metric-model-path", current.model || "No model running");
@@ -735,6 +745,111 @@ function downloadStatusLabel(job) {
   return status;
 }
 
+function renderOperationActivity(activityStore) {
+  const feed = $("#activity-feed");
+  if (!feed) return;
+  const store = activityStore && typeof activityStore === "object" ? activityStore : {};
+  const events = Array.isArray(store.events) ? store.events.filter((event) => event && typeof event === "object") : [];
+
+  if (!events.length) {
+    feed.innerHTML = `
+      <div class="activity-empty">
+        <span class="empty-eyebrow">No Activity</span>
+        <strong class="empty-title">No operations recorded yet.</strong>
+        <span class="empty-copy">Actions like downloads, sync calls, and mode toggles appear here.</span>
+      </div>
+    `;
+    return;
+  }
+
+  const rows = events.slice(0, 12).map((event) => {
+    const route = String(event.route || "");
+    const action = String(event.action || "");
+    const actor = String(event.actor_source || "");
+    const status = String(event.status || "");
+    const durationMs = Number(event.duration_ms || 0);
+    const happenedAt = formatLocalTime(event.happened_at || "");
+    const errorCode = String(event.error_code || "");
+    const errorMessage = String(event.error_message || "");
+    const detail = errorMessage || errorCode ? joinNotes([errorCode, errorMessage]) : "";
+
+    return `
+      <article class="activity-event">
+        <div class="activity-main">
+          <div class="activity-title">
+            <span class="status-pill status-${escapeHtml(status || "unknown")}">${escapeHtml(titleize(status || "unknown"))}</span>
+            <strong>${escapeHtml(joinNotes([action || "api", route || ""]))}</strong>
+          </div>
+          <div class="activity-meta">${escapeHtml(joinNotes([
+            actor ? `actor ${actor}` : "",
+            Number.isFinite(durationMs) && durationMs > 0 ? `${Math.round(durationMs)}ms` : "",
+            happenedAt ? happenedAt : "",
+          ]))}</div>
+          ${detail ? `<div class="activity-detail">${escapeHtml(detail)}</div>` : ""}
+        </div>
+      </article>
+    `;
+  });
+
+  feed.innerHTML = rows.join("");
+}
+
+function renderGlyphosTelemetry(glyphosTelemetry) {
+  const summaryNode = $("#glyphos-telemetry-summary");
+  const reasonsNode = $("#glyphos-telemetry-reasons");
+  const recentNode = $("#glyphos-telemetry-recent");
+  if (!summaryNode || !reasonsNode || !recentNode) return;
+
+  const telemetry = glyphosTelemetry && typeof glyphosTelemetry === "object" ? glyphosTelemetry : {};
+  const available = Boolean(telemetry.available);
+  const routing = telemetry.routing && typeof telemetry.routing === "object" ? telemetry.routing : {};
+  const total = Number(routing.total_attempts || 0);
+  const attemptsByTarget = routing.attempts_by_target && typeof routing.attempts_by_target === "object" ? routing.attempts_by_target : {};
+  const reasonCounts = routing.fallback_reason_counts && typeof routing.fallback_reason_counts === "object" ? routing.fallback_reason_counts : {};
+  const recent = Array.isArray(routing.recent_attempts) ? routing.recent_attempts.filter((item) => item && typeof item === "object") : [];
+
+  if (!available) {
+    summaryNode.textContent = "Telemetry unavailable (GlyphOS integration not installed).";
+    reasonsNode.innerHTML = "";
+    recentNode.innerHTML = "";
+    return;
+  }
+
+  const targetBits = Object.entries(attemptsByTarget)
+    .map(([target, count]) => `${target} ${count}`)
+    .slice(0, 6);
+
+  summaryNode.textContent = joinNotes([
+    Number.isFinite(total) ? `${total} route attempt${total === 1 ? "" : "s"}` : "",
+    targetBits.length ? `targets: ${targetBits.join(", ")}` : "",
+  ]) || "No routing attempts recorded yet.";
+
+  const reasonPairs = Object.entries(reasonCounts)
+    .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))
+    .slice(0, 8);
+  reasonsNode.innerHTML = reasonPairs.map(([key, count]) => {
+    const label = `${key} ${count}`;
+    const kind = String(key || "").includes(".error") ? "chip-danger" : "chip-neutral";
+    return `<span class="chip ${kind}" title="${escapeHtml(key)}">${escapeHtml(label)}</span>`;
+  }).join("");
+
+  recentNode.innerHTML = recent.slice(0, 8).map((item) => {
+    const target = String(item.target || "");
+    const reason = String(item.reason_code || "");
+    const success = Boolean(item.success);
+    const latency = Number(item.latency_ms || 0);
+    const time = item.time ? new Date(Number(item.time) * 1000).toLocaleTimeString() : "";
+    const label = joinNotes([
+      success ? "ok" : "error",
+      target,
+      reason,
+      Number.isFinite(latency) && latency > 0 ? `${latency}ms` : "",
+      time,
+    ]);
+    return `<div class="telemetry-item">${escapeHtml(label)}</div>`;
+  }).join("");
+}
+
 function renderDownloads(jobs) {
   const tbody = $("#downloads-table tbody");
   const template = $("#download-row-template");
@@ -884,12 +999,36 @@ function renderDownloads(jobs) {
     removeQueuedButton.hidden = status !== "queued";
     prioritizeQueuedButton.hidden = status !== "queued" || !job.can_prioritize;
     deprioritizeQueuedButton.hidden = status !== "queued" || !job.can_deprioritize;
-    cancelButton.title = `Cancel ${job.artifact_name || job.id}.`;
-    resumeButton.title = `Resume ${job.artifact_name || job.id} from ${formatBytes(job.partial_bytes || 0)}.`;
-    retryButton.title = `Retry ${job.artifact_name || job.id} from byte zero.`;
-    removeQueuedButton.title = `Remove queued job ${job.artifact_name || job.id}. Files are not touched.`;
-    prioritizeQueuedButton.title = `Move queued job ${job.artifact_name || job.id} ahead of other queued downloads.`;
-    deprioritizeQueuedButton.title = `Move queued job ${job.artifact_name || job.id} one slot later.`;
+    const label = job.artifact_name || job.id;
+    cancelButton.title = status === "queued"
+      ? `Cancel ${label}. Removes it from the queue. Partial data is preserved when possible for resume.`
+      : `Cancel ${label}. Requests cancellation for the active transfer. Partial data is preserved when possible for resume.`;
+    resumeButton.title = `Resume ${label} from ${formatBytes(job.partial_bytes || 0)}. Use Retry to restart from byte zero.`;
+    retryButton.title = `Retry ${label} from byte zero. Use Resume when a partial file exists.`;
+    removeQueuedButton.title = `Remove queued job ${label}. No files are deleted; partial cleanup is separate.`;
+    prioritizeQueuedButton.title = `Move queued job ${label} ahead of other queued downloads (does not interrupt running jobs).`;
+    deprioritizeQueuedButton.title = `Move queued job ${label} one slot later (does not interrupt running jobs).`;
+
+    const statusCell = row.querySelector(".download-status-cell");
+    if (statusCell) {
+      const hints = [];
+      if (status === "queued" && policy.queue_paused) {
+        hints.push("Queue paused: resume the queue to start.");
+      }
+      if (status === "queued" && policy.at_capacity) {
+        hints.push(`At capacity: waits for a running slot (${policy.running_downloads}/${policy.max_active_downloads}).`);
+      }
+      if (status === "failed") {
+        hints.push("Failed: use Resume if partial data exists, otherwise Retry.");
+      }
+      if (status === "cancelled") {
+        hints.push("Cancelled: use Resume to continue partial, or Retry to restart.");
+      }
+      statusCell.title = hints.join(" ");
+      if (hints.length) {
+        statusCell.insertAdjacentHTML("beforeend", `<div class="secondary-line">${escapeHtml(hints.join(" "))}</div>`);
+      }
+    }
     tbody.appendChild(row);
   }
 }

@@ -20,6 +20,7 @@ from glyphos_ai import (
 )
 from glyphos_ai.glyph.encoder import encode_intent
 from glyphos_ai.glyph.types import Intent, GlyphPacket
+from glyphos_ai.ai_compute.router import reset_routing_telemetry, routing_telemetry_snapshot
 
 
 class DummyClient:
@@ -175,6 +176,32 @@ class GlyphosPublicFlowTests(unittest.TestCase):
         headers = service.get_pulse_header()
         self.assertEqual(service.private_key, 'secret-key')
         self.assertIn('X-Pulse-Sig', headers)
+
+    def test_routing_telemetry_snapshot_tracks_success_routes(self):
+        reset_routing_telemetry()
+        packet = GlyphPacket(instance_id='abc', psi_coherence=0.9, action='QUERY', time_slot='T07', destination='MODEL')
+        router = AdaptiveRouter(llamacpp_client=DummyClient('llamacpp-ok'))
+        router.route(packet, prompt='test prompt')
+        router.route(packet, prompt='test prompt')
+
+        snap = routing_telemetry_snapshot(limit=10)
+        self.assertGreaterEqual(snap.get("total_attempts", 0), 2)
+        self.assertIn("llamacpp", snap.get("attempts_by_target", {}))
+
+    def test_routing_telemetry_error_reason_is_suffixed_once(self):
+        class ExplodingClient(DummyClient):
+            def generate(self, prompt: str):
+                raise RuntimeError("boom")
+
+        reset_routing_telemetry()
+        packet = GlyphPacket(instance_id='abc', psi_coherence=0.95, action='QUERY', time_slot='T07', destination='MODEL')
+        router = AdaptiveRouter(llamacpp_client=ExplodingClient('llamacpp'))
+        router.route(packet, prompt='test prompt')
+
+        snap = routing_telemetry_snapshot(limit=10)
+        reasons = snap.get("fallback_reason_counts", {})
+        self.assertTrue(any(str(key).endswith(".error") for key in reasons.keys()))
+        self.assertFalse(any(str(key).endswith(".error.error") for key in reasons.keys()))
 
 
 if __name__ == '__main__':

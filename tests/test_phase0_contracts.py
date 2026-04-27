@@ -10,6 +10,8 @@ import tempfile
 import unittest
 import time
 import urllib.request
+from http import HTTPStatus
+from urllib import error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -30,6 +32,7 @@ class Phase0ContractTests(unittest.TestCase):
             "XDG_CONFIG_HOME": str(Path(tmpdir) / "config"),
             "XDG_STATE_HOME": str(Path(tmpdir) / "state"),
             "LLAMA_SERVER_RUNTIME_DIR": str(Path(tmpdir) / "runtime"),
+            "LLAMA_MODEL_WEB_DISABLE_ACTIVITY_LOG": "1",
         }
         Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
         config_dir = Path(env["XDG_CONFIG_HOME"]) / "llama-server"
@@ -92,6 +95,207 @@ class Phase0ContractTests(unittest.TestCase):
         )
         with urllib.request.urlopen(request, timeout=10) as response:
             return json.loads(response.read().decode("utf-8"))
+
+    def post_json_raw(self, url: str, payload: dict[str, object]) -> tuple[int, dict[str, object]]:
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                status = response.status
+                body = response.read().decode("utf-8")
+        except error.HTTPError as exc:
+            status = exc.code
+            body = exc.read().decode("utf-8")
+        return status, json.loads(body)
+
+    def get_json_raw(self, url: str) -> tuple[int, dict[str, object]]:
+        request = urllib.request.Request(url, method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                status = response.status
+                body = response.read().decode("utf-8")
+        except error.HTTPError as exc:
+            status = exc.code
+            body = exc.read().decode("utf-8")
+        return status, json.loads(body)
+
+    def test_unknown_post_field_is_rejected_with_error_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self.make_manager(tmpdir)
+            app_server = self.start_app_server(manager)
+            api_base = f"http://127.0.0.1:{app_server.server_port}"
+
+            status, response = self.post_json_raw(
+                f"{api_base}/api/downloads/policy",
+                {
+                    "max_active_downloads": 4,
+                    "unexpected_field": "nope",
+                },
+            )
+
+            self.assertEqual(status, HTTPStatus.BAD_REQUEST)
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["code"], "unknown_field")
+
+    def test_unknown_post_route_returns_not_found_with_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self.make_manager(tmpdir)
+            app_server = self.start_app_server(manager)
+            api_base = f"http://127.0.0.1:{app_server.server_port}"
+
+            status, response = self.post_json_raw(f"{api_base}/api/does-not-exist", {})
+
+            self.assertEqual(status, HTTPStatus.NOT_FOUND)
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["code"], "unknown_route")
+
+    def test_unknown_get_route_returns_not_found_with_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self.make_manager(tmpdir)
+            app_server = self.start_app_server(manager)
+            api_base = f"http://127.0.0.1:{app_server.server_port}"
+
+            status, response = self.get_json_raw(f"{api_base}/api/does-not-exist")
+
+            self.assertEqual(status, HTTPStatus.NOT_FOUND)
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["code"], "unknown_route")
+
+    def test_invalid_lines_query_param_is_bad_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self.make_manager(tmpdir)
+            app_server = self.start_app_server(manager)
+            api_base = f"http://127.0.0.1:{app_server.server_port}"
+
+            status, response = self.get_json_raw(f"{api_base}/api/logs?lines=abc")
+
+            self.assertEqual(status, HTTPStatus.BAD_REQUEST)
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["code"], "invalid_query_param")
+
+    def test_oversized_post_body_is_rejected_with_request_entity_too_large(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            patcher = mock.patch.dict(os.environ, {"LLAMA_MODEL_WEB_MAX_REQUEST_BYTES": "1024"}, clear=False)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+            manager = self.make_manager(tmpdir)
+            app_server = self.start_app_server(manager)
+            api_base = f"http://127.0.0.1:{app_server.server_port}"
+
+            status, response = self.post_json_raw(
+                f"{api_base}/api/discover",
+                {
+                    "root": "a" * 2048,
+                },
+            )
+
+            self.assertEqual(status, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["code"], "payload_too_large")
+
+    def test_download_control_routes_require_non_empty_string_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self.make_manager(tmpdir)
+            app_server = self.start_app_server(manager)
+            api_base = f"http://127.0.0.1:{app_server.server_port}"
+
+            for path in (
+                "/api/downloads/cancel",
+                "/api/downloads/retry",
+                "/api/downloads/resume",
+                "/api/downloads/remove-queued",
+                "/api/downloads/prioritize-queued",
+                "/api/downloads/deprioritize-queued",
+            ):
+                status, response = self.post_json_raw(f"{api_base}{path}", {})
+                self.assertEqual(status, HTTPStatus.BAD_REQUEST, path)
+                self.assertFalse(response["ok"], path)
+                self.assertEqual(response["code"], "missing_required_field", path)
+
+                status, response = self.post_json_raw(f"{api_base}{path}", {"id": 123})
+                self.assertEqual(status, HTTPStatus.BAD_REQUEST, path)
+                self.assertFalse(response["ok"], path)
+                self.assertEqual(response["code"], "invalid_field_type", path)
+
+                status, response = self.post_json_raw(f"{api_base}{path}", {"id": "   "})
+                self.assertEqual(status, HTTPStatus.BAD_REQUEST, path)
+                self.assertFalse(response["ok"], path)
+                self.assertEqual(response["code"], "invalid_field_type", path)
+
+    def test_download_api_state_transitions_return_structured_invalid_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self.make_manager(tmpdir)
+            app_server = self.start_app_server(manager)
+            api_base = f"http://127.0.0.1:{app_server.server_port}"
+
+            status, response = self.post_json_raw(f"{api_base}/api/downloads/cancel", {"id": "missing"})
+            self.assertEqual(status, HTTPStatus.BAD_REQUEST)
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["code"], "invalid_request")
+
+            status, response = self.post_json_raw(f"{api_base}/api/downloads/retry", {"id": "missing"})
+            self.assertEqual(status, HTTPStatus.BAD_REQUEST)
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["code"], "invalid_request")
+
+            status, response = self.post_json_raw(f"{api_base}/api/downloads/resume", {"id": "missing"})
+            self.assertEqual(status, HTTPStatus.BAD_REQUEST)
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["code"], "invalid_request")
+
+            partial_path = Path(tmpdir) / "downloads" / "has.part"
+            partial_path.parent.mkdir(parents=True, exist_ok=True)
+            partial_path.write_bytes(b"partial")
+            manager.write_json_store(
+                manager.download_jobs_file,
+                {
+                    "schema_version": 1,
+                    "updated_at": "2026-04-21T00:00:00+00:00",
+                    "items": [
+                        {
+                            "id": "queued-one",
+                            "status": "queued",
+                            "repo_id": "author/model",
+                            "artifact_name": "queued.gguf",
+                        },
+                        {
+                            "id": "done-no-partial",
+                            "status": "failed",
+                            "repo_id": "author/model",
+                            "artifact_name": "failed.gguf",
+                            "partial_path": str(Path(tmpdir) / "downloads" / "missing.part"),
+                        },
+                        {
+                            "id": "done-with-partial",
+                            "status": "failed",
+                            "repo_id": "author/model",
+                            "artifact_name": "failed.gguf",
+                            "partial_path": str(partial_path),
+                            "destination_root": str(Path(tmpdir) / "downloads"),
+                        },
+                    ],
+                },
+            )
+
+            status, response = self.post_json_raw(f"{api_base}/api/downloads/remove-queued", {"id": "done-no-partial"})
+            self.assertEqual(status, HTTPStatus.BAD_REQUEST)
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["code"], "invalid_request")
+
+            status, response = self.post_json_raw(f"{api_base}/api/downloads/resume", {"id": "done-no-partial"})
+            self.assertEqual(status, HTTPStatus.BAD_REQUEST)
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["code"], "invalid_request")
+
+            status, response = self.post_json_raw(f"{api_base}/api/downloads/resume", {"id": "queued-one"})
+            self.assertEqual(status, HTTPStatus.OK)
+            self.assertTrue(response["ok"])
+            self.assertIn("job", response)
 
     def test_remote_search_and_download_lifecycle_post_routes_are_wired(self) -> None:
         class RouteTableManager:
@@ -170,7 +374,7 @@ class Phase0ContractTests(unittest.TestCase):
         api_base = f"http://127.0.0.1:{app_server.server_port}"
         cases = [
             ("/api/remote/search", {"query": "qwen"}, "search_remote_models", "remote_models"),
-            ("/api/downloads/start", {"repo_id": "author/model"}, "start_remote_download", "job"),
+            ("/api/downloads/start", {"repo_id": "author/model", "artifact_name": "model.gguf"}, "start_remote_download", "job"),
             ("/api/downloads/cancel", {"id": "job-cancel"}, "cancel_download_job", "job"),
             ("/api/downloads/retry", {"id": "job-retry"}, "retry_download_job", "job"),
             ("/api/downloads/resume", {"id": "job-resume"}, "resume_download_job", "job"),
@@ -313,6 +517,55 @@ class Phase0ContractTests(unittest.TestCase):
             self.assertTrue((state_dir / "validation-results.json").is_file())
             self.assertTrue((state_dir / "host-capability.json").is_file())
             self.assertTrue((config_dir / "runtime-profiles.json").is_file())
+
+    def test_state_includes_glyphos_telemetry_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self.make_manager(tmpdir)
+            outputs = {
+                "current": "\n".join(
+                    [
+                        "alias: stopped",
+                        "model:",
+                        "configured_mode: single-client",
+                        "configured_parallel: 1",
+                        "active_mode: stopped",
+                        "active_parallel: stopped",
+                    ]
+                ),
+                "doctor": "\n".join(
+                    [
+                        "host_os: linux",
+                        "host_arch: x86_64",
+                        "host_backends: cpu",
+                        "binary_ok: yes",
+                        "binary: /tmp/llama-server",
+                        "binary_source: bundled",
+                        "binary_backend: cpu",
+                        "binary_status: compatible",
+                        "binary_label: CPU",
+                        "binary_message: validated bundled CPU binary",
+                    ]
+                ),
+                "mode": "\n".join(
+                    [
+                        "configured_mode: single-client",
+                        "configured_parallel: 1",
+                        "active_mode: stopped",
+                        "active_parallel: stopped",
+                    ]
+                ),
+            }
+            manager.run_cli = lambda command, *args: outputs[command]  # type: ignore[method-assign]
+
+            state = manager.state()
+
+            self.assertIn("glyphos_telemetry", state)
+            telemetry = state["glyphos_telemetry"]
+            self.assertIn("available", telemetry)
+            self.assertIn("routing", telemetry)
+            routing = telemetry["routing"]
+            for key in ("attempts_by_target", "fallback_reason_counts", "total_attempts", "recent_attempts"):
+                self.assertIn(key, routing)
 
     def test_state_falls_back_when_remote_items_shape_is_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
