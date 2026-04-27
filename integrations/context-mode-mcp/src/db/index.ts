@@ -159,7 +159,6 @@ export function purgeProject(db: SqlBackend, projectHash: string) {
   db.execute(`DELETE FROM events WHERE project_hash = :project_hash`, {
     project_hash: projectHash,
   });
-  db.execute(`DELETE FROM runs WHERE tool LIKE 'ctx_%'`);
 
   return deleted;
 }

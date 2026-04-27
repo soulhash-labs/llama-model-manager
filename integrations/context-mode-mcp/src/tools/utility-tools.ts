@@ -7,6 +7,7 @@ import type { SqlBackend } from "../db/adapter";
 import { beginRunMeta, finalizeRun, toolError, type ToolErrorLike } from "./shared";
 import { getChunkRows, indexDocument, getDbCapabilities, purgeProject, safeDeleteDbFile } from "../db/index";
 import { searchChunks } from "../db/search";
+import { initSchema } from "../db/schema";
 import { fetchAndCache } from "../utils/fetcher";
 import { clampBytes, toISO } from "../utils/timing";
 import { loadSecurityPolicy, ContextPaths, isCommandAllowed } from "../utils/types";
@@ -539,9 +540,10 @@ export async function handleUpgradeTool(params: {
   request: CtxUpgradeRequest;
   requestId?: string;
 }) {
-  const run = beginRunMeta(params.context, "ctx_upgrade");
   const started = Date.now();
+  const run = beginRunMeta(params.context, "ctx_upgrade");
   const actions: string[] = [];
+  const durationMs = () => Date.now() - started;
 
   if (!params.request.confirm) {
     return {
@@ -561,22 +563,70 @@ export async function handleUpgradeTool(params: {
     actions.push("rebuild schema");
     try {
       // re-open and initialize to migrate schema
-      // no destructive migration in this lane
+      initSchema(params.db);
     } catch {
-      // ignored
+      finalizeRun(params.db, run, {
+        raw_bytes: 0,
+        returned_bytes: 0,
+        indexed_bytes: 0,
+        duration_ms: durationMs(),
+        ok: false,
+        meta: { actions },
+      });
+      return {
+        ok: false,
+        tool: "ctx_upgrade" as const,
+        request_id: params.requestId,
+        actions,
+        meta: {
+          project_hash: params.context.project_hash,
+          duration_ms: durationMs(),
+        },
+        error: toolError("DB_UNAVAILABLE", "schema rebuild failed"),
+      };
     }
   }
 
   if (params.request.reconfigure) {
     actions.push("reconfigure cache directories");
-    mkdirSync(params.context.cache_dir, { recursive: true });
+    try {
+      const hadCache = existsSync(params.context.cache_dir);
+      mkdirSync(params.context.cache_dir, { recursive: true });
+      if (!hadCache && existsSync(params.context.cache_dir)) {
+        actions.push("created cache directories");
+      }
+    } catch {
+      finalizeRun(params.db, run, {
+        raw_bytes: 0,
+        returned_bytes: 0,
+        indexed_bytes: 0,
+        duration_ms: durationMs(),
+        ok: false,
+        meta: { actions },
+      });
+      return {
+        ok: false,
+        tool: "ctx_upgrade" as const,
+        request_id: params.requestId,
+        actions,
+        meta: {
+          project_hash: params.context.project_hash,
+          duration_ms: durationMs(),
+        },
+        error: toolError("INTERNAL", "cache reconfiguration failed"),
+      };
+    }
+  }
+
+  if (actions.length === 0) {
+    actions.push("noop");
   }
 
   finalizeRun(params.db, run, {
     raw_bytes: 0,
     returned_bytes: 0,
     indexed_bytes: 0,
-    duration_ms: Date.now() - started,
+    duration_ms: durationMs(),
     ok: true,
     meta: { actions },
   });
@@ -588,7 +638,7 @@ export async function handleUpgradeTool(params: {
     actions,
     meta: {
       project_hash: params.context.project_hash,
-      duration_ms: Date.now() - started,
+      duration_ms: durationMs(),
     },
   };
 }
@@ -599,6 +649,8 @@ export async function handlePurgeTool(params: {
   request: CtxPurgeRequest;
   requestId?: string;
 }) {
+  const started = Date.now();
+
   if (!params.request.confirm) {
     return {
       ok: false,
@@ -616,7 +668,26 @@ export async function handlePurgeTool(params: {
   }
 
   const run = beginRunMeta(params.context, "ctx_purge");
-  const counts = purgeProject(params.db, params.context.project_hash);
+  let counts: { deleted_docs: number; deleted_chunks: number; deleted_events: number };
+  try {
+    counts = purgeProject(params.db, params.context.project_hash);
+  } catch (error) {
+    return {
+      ok: false,
+      tool: "ctx_purge" as const,
+      request_id: params.requestId,
+      meta: {
+        project_hash: params.context.project_hash,
+        deleted_docs: 0,
+        deleted_chunks: 0,
+        deleted_events: 0,
+        cache_bytes_freed: 0,
+      },
+      error: toolError("DB_UNAVAILABLE", "purge query failed", {
+        message: error instanceof Error ? error.message : String(error),
+      }),
+    };
+  }
 
   let cacheBytes = 0;
   if (existsSync(params.context.cache_dir)) {
@@ -629,16 +700,11 @@ export async function handlePurgeTool(params: {
     }
   }
 
-  if (params.request.delete_db) {
-    params.db.close();
-    safeDeleteDbFile(params.context.db_path);
-  }
-
   finalizeRun(params.db, run, {
     raw_bytes: 0,
     returned_bytes: 0,
     indexed_bytes: 0,
-    duration_ms: 0,
+    duration_ms: Date.now() - started,
     ok: true,
     meta: {
       deleted_docs: counts.deleted_docs,
@@ -646,6 +712,15 @@ export async function handlePurgeTool(params: {
       deleted_events: counts.deleted_events,
     },
   });
+
+  if (params.request.delete_db) {
+    try {
+      params.db.close();
+      safeDeleteDbFile(params.context.db_path);
+    } catch {
+      // noop
+    }
+  }
 
   return {
     ok: true,

@@ -78,3 +78,20 @@ All tools are defined in Zod-first schemas in `src/schemas/context-tools.ts`:
 - If hooks fail, they are treated as non-fatal and DB writes are guarded.
 - If DB/FTS unavailable, tool behavior falls back to plain table scan or inline output and doctors report degraded flags.
 - No API keys or secrets are stored by this integration.
+
+## Lifecycle matrix (manual)
+- Validate `ctx_upgrade` and `ctx_purge` directly:
+  - `ctx_upgrade`:
+    - `confirm=false` returns `DENIED` and performs no write.
+    - `confirm=true, rebuild=true` re-runs schema initialization.
+    - `reconfigure=true` rebuilds cache directory layout.
+  - `ctx_purge`:
+    - `confirm=false` returns `DENIED`.
+    - `confirm=true` clears project docs/chunks/events rows and optional cache/db path cleanup.
+  - Both tools include run telemetry in `runs` only when DB writes are still available.
+
+## Dependency hygiene
+- Non-blocking advisories observed during smoke verification (environment/localized):
+  - `npm ci` may emit a high-severity advisory for transitive packages.
+  - Engine warning from `@vitejs/plugin-react` can appear on older Node patch lines.
+- These are flagged as hygiene items; they are not treated as functional regressions for context-mode-mcp behavior.
