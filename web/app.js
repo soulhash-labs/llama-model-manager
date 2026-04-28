@@ -149,7 +149,9 @@ async function api(path, options = {}) {
 
   const payload = await response.json().catch(() => ({ ok: false, error: "Invalid JSON response" }));
   if (!response.ok) {
-    throw new Error(payload.error || "Request failed");
+    const error = new Error(payload.error || "Request failed");
+    error.code = payload.code || "";
+    throw error;
   }
   return payload;
 }
@@ -1308,6 +1310,60 @@ async function performIntegrationSync(path, button, pendingLabel, successMessage
   });
 }
 
+function collectDefaultsPayload() {
+  return {
+    LLAMA_SERVER_HOST: $("#default-host").value.trim(),
+    LLAMA_SERVER_PORT: $("#default-port").value.trim(),
+    LLAMA_SERVER_DEVICE: $("#default-device").value.trim(),
+    LLAMA_SERVER_CONTEXT: $("#default-context").value.trim(),
+    LLAMA_SERVER_NGL: $("#default-ngl").value.trim(),
+    LLAMA_SERVER_BATCH: $("#default-batch").value.trim(),
+    LLAMA_SERVER_THREADS: $("#default-threads").value.trim(),
+    LLAMA_SERVER_PARALLEL: $("#default-parallel").value.trim(),
+    GGML_CUDA_ENABLE_UNIFIED_MEMORY: $("#default-cuda-unified-memory").checked ? "1" : "",
+    LLAMA_SERVER_LOG: $("#default-log").value.trim(),
+    LLAMA_SERVER_EXTRA_ARGS: $("#default-extra").value.trim(),
+    LLAMA_MODEL_SYNC_OPENCODE: $("#default-sync-opencode").value.trim(),
+    LLAMA_MODEL_SYNC_CLAUDE: $("#default-sync-claude").value.trim(),
+    LLAMA_MODEL_SYNC_OPENCLAW: $("#default-sync-openclaw").value.trim(),
+    LLAMA_MODEL_SYNC_GLYPHOS: $("#default-sync-glyphos").value.trim(),
+    LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE: $("#default-context-glyphos-pipeline").checked ? "1" : "",
+    OPENCLAW_PROFILE: $("#default-openclaw-profile").value.trim(),
+    OPENCLAW_API_KEY: $("#default-openclaw-api-key").value.trim(),
+    CLAUDE_GATEWAY_HOST: $("#default-claude-gateway-host").value.trim(),
+    CLAUDE_GATEWAY_PORT: $("#default-claude-gateway-port").value.trim(),
+    CLAUDE_GATEWAY_LOG: $("#default-claude-gateway-log").value.trim(),
+    CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS: $("#default-claude-gateway-timeout").value.trim(),
+    CLAUDE_BASE_URL: $("#default-claude-base-url").value.trim(),
+    CLAUDE_MODEL_ID: $("#default-claude-model-id").value.trim(),
+    CLAUDE_AUTH_TOKEN: $("#default-claude-auth-token").value.trim(),
+    CLAUDE_API_KEY: $("#default-claude-api-key").value.trim(),
+  };
+}
+
+async function activateContextGlyphos(button) {
+  await withButtonBusy(button, "Activating...", async () => {
+    try {
+      await api("/api/context-glyphos/activate", { method: "POST", body: "{}" });
+    } catch (error) {
+      const isUnknownActivationRoute = error.code === "unknown_route" || String(error.message || "").toLowerCase().includes("unknown api route");
+      if (!isUnknownActivationRoute) {
+        throw error;
+      }
+      $("#default-context-glyphos-pipeline").checked = true;
+      $("#default-sync-glyphos").value = "1";
+      await api("/api/defaults/save", {
+        method: "POST",
+        body: JSON.stringify(collectDefaultsPayload()),
+      });
+      await api("/api/glyphos/sync", { method: "POST", body: "{}" });
+    }
+    await refreshState();
+  }, {
+    successMessage: "Context + GlyphOS activated.",
+  });
+}
+
 async function performClaudeGatewayAction(action, button, options = {}) {
   await withButtonBusy(button, options.pendingLabel || "Working...", async () => {
     await api("/api/claude-gateway", {
@@ -1337,34 +1393,7 @@ async function loadClaudeGatewayLogs(button) {
 async function saveDefaults(event) {
   event.preventDefault();
   const submitButton = event.submitter || $("#defaults-form button[type='submit']");
-  const payload = {
-    LLAMA_SERVER_HOST: $("#default-host").value.trim(),
-    LLAMA_SERVER_PORT: $("#default-port").value.trim(),
-    LLAMA_SERVER_DEVICE: $("#default-device").value.trim(),
-    LLAMA_SERVER_CONTEXT: $("#default-context").value.trim(),
-    LLAMA_SERVER_NGL: $("#default-ngl").value.trim(),
-    LLAMA_SERVER_BATCH: $("#default-batch").value.trim(),
-    LLAMA_SERVER_THREADS: $("#default-threads").value.trim(),
-    LLAMA_SERVER_PARALLEL: $("#default-parallel").value.trim(),
-    GGML_CUDA_ENABLE_UNIFIED_MEMORY: $("#default-cuda-unified-memory").checked ? "1" : "",
-    LLAMA_SERVER_LOG: $("#default-log").value.trim(),
-    LLAMA_SERVER_EXTRA_ARGS: $("#default-extra").value.trim(),
-    LLAMA_MODEL_SYNC_OPENCODE: $("#default-sync-opencode").value.trim(),
-    LLAMA_MODEL_SYNC_CLAUDE: $("#default-sync-claude").value.trim(),
-    LLAMA_MODEL_SYNC_OPENCLAW: $("#default-sync-openclaw").value.trim(),
-    LLAMA_MODEL_SYNC_GLYPHOS: $("#default-sync-glyphos").value.trim(),
-    LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE: $("#default-context-glyphos-pipeline").checked ? "1" : "",
-    OPENCLAW_PROFILE: $("#default-openclaw-profile").value.trim(),
-    OPENCLAW_API_KEY: $("#default-openclaw-api-key").value.trim(),
-    CLAUDE_GATEWAY_HOST: $("#default-claude-gateway-host").value.trim(),
-    CLAUDE_GATEWAY_PORT: $("#default-claude-gateway-port").value.trim(),
-    CLAUDE_GATEWAY_LOG: $("#default-claude-gateway-log").value.trim(),
-    CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS: $("#default-claude-gateway-timeout").value.trim(),
-    CLAUDE_BASE_URL: $("#default-claude-base-url").value.trim(),
-    CLAUDE_MODEL_ID: $("#default-claude-model-id").value.trim(),
-    CLAUDE_AUTH_TOKEN: $("#default-claude-auth-token").value.trim(),
-    CLAUDE_API_KEY: $("#default-claude-api-key").value.trim(),
-  };
+  const payload = collectDefaultsPayload();
 
   await withButtonBusy(submitButton, "Saving...", async () => {
     await api("/api/defaults/save", {
@@ -1813,7 +1842,7 @@ function bindEvents() {
   $("#sync-openclaw").addEventListener("click", (event) => performIntegrationSync("/api/openclaw/sync", event.currentTarget, "Syncing...", "OpenClaw synced.").catch(showError));
   $("#sync-claude").addEventListener("click", (event) => performIntegrationSync("/api/claude/sync", event.currentTarget, "Syncing...", "Claude Code settings synced.").catch(showError));
   $("#sync-glyphos").addEventListener("click", (event) => performIntegrationSync("/api/glyphos/sync", event.currentTarget, "Syncing...", "GlyphOS config synced.").catch(showError));
-  $("#sync-glyphos-combined").addEventListener("click", (event) => performIntegrationSync("/api/context-glyphos/activate", event.currentTarget, "Activating...", "Context + GlyphOS activated.").catch(showError));
+  $("#sync-glyphos-combined").addEventListener("click", (event) => activateContextGlyphos(event.currentTarget).catch(showError));
   $("#claude-gateway-start").addEventListener("click", (event) => performClaudeGatewayAction("start", event.currentTarget, { pendingLabel: "Starting...", successMessage: "Claude gateway started." }).catch(showError));
   $("#claude-gateway-restart").addEventListener("click", (event) => performClaudeGatewayAction("restart", event.currentTarget, { pendingLabel: "Restarting...", successMessage: "Claude gateway restarted." }).catch(showError));
   $("#claude-gateway-stop").addEventListener("click", (event) => performClaudeGatewayAction("stop", event.currentTarget, { pendingLabel: "Stopping...", successMessage: "Claude gateway stopped." }).catch(showError));
