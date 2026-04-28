@@ -1813,7 +1813,7 @@ function bindEvents() {
   $("#sync-openclaw").addEventListener("click", (event) => performIntegrationSync("/api/openclaw/sync", event.currentTarget, "Syncing...", "OpenClaw synced.").catch(showError));
   $("#sync-claude").addEventListener("click", (event) => performIntegrationSync("/api/claude/sync", event.currentTarget, "Syncing...", "Claude Code settings synced.").catch(showError));
   $("#sync-glyphos").addEventListener("click", (event) => performIntegrationSync("/api/glyphos/sync", event.currentTarget, "Syncing...", "GlyphOS config synced.").catch(showError));
-  $("#sync-glyphos-combined").addEventListener("click", (event) => performIntegrationSync("/api/glyphos/sync", event.currentTarget, "Syncing...", "GlyphOS synced for Context + GlyphOS readiness.").catch(showError));
+  $("#sync-glyphos-combined").addEventListener("click", (event) => performIntegrationSync("/api/context-glyphos/activate", event.currentTarget, "Activating...", "Context + GlyphOS activated.").catch(showError));
   $("#claude-gateway-start").addEventListener("click", (event) => performClaudeGatewayAction("start", event.currentTarget, { pendingLabel: "Starting...", successMessage: "Claude gateway started." }).catch(showError));
   $("#claude-gateway-restart").addEventListener("click", (event) => performClaudeGatewayAction("restart", event.currentTarget, { pendingLabel: "Restarting...", successMessage: "Claude gateway restarted." }).catch(showError));
   $("#claude-gateway-stop").addEventListener("click", (event) => performClaudeGatewayAction("stop", event.currentTarget, { pendingLabel: "Stopping...", successMessage: "Claude gateway stopped." }).catch(showError));

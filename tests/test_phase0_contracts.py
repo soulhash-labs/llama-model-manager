@@ -1677,6 +1677,30 @@ class Phase0ContractTests(unittest.TestCase):
             self.assertEqual(pipeline["status"], "ready")
             self.assertEqual(pipeline["blockers"], [])
 
+    def test_context_glyphos_activation_persists_toggle_and_syncs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self.make_manager(tmpdir)
+
+            def fake_run_cli(command: str, *args: str) -> str:
+                if command == "sync-glyphos":
+                    manager.glyphos_config_file.parent.mkdir(parents=True, exist_ok=True)
+                    manager.glyphos_config_file.write_text("runtime:\n  provider: llamacpp\n", encoding="utf-8")
+                    return "status: synced\n"
+                if command == "current":
+                    return "alias: qwen\nmodel: /models/qwen.gguf\n"
+                raise AssertionError(f"unexpected command: {command}")
+
+            manager.run_cli = fake_run_cli  # type: ignore[method-assign]
+
+            result = manager.activate_context_glyphos_pipeline()
+            defaults = manager.defaults()
+
+            self.assertTrue(result["activated"])
+            self.assertEqual(defaults["LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE"], "1")
+            self.assertEqual(defaults["LLAMA_MODEL_SYNC_GLYPHOS"], "1")
+            self.assertEqual(result["sync_result"]["status"], "synced")
+            self.assertTrue(result["context_glyphos_pipeline"]["ready"])
+
     def test_json_store_write_is_atomic(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = self.make_manager(tmpdir)

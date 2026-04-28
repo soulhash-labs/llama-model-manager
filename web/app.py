@@ -174,6 +174,9 @@ API_POST_PAYLOAD_SCHEMAS: dict[str, dict[str, Any]] = {
     "/api/glyphos/sync": {
         "allowed": set(),
     },
+    "/api/context-glyphos/activate": {
+        "allowed": set(),
+    },
     "/api/claude-gateway": {
         "allowed": {"action"},
     },
@@ -2643,6 +2646,38 @@ class Manager:
     def sync_glyphos(self) -> dict[str, str]:
         return self.parse_key_values(self.run_cli("sync-glyphos"))
 
+    def activate_context_glyphos_pipeline(self) -> dict[str, Any]:
+        defaults = self.defaults()
+        defaults["LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE"] = "1"
+        defaults["LLAMA_MODEL_SYNC_GLYPHOS"] = "1"
+        self.save_defaults(defaults)
+
+        sync_result: dict[str, str] = {}
+        sync_error = ""
+        try:
+            sync_result = self.sync_glyphos()
+        except Exception as exc:
+            sync_error = str(exc)
+
+        try:
+            current = self.parse_key_values(self.run_cli("current"))
+        except Exception:
+            current = {}
+
+        context_mode_mcp = self.context_mode_mcp_state()
+        pipeline = self.context_glyphos_pipeline_state(
+            defaults=self.defaults(),
+            current=current,
+            context_mode_mcp=context_mode_mcp,
+        )
+        return {
+            "activated": True,
+            "sync_result": sync_result,
+            "sync_error": sync_error,
+            "context_mode_mcp": context_mode_mcp,
+            "context_glyphos_pipeline": pipeline,
+        }
+
     def dashboard_service_status(self) -> dict[str, str]:
         if self.demo:
             return {
@@ -3045,6 +3080,8 @@ class AppHandler(BaseHTTPRequestHandler):
         if route == "/api/glyphos/sync":
             result = self.manager.sync_glyphos()
             return {"ok": True, "result": result}
+        if route == "/api/context-glyphos/activate":
+            return {"ok": True, **self.manager.activate_context_glyphos_pipeline()}
         if route == "/api/claude-gateway":
             action = str(payload.get("action", "status")).strip()
             result = self.parse_key_values(self.manager.run_cli("claude-gateway", action))

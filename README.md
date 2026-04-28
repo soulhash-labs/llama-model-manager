@@ -326,6 +326,8 @@ The dashboard has a simple `Context + GlyphOS` preference in global defaults. Th
 
 This toggle is intentionally operator-facing. It does not create a new network service or claim extra sandboxing; it makes the bundled combined workflow clear when Context Mode MCP retrieval and GlyphOS routing are used together.
 
+The Integrations panel also includes an `Activate Feature` button for this card. That one click persists `LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE=1`, enables GlyphOS auto-sync, runs `llama-model sync-glyphos`, and refreshes the readiness card.
+
 ## Maintainer Verification
 
 Before pushing a release branch, run the focused checks that cover the web dashboard, GlyphOS routing, and Context Mode MCP surfaces:
