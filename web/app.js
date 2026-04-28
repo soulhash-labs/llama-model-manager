@@ -560,11 +560,13 @@ function deriveContextGlyphosPipeline(data) {
   const enabled = isTruthySetting(defaults.LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE) || contextGlyphosLocallyActivated();
   const hasActiveModel = Boolean((data.current || {}).model || data.glyphos_model);
   const glyphosReady = Boolean(data.glyphos_config_exists);
+  const glyphosIntegrationReady = Boolean((data.glyphos_telemetry || {}).available);
   const blockers = [];
   if (!enabled) blockers.push("activate feature");
   if (!hasActiveModel) blockers.push("no active model");
   if (!glyphosReady) blockers.push("GlyphOS config missing");
-  const ready = enabled && hasActiveModel && glyphosReady;
+  if (!glyphosIntegrationReady) blockers.push("GlyphOS integration unavailable");
+  const ready = enabled && hasActiveModel && glyphosReady && glyphosIntegrationReady;
 
   return {
     enabled,

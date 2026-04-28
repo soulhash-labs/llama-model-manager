@@ -2516,6 +2516,7 @@ class Manager:
             defaults=defaults,
             current=current,
             context_mode_mcp=context_mode_mcp,
+            glyphos_telemetry=glyphos_telemetry,
         )
         return {
             "opencode_model": f"llamacpp/{current_model_name}" if current_model_name else "",
@@ -2566,12 +2567,14 @@ class Manager:
         defaults: dict[str, str],
         current: dict[str, str],
         context_mode_mcp: dict[str, Any],
+        glyphos_telemetry: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         enabled = str(defaults.get("LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE", "")).strip().lower() in {"1", "true", "yes", "on"}
         has_active_model = bool(str(current.get("model", "")).strip())
         glyphos_ready = self.glyphos_config_file.exists()
+        glyphos_integration_ready = bool((glyphos_telemetry or {}).get("available"))
         context_ready = bool(context_mode_mcp.get("available"))
-        ready = enabled and glyphos_ready and context_ready and has_active_model
+        ready = enabled and glyphos_ready and glyphos_integration_ready and context_ready and has_active_model
         blockers: list[str] = []
         if not enabled:
             blockers.append("activate feature")
@@ -2579,6 +2582,8 @@ class Manager:
             blockers.append("no active model")
         if not glyphos_ready:
             blockers.append("GlyphOS config missing")
+        if not glyphos_integration_ready:
+            blockers.append("GlyphOS integration unavailable")
         if not context_ready:
             blockers.append("Context Mode MCP package missing")
         return {
@@ -2669,6 +2674,7 @@ class Manager:
             defaults=self.defaults(),
             current=current,
             context_mode_mcp=context_mode_mcp,
+            glyphos_telemetry=self.glyphos_telemetry_snapshot(limit=1),
         )
         return {
             "activated": True,

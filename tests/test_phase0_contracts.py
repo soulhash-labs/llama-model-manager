@@ -1670,12 +1670,41 @@ class Phase0ContractTests(unittest.TestCase):
                 defaults=defaults,
                 current={"alias": "qwen", "model": "/models/qwen.gguf"},
                 context_mode_mcp=context_mode_mcp,
+                glyphos_telemetry={"available": True, "routing": {}},
             )
 
             self.assertTrue(pipeline["enabled"])
             self.assertTrue(pipeline["ready"])
             self.assertEqual(pipeline["status"], "ready")
             self.assertEqual(pipeline["blockers"], [])
+
+    def test_context_glyphos_pipeline_requires_glyphos_integration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self.make_manager(tmpdir)
+            manager.defaults_file.write_text(
+                "\n".join(
+                    [
+                        "LLAMA_SERVER_HOST=127.0.0.1",
+                        "LLAMA_SERVER_PORT=8081",
+                        "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE=1",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            manager.glyphos_config_file.parent.mkdir(parents=True, exist_ok=True)
+            manager.glyphos_config_file.write_text("runtime:\n  provider: llamacpp\n", encoding="utf-8")
+
+            pipeline = manager.context_glyphos_pipeline_state(
+                defaults=manager.defaults(),
+                current={"alias": "qwen", "model": "/models/qwen.gguf"},
+                context_mode_mcp=manager.context_mode_mcp_state(),
+                glyphos_telemetry={"available": False, "routing": {}},
+            )
+
+            self.assertFalse(pipeline["ready"])
+            self.assertEqual(pipeline["status"], "activation_pending")
+            self.assertIn("GlyphOS integration unavailable", pipeline["blockers"])
 
     def test_context_glyphos_activation_persists_toggle_and_syncs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
