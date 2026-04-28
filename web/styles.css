@@ -598,6 +598,12 @@ h2 {
   color: var(--accent-strong);
 }
 
+.chip-success {
+  border-color: rgba(24, 143, 104, 0.18);
+  background: rgba(24, 143, 104, 0.1);
+  color: #187955;
+}
+
 .telemetry-list {
   margin-top: 0.55rem;
   display: grid;
@@ -1010,6 +1016,34 @@ input:focus {
   background: rgba(197, 72, 26, 0.12);
   border: 1px solid rgba(197, 72, 26, 0.18);
   color: #c5481a;
+}
+
+.integration-badge-ready {
+  background: rgba(24, 143, 104, 0.12);
+  border: 1px solid rgba(24, 143, 104, 0.2);
+  color: #187955;
+}
+
+.integration-badge-warn {
+  background: rgba(197, 72, 26, 0.12);
+  border: 1px solid rgba(197, 72, 26, 0.18);
+  color: #c5481a;
+}
+
+.integration-badge-muted {
+  background: rgba(90, 101, 120, 0.1);
+  border: 1px solid rgba(90, 101, 120, 0.14);
+  color: var(--muted-strong);
+}
+
+.pipeline-card.is-ready {
+  border-color: rgba(24, 143, 104, 0.2);
+  background: linear-gradient(145deg, rgba(24, 143, 104, 0.08), rgba(255, 255, 255, 0.92));
+}
+
+.pipeline-card.is-warn {
+  border-color: rgba(197, 72, 26, 0.2);
+  background: linear-gradient(145deg, rgba(197, 72, 26, 0.07), rgba(255, 255, 255, 0.92));
 }
 
 .log-box {

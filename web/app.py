@@ -50,6 +50,7 @@ KNOWN_DEFAULT_KEYS = [
     "LLAMA_MODEL_SYNC_CLAUDE",
     "LLAMA_MODEL_SYNC_OPENCLAW",
     "LLAMA_MODEL_SYNC_GLYPHOS",
+    "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE",
     "OPENCLAW_PROFILE",
     "OPENCLAW_API_KEY",
     "CLAUDE_GATEWAY_HOST",
@@ -258,6 +259,7 @@ DEMO_STATE = {
         "LLAMA_MODEL_SYNC_CLAUDE": "0",
         "LLAMA_MODEL_SYNC_OPENCLAW": "0",
         "LLAMA_MODEL_SYNC_GLYPHOS": "0",
+        "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
     },
     "current": {
         "pid": "28142",
@@ -459,6 +461,7 @@ class Manager:
         self.opencode_model_state_file = Path(os.environ.get("OPENCODE_MODEL_STATE_FILE", self.xdg_state_home / "opencode" / "model.json"))
         self.claude_settings_file = Path(os.environ.get("CLAUDE_SETTINGS_FILE", self.home / ".claude" / "settings.json"))
         self.glyphos_config_file = Path(os.environ.get("GLYPHOS_CONFIG_FILE", self.home / ".glyphos" / "config.yaml"))
+        self.context_mode_mcp_root = Path(os.environ.get("CONTEXT_MODE_MCP_ROOT", self.app_root.parent / "integrations" / "context-mode-mcp"))
         self.remote_models_file = self.xdg_state_home / "llama-server" / "remote-models.json"
         self.download_jobs_file = self.xdg_state_home / "llama-server" / "download-jobs.json"
         self.download_policy_file = self.xdg_state_home / "llama-server" / "download-policy.json"
@@ -842,6 +845,7 @@ class Manager:
             "LLAMA_MODEL_SYNC_CLAUDE": values.get("LLAMA_MODEL_SYNC_CLAUDE", "0"),
             "LLAMA_MODEL_SYNC_OPENCLAW": values.get("LLAMA_MODEL_SYNC_OPENCLAW", "0"),
             "LLAMA_MODEL_SYNC_GLYPHOS": values.get("LLAMA_MODEL_SYNC_GLYPHOS", "0"),
+            "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": values.get("LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE", ""),
             "OPENCLAW_PROFILE": values.get("OPENCLAW_PROFILE", ""),
             "OPENCLAW_API_KEY": values.get("OPENCLAW_API_KEY", "llama-local"),
             "CLAUDE_GATEWAY_HOST": values.get("CLAUDE_GATEWAY_HOST", "127.0.0.1"),
@@ -2504,6 +2508,12 @@ class Manager:
         claude_model_id = defaults.get("CLAUDE_MODEL_ID", "").strip() or current_alias
         claude_base_url = defaults.get("CLAUDE_BASE_URL", "").strip() or f"http://{defaults.get('CLAUDE_GATEWAY_HOST', '127.0.0.1')}:{defaults.get('CLAUDE_GATEWAY_PORT', '4000')}"
         glyphos_telemetry = self.glyphos_telemetry_snapshot(limit=12)
+        context_mode_mcp = self.context_mode_mcp_state()
+        context_glyphos_pipeline = self.context_glyphos_pipeline_state(
+            defaults=defaults,
+            current=current,
+            context_mode_mcp=context_mode_mcp,
+        )
         return {
             "opencode_model": f"llamacpp/{current_model_name}" if current_model_name else "",
             "opencode_config_file": str(self.opencode_config_file),
@@ -2529,6 +2539,52 @@ class Manager:
             "glyphos_model": current_model_name,
             "glyphos_routing_preference": "llamacpp",
             "glyphos_telemetry": glyphos_telemetry,
+            "context_mode_mcp": context_mode_mcp,
+            "context_glyphos_pipeline": context_glyphos_pipeline,
+        }
+
+    def context_mode_mcp_state(self) -> dict[str, Any]:
+        package_json = self.context_mode_mcp_root / "package.json"
+        package = self.load_json_file(package_json)
+        scripts = package.get("scripts", {}) if isinstance(package.get("scripts"), dict) else {}
+        return {
+            "available": package_json.is_file() and (self.context_mode_mcp_root / "src" / "index.ts").is_file(),
+            "root": str(self.context_mode_mcp_root),
+            "package_json": str(package_json),
+            "dashboard_source_exists": (self.context_mode_mcp_root / "dashboard" / "src" / "App.tsx").is_file(),
+            "dashboard_build_exists": (self.context_mode_mcp_root / "dist" / "index.html").is_file(),
+            "lifecycle_matrix_exists": (self.context_mode_mcp_root / "scripts" / "lifecycle-matrix.mjs").is_file(),
+            "typecheck_script_exists": "typecheck" in scripts,
+        }
+
+    def context_glyphos_pipeline_state(
+        self,
+        *,
+        defaults: dict[str, str],
+        current: dict[str, str],
+        context_mode_mcp: dict[str, Any],
+    ) -> dict[str, Any]:
+        enabled = str(defaults.get("LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE", "")).strip().lower() in {"1", "true", "yes", "on"}
+        has_active_model = bool(str(current.get("model", "")).strip())
+        glyphos_ready = self.glyphos_config_file.exists()
+        context_ready = bool(context_mode_mcp.get("available"))
+        ready = enabled and glyphos_ready and context_ready and has_active_model
+        blockers: list[str] = []
+        if not enabled:
+            blockers.append("toggle off")
+        if not has_active_model:
+            blockers.append("no active model")
+        if not glyphos_ready:
+            blockers.append("GlyphOS config missing")
+        if not context_ready:
+            blockers.append("Context Mode MCP package missing")
+        return {
+            "enabled": enabled,
+            "ready": ready,
+            "status": "ready" if ready else ("needs_setup" if enabled else "off"),
+            "label": "Ready" if ready else ("Needs setup" if enabled else "Off"),
+            "blockers": blockers,
+            "benefit": "retrieved context + glyph-routed local inference",
         }
 
     def glyphos_telemetry_snapshot(self, *, limit: int = 10) -> dict[str, Any]:
@@ -2659,6 +2715,8 @@ class Manager:
                 "claude_base_url": "http://127.0.0.1:4000",
                 "claude_gateway": {"running": "yes", "url": "http://127.0.0.1:4000", "model_id": "qwen35-9b-q8", "log": "/var/log/claude-gateway.log", "upstream_timeout_seconds": "1800"},
                 "glyphos_telemetry": {"available": False, "routing": {"attempts_by_target": {}, "fallback_reason_counts": {}, "total_attempts": 0, "recent_attempts": []}},
+                "context_mode_mcp": {"available": True, "root": str(self.context_mode_mcp_root), "dashboard_source_exists": True, "dashboard_build_exists": False, "lifecycle_matrix_exists": True, "typecheck_script_exists": True},
+                "context_glyphos_pipeline": {"enabled": True, "ready": True, "status": "ready", "label": "Ready", "blockers": [], "benefit": "retrieved context + glyph-routed local inference"},
             }
         current = self.parse_key_values(self.run_cli("current"))
         doctor = self.parse_key_values(self.run_cli("doctor"))

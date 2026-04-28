@@ -413,6 +413,7 @@ function renderStatus(data) {
   renderOwnershipConflict(doctor);
   renderOperationActivity(data.operation_activity || {});
   renderGlyphosTelemetry(data.glyphos_telemetry || {});
+  renderContextGlyphosPipeline(data.context_glyphos_pipeline || {}, data.context_mode_mcp || {});
 
   setText("#metric-model", current.alias || "stopped");
   setText("#metric-model-path", current.model || "No model running");
@@ -515,6 +516,47 @@ function renderStatus(data) {
       ? "Restart the server in multi-client mode so multiple requests can run at once."
       : "Restart the server in single-client mode so one request runs at a time.",
   );
+}
+
+function renderContextGlyphosPipeline(pipeline, contextModeMcp) {
+  const card = $("#context-glyphos-card");
+  const badge = $("#context-glyphos-badge");
+  const blockersNode = $("#context-glyphos-blockers");
+  if (!card || !badge || !blockersNode) return;
+
+  const status = pipeline.status || "off";
+  card.classList.toggle("is-ready", status === "ready");
+  card.classList.toggle("is-warn", status === "needs_setup");
+  card.classList.toggle("is-off", status === "off");
+  badge.textContent = pipeline.label || "Off";
+  badge.classList.toggle("integration-badge-ready", status === "ready");
+  badge.classList.toggle("integration-badge-warn", status === "needs_setup");
+  badge.classList.toggle("integration-badge-muted", status === "off");
+
+  setText("#context-glyphos-status", status === "ready" ? "Combined pipeline ready" : status === "needs_setup" ? "Combined pipeline needs setup" : "Combined pipeline off");
+  setText("#context-glyphos-path", joinNotes([
+    contextModeMcp.available ? "Context MCP present" : "Context MCP missing",
+    contextModeMcp.lifecycle_matrix_exists ? "lifecycle check available" : "",
+    contextModeMcp.typecheck_script_exists ? "typecheck available" : "",
+    contextModeMcp.root ? displayPath(contextModeMcp.root) : "",
+  ]) || "-");
+  setText("#context-glyphos-benefit", pipeline.benefit || "retrieved context + glyph-routed local inference");
+
+  blockersNode.innerHTML = "";
+  const blockers = Array.isArray(pipeline.blockers) ? pipeline.blockers : [];
+  if (!blockers.length) {
+    const chip = document.createElement("span");
+    chip.className = "chip chip-success";
+    chip.textContent = "ready";
+    blockersNode.append(chip);
+    return;
+  }
+  blockers.forEach((blocker) => {
+    const chip = document.createElement("span");
+    chip.className = status === "off" ? "chip chip-neutral" : "chip chip-danger";
+    chip.textContent = blocker;
+    blockersNode.append(chip);
+  });
 }
 
 function renderModels(models) {
@@ -1134,6 +1176,7 @@ function renderDefaults(defaults) {
   $("#default-sync-claude").value = defaults.LLAMA_MODEL_SYNC_CLAUDE || "0";
   $("#default-sync-openclaw").value = defaults.LLAMA_MODEL_SYNC_OPENCLAW || "0";
   $("#default-sync-glyphos").value = defaults.LLAMA_MODEL_SYNC_GLYPHOS || "0";
+  $("#default-context-glyphos-pipeline").checked = ["1", "true", "yes", "on"].includes(String(defaults.LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE || "").trim().toLowerCase());
   $("#default-openclaw-profile").value = defaults.OPENCLAW_PROFILE || "";
   $("#default-openclaw-api-key").value = defaults.OPENCLAW_API_KEY || "";
   $("#default-claude-gateway-host").value = defaults.CLAUDE_GATEWAY_HOST || "";
@@ -1310,6 +1353,7 @@ async function saveDefaults(event) {
     LLAMA_MODEL_SYNC_CLAUDE: $("#default-sync-claude").value.trim(),
     LLAMA_MODEL_SYNC_OPENCLAW: $("#default-sync-openclaw").value.trim(),
     LLAMA_MODEL_SYNC_GLYPHOS: $("#default-sync-glyphos").value.trim(),
+    LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE: $("#default-context-glyphos-pipeline").checked ? "1" : "",
     OPENCLAW_PROFILE: $("#default-openclaw-profile").value.trim(),
     OPENCLAW_API_KEY: $("#default-openclaw-api-key").value.trim(),
     CLAUDE_GATEWAY_HOST: $("#default-claude-gateway-host").value.trim(),
@@ -1769,6 +1813,7 @@ function bindEvents() {
   $("#sync-openclaw").addEventListener("click", (event) => performIntegrationSync("/api/openclaw/sync", event.currentTarget, "Syncing...", "OpenClaw synced.").catch(showError));
   $("#sync-claude").addEventListener("click", (event) => performIntegrationSync("/api/claude/sync", event.currentTarget, "Syncing...", "Claude Code settings synced.").catch(showError));
   $("#sync-glyphos").addEventListener("click", (event) => performIntegrationSync("/api/glyphos/sync", event.currentTarget, "Syncing...", "GlyphOS config synced.").catch(showError));
+  $("#sync-glyphos-combined").addEventListener("click", (event) => performIntegrationSync("/api/glyphos/sync", event.currentTarget, "Syncing...", "GlyphOS synced for Context + GlyphOS readiness.").catch(showError));
   $("#claude-gateway-start").addEventListener("click", (event) => performClaudeGatewayAction("start", event.currentTarget, { pendingLabel: "Starting...", successMessage: "Claude gateway started." }).catch(showError));
   $("#claude-gateway-restart").addEventListener("click", (event) => performClaudeGatewayAction("restart", event.currentTarget, { pendingLabel: "Restarting...", successMessage: "Claude gateway restarted." }).catch(showError));
   $("#claude-gateway-stop").addEventListener("click", (event) => performClaudeGatewayAction("stop", event.currentTarget, { pendingLabel: "Stopping...", successMessage: "Claude gateway stopped." }).catch(showError));

@@ -1645,6 +1645,37 @@ class Phase0ContractTests(unittest.TestCase):
             self.assertEqual(defaults["LLAMA_SERVER_BIN"], "/custom/bin/llama-server")
             self.assertEqual(defaults["LLAMA_SERVER_WAIT_SECONDS"], "45")
             self.assertEqual(defaults["LLAMA_SERVER_EXTRA_ARGS"], '--jinja --system-prompt "hello world"')
+            self.assertEqual(defaults["LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE"], "")
+
+    def test_context_glyphos_pipeline_reports_toggle_and_readiness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self.make_manager(tmpdir)
+            manager.defaults_file.write_text(
+                "\n".join(
+                    [
+                        "LLAMA_SERVER_HOST=127.0.0.1",
+                        "LLAMA_SERVER_PORT=8081",
+                        "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE=1",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            manager.glyphos_config_file.parent.mkdir(parents=True, exist_ok=True)
+            manager.glyphos_config_file.write_text("runtime:\n  provider: llamacpp\n", encoding="utf-8")
+
+            defaults = manager.defaults()
+            context_mode_mcp = manager.context_mode_mcp_state()
+            pipeline = manager.context_glyphos_pipeline_state(
+                defaults=defaults,
+                current={"alias": "qwen", "model": "/models/qwen.gguf"},
+                context_mode_mcp=context_mode_mcp,
+            )
+
+            self.assertTrue(pipeline["enabled"])
+            self.assertTrue(pipeline["ready"])
+            self.assertEqual(pipeline["status"], "ready")
+            self.assertEqual(pipeline["blockers"], [])
 
     def test_json_store_write_is_atomic(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -120,6 +120,7 @@ The dashboard is designed for localhost operation by default:
 - request bodies are capped by `LLAMA_MODEL_WEB_MAX_REQUEST_BYTES`
 - CLI-backed API calls are capped by `LLAMA_MODEL_WEB_CLI_TIMEOUT_SECONDS`
 - download and routing actions are written to a recent-activity trail for troubleshooting queue, retry, and remote-cache behavior
+- the optional `Context + GlyphOS` dashboard toggle makes the combined retrieved-context plus glyph-routed-inference workflow explicit for operators
 
 If you intentionally bind the dashboard beyond localhost, set the hardening knobs explicitly:
 
@@ -313,6 +314,17 @@ Safety notes:
 - These helpers are not described as OS-level sandboxes; use container or VM isolation if you need a security boundary.
 - Large outputs are indexed automatically when configured, so MCP responses stay compact.
 - Generated `dist/`, dashboard `dist/`, and `node_modules/` artifacts are intentionally ignored by git.
+
+### Context + GlyphOS readiness
+
+The dashboard has a simple `Context + GlyphOS` preference in global defaults. When enabled, the Integrations panel shows a combined readiness card for:
+
+- active local model selected by Llama Model Manager
+- GlyphOS config present at `~/.glyphos/config.yaml`
+- Context Mode MCP package present in `integrations/context-mode-mcp/`
+- lifecycle/typecheck commands available for local validation
+
+This toggle is intentionally operator-facing. It does not create a new network service or claim extra sandboxing; it makes the combined workflow clear when Context Mode MCP retrieval and GlyphOS routing are used together.
 
 ## Maintainer Verification
 

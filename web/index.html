@@ -587,6 +587,13 @@
               Auto Sync GlyphOS
               <input name="LLAMA_MODEL_SYNC_GLYPHOS" id="default-sync-glyphos" placeholder="0">
             </label>
+            <label title="Operator-facing toggle for the combined Context Mode MCP + GlyphOS workflow. It does not change security boundaries; it makes the intended combined pipeline visible in the dashboard.">
+              Context + GlyphOS
+              <div class="checkbox-row">
+                <input name="LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE" id="default-context-glyphos-pipeline" type="checkbox" aria-label="Show Context Mode MCP and GlyphOS as a combined pipeline">
+                <span class="field-note">Shows a combined readiness card for retrieved context plus glyph-routed local inference.</span>
+              </div>
+            </label>
             <label title="Optional OpenClaw profile name. Leave blank to target the main profile.">
               OpenClaw Profile
               <input name="OPENCLAW_PROFILE" id="default-openclaw-profile" placeholder="blank for main">
@@ -700,6 +707,19 @@
               <div id="glyphos-telemetry-recent" class="telemetry-list"></div>
               <div class="inline-actions integration-actions">
                 <button id="sync-glyphos" class="button button-small button-primary" title="Sync GlyphOS AI Compute to the active local llama.cpp runtime.">Sync GlyphOS</button>
+              </div>
+            </article>
+            <article id="context-glyphos-card" class="integration-card pipeline-card">
+              <span class="metric-label">Context + GlyphOS</span>
+              <div class="integration-chip-row">
+                <span id="context-glyphos-badge" class="integration-badge">Off</span>
+              </div>
+              <code id="context-glyphos-status">-</code>
+              <span id="context-glyphos-path" class="metric-note">-</span>
+              <span id="context-glyphos-benefit" class="metric-note">-</span>
+              <div id="context-glyphos-blockers" class="chip-row"></div>
+              <div class="inline-actions integration-actions">
+                <button id="sync-glyphos-combined" class="button button-small button-primary" title="Sync GlyphOS, then refresh the combined Context + GlyphOS readiness card.">Sync GlyphOS</button>
               </div>
             </article>
           </div>
