@@ -31,6 +31,7 @@ Stay local. Stay sovereign. Stay fast.
 - `desktop/llama-model-manager-icon.svg`: desktop icon asset used by the installer
 - `scripts/build-llama-server.sh`: wrapper for fetching and compiling a host-specific llama.cpp runtime
 - `integrations/public-glyphos-ai-compute/`: bundled public GlyphOS AI Compute lane
+- `integrations/context-mode-mcp/`: optional Context Mode MCP package for indexed context, lifecycle checks, and temporary-workdir execution tools
 - `web/`: browser dashboard assets and Python server
 - `LICENSE`: Apache License 2.0
 - `NOTICE`: copyright and attribution notice
@@ -108,6 +109,36 @@ The installed user unit serves the installed dashboard launcher with a fixed loc
 
 The background service remains fully optional and is never enabled by default.
 
+## Dashboard Safety Defaults
+
+The dashboard is designed for localhost operation by default:
+
+- default bind host: `127.0.0.1`
+- default URL: `http://127.0.0.1:8765/`
+- API responses use structured JSON errors with stable `code` fields
+- state-changing API payloads are schema-checked and reject unknown fields
+- request bodies are capped by `LLAMA_MODEL_WEB_MAX_REQUEST_BYTES`
+- CLI-backed API calls are capped by `LLAMA_MODEL_WEB_CLI_TIMEOUT_SECONDS`
+- download and routing actions are written to a recent-activity trail for troubleshooting queue, retry, and remote-cache behavior
+
+If you intentionally bind the dashboard beyond localhost, set the hardening knobs explicitly:
+
+```bash
+export LLAMA_MODEL_WEB_HOST=0.0.0.0
+export LLAMA_MODEL_WEB_API_TOKEN='replace-with-a-long-random-token'
+export LLAMA_MODEL_WEB_ALLOWED_HOSTS='127.0.0.1,192.168.1.25'
+export LLAMA_MODEL_WEB_MAX_REQUEST_BYTES=1048576
+export LLAMA_MODEL_WEB_CLI_TIMEOUT_SECONDS=30
+llama-model-web --no-browser
+```
+
+Remote clients must send either:
+
+- `X-LLAMA-MODEL-MANAGER-TOKEN: <token>`
+- `Authorization: Bearer <token>`
+
+Localhost clients remain convenient for normal single-user workflows. External binds should be treated as operator-controlled surfaces, not public internet endpoints.
+
 ## Runtime Portability
 
 - llama.cpp source is portable, but built `llama-server` binaries are backend-, platform-, and architecture-specific
@@ -170,11 +201,13 @@ If `doctor` reports `binary_status: unavailable`, install the missing build depe
 - structured registry entries with per-model overrides for context, `ngl`, batch, threads, parallel, device, and notes
 - automatic discovery of `.gguf` models plus same-directory `mmproj` sidecars
 - CLI diagnostics via `llama-model doctor`, including startup failure categories and GPU pressure visibility
+- hardened dashboard API behavior with optional remote-token auth, request-size limits, schema validation, timeout-specific errors, and recent operation activity
 - manifest-driven runtime selection that only accepts validated bundled binaries
 - local `llama.cpp` bootstrap via `llama-model build-runtime`
 - guarded GPU/RAM-aware auto-fit for known CUDA/KV-cache/projector startup failures without silently persisting downgraded settings
 - OpenAI-compatible endpoint summary plus sync wiring for local harnesses such as `opencode`, `OpenClaw`, and `Claude Code`
 - bundled GlyphOS AI Compute support for routing glyph-driven workloads to the active local model
+- optional Context Mode MCP package with lifecycle matrix checks, indexed context search, Claude hook templates, and temporary-workdir execution helpers with allowlist/denylist policy checks
 - Modern Operator dashboard treatment with toasts, busy states, and first-run empty states
 
 ## GlyphOS AI Compute
@@ -259,6 +292,43 @@ These integrations are optional. The default product behavior remains the local 
 - post-switch sync for Claude Code, OpenClaw, and GlyphOS is opt-in with `LLAMA_MODEL_SYNC_CLAUDE=1`, `LLAMA_MODEL_SYNC_OPENCLAW=1`, and `LLAMA_MODEL_SYNC_GLYPHOS=1`.
 - post-switch sync is non-fatal; a client-config error warns but does not roll back a successfully started local model.
 - the dashboard exposes direct sync actions for all three tools and gateway controls for Claude Code.
+
+## Context Mode MCP
+
+The optional Context Mode MCP package lives under `integrations/context-mode-mcp/`. It is intended for local development workflows that need indexed context, compact retrieval, lifecycle diagnostics, and MCP tool execution helpers.
+
+Common commands:
+
+```bash
+cd integrations/context-mode-mcp
+npm ci
+npm run typecheck
+npm run build
+npm run lifecycle-matrix
+```
+
+Safety notes:
+
+- `ctx_execute` and `ctx_execute_file` run in temporary working directories with allowlist/denylist policy checks.
+- These helpers are not described as OS-level sandboxes; use container or VM isolation if you need a security boundary.
+- Large outputs are indexed automatically when configured, so MCP responses stay compact.
+- Generated `dist/`, dashboard `dist/`, and `node_modules/` artifacts are intentionally ignored by git.
+
+## Maintainer Verification
+
+Before pushing a release branch, run the focused checks that cover the web dashboard, GlyphOS routing, and Context Mode MCP surfaces:
+
+```bash
+python -m unittest tests.test_phase0_contracts
+python -m unittest integrations.public-glyphos-ai-compute.tests.test_q2_flow
+cd integrations/context-mode-mcp && npm run typecheck && npm run build
+```
+
+Expected notes:
+
+- The web contract suite includes cancellation-path coverage and may exercise connection-reset behavior while still passing.
+- `npm run build` may warn about dashboard chunk size; that is a bundle-size hygiene item, not a functional failure.
+- `npm run lifecycle-matrix` is the manual MCP lifecycle smoke test for `ctx_doctor`, `ctx_execute`, `ctx_upgrade`, `ctx_purge`, `ctx_index`, and `ctx_search`.
 
 ## Roadmap
 
