@@ -2571,7 +2571,7 @@ class Manager:
         ready = enabled and glyphos_ready and context_ready and has_active_model
         blockers: list[str] = []
         if not enabled:
-            blockers.append("toggle off")
+            blockers.append("activate feature")
         if not has_active_model:
             blockers.append("no active model")
         if not glyphos_ready:
@@ -2581,8 +2581,8 @@ class Manager:
         return {
             "enabled": enabled,
             "ready": ready,
-            "status": "ready" if ready else ("needs_setup" if enabled else "off"),
-            "label": "Ready" if ready else ("Needs setup" if enabled else "Off"),
+            "status": "ready" if ready else ("activation_pending" if enabled else "off"),
+            "label": "Ready" if ready else ("Activate feature" if enabled else "Off"),
             "blockers": blockers,
             "benefit": "retrieved context + glyph-routed local inference",
         }

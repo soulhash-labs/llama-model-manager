@@ -526,14 +526,14 @@ function renderContextGlyphosPipeline(pipeline, contextModeMcp) {
 
   const status = pipeline.status || "off";
   card.classList.toggle("is-ready", status === "ready");
-  card.classList.toggle("is-warn", status === "needs_setup");
+  card.classList.toggle("is-warn", status === "activation_pending");
   card.classList.toggle("is-off", status === "off");
   badge.textContent = pipeline.label || "Off";
   badge.classList.toggle("integration-badge-ready", status === "ready");
-  badge.classList.toggle("integration-badge-warn", status === "needs_setup");
+  badge.classList.toggle("integration-badge-warn", status === "activation_pending");
   badge.classList.toggle("integration-badge-muted", status === "off");
 
-  setText("#context-glyphos-status", status === "ready" ? "Combined pipeline ready" : status === "needs_setup" ? "Combined pipeline needs setup" : "Combined pipeline off");
+  setText("#context-glyphos-status", status === "ready" ? "Combined pipeline ready" : status === "activation_pending" ? "Activate feature to finish readiness" : "Combined pipeline off");
   setText("#context-glyphos-path", joinNotes([
     contextModeMcp.available ? "Context MCP present" : "Context MCP missing",
     contextModeMcp.lifecycle_matrix_exists ? "lifecycle check available" : "",
