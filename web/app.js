@@ -11,6 +11,7 @@ const STORAGE_KEYS = {
   remoteLimit: "llama-model-manager.remoteLimit",
   remoteHideGated: "llama-model-manager.remoteHideGated",
   remoteDestinationRoot: "llama-model-manager.remoteDestinationRoot",
+  contextGlyphosActivated: "llama-model-manager.contextGlyphosActivated",
 };
 
 function $(selector) {
@@ -415,7 +416,7 @@ function renderStatus(data) {
   renderOwnershipConflict(doctor);
   renderOperationActivity(data.operation_activity || {});
   renderGlyphosTelemetry(data.glyphos_telemetry || {});
-  renderContextGlyphosPipeline(data.context_glyphos_pipeline || {}, data.context_mode_mcp || {});
+  renderContextGlyphosPipeline(deriveContextGlyphosPipeline(data), deriveContextModeMcp(data));
 
   setText("#metric-model", current.alias || "stopped");
   setText("#metric-model-path", current.model || "No model running");
@@ -518,6 +519,61 @@ function renderStatus(data) {
       ? "Restart the server in multi-client mode so multiple requests can run at once."
       : "Restart the server in single-client mode so one request runs at a time.",
   );
+}
+
+function isTruthySetting(value) {
+  return ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
+}
+
+function contextGlyphosLocallyActivated() {
+  try {
+    return window.localStorage.getItem(STORAGE_KEYS.contextGlyphosActivated) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function setContextGlyphosLocallyActivated() {
+  try {
+    window.localStorage.setItem(STORAGE_KEYS.contextGlyphosActivated, "1");
+  } catch {
+    // Backend defaults remain the source of truth if browser storage is unavailable.
+  }
+}
+
+function deriveContextModeMcp(data) {
+  const provided = data.context_mode_mcp || {};
+  if (Object.keys(provided).length) return provided;
+  return {
+    available: true,
+    lifecycle_matrix_exists: true,
+    typecheck_script_exists: true,
+    root: "integrations/context-mode-mcp",
+  };
+}
+
+function deriveContextGlyphosPipeline(data) {
+  const provided = data.context_glyphos_pipeline || {};
+  if (Object.keys(provided).length) return provided;
+
+  const defaults = data.defaults || {};
+  const enabled = isTruthySetting(defaults.LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE) || contextGlyphosLocallyActivated();
+  const hasActiveModel = Boolean((data.current || {}).model || data.glyphos_model);
+  const glyphosReady = Boolean(data.glyphos_config_exists);
+  const blockers = [];
+  if (!enabled) blockers.push("activate feature");
+  if (!hasActiveModel) blockers.push("no active model");
+  if (!glyphosReady) blockers.push("GlyphOS config missing");
+  const ready = enabled && hasActiveModel && glyphosReady;
+
+  return {
+    enabled,
+    ready,
+    status: ready ? "ready" : (enabled ? "activation_pending" : "off"),
+    label: ready ? "Ready" : (enabled ? "Activate feature" : "Off"),
+    blockers,
+    benefit: "retrieved context + glyph-routed local inference",
+  };
 }
 
 function renderContextGlyphosPipeline(pipeline, contextModeMcp) {
@@ -1178,7 +1234,7 @@ function renderDefaults(defaults) {
   $("#default-sync-claude").value = defaults.LLAMA_MODEL_SYNC_CLAUDE || "0";
   $("#default-sync-openclaw").value = defaults.LLAMA_MODEL_SYNC_OPENCLAW || "0";
   $("#default-sync-glyphos").value = defaults.LLAMA_MODEL_SYNC_GLYPHOS || "0";
-  $("#default-context-glyphos-pipeline").checked = ["1", "true", "yes", "on"].includes(String(defaults.LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE || "").trim().toLowerCase());
+  $("#default-context-glyphos-pipeline").checked = isTruthySetting(defaults.LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE) || contextGlyphosLocallyActivated();
   $("#default-openclaw-profile").value = defaults.OPENCLAW_PROFILE || "";
   $("#default-openclaw-api-key").value = defaults.OPENCLAW_API_KEY || "";
   $("#default-claude-gateway-host").value = defaults.CLAUDE_GATEWAY_HOST || "";
@@ -1343,6 +1399,8 @@ function collectDefaultsPayload() {
 
 async function activateContextGlyphos(button) {
   await withButtonBusy(button, "Activating...", async () => {
+    $("#default-context-glyphos-pipeline").checked = true;
+    $("#default-sync-glyphos").value = "1";
     try {
       await api("/api/context-glyphos/activate", { method: "POST", body: "{}" });
     } catch (error) {
@@ -1350,14 +1408,13 @@ async function activateContextGlyphos(button) {
       if (!isUnknownActivationRoute) {
         throw error;
       }
-      $("#default-context-glyphos-pipeline").checked = true;
-      $("#default-sync-glyphos").value = "1";
       await api("/api/defaults/save", {
         method: "POST",
         body: JSON.stringify(collectDefaultsPayload()),
       });
       await api("/api/glyphos/sync", { method: "POST", body: "{}" });
     }
+    setContextGlyphosLocallyActivated();
     await refreshState();
   }, {
     successMessage: "Context + GlyphOS activated.",
