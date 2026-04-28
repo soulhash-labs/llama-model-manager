@@ -12,7 +12,9 @@ Commands:
   llama-model doctor
     Reports runtime health plus install health. Check install_ok, installed_web_app,
     bundled_glyphos_integration, and context_mode_mcp_installed after curl/bootstrap
-    installs. If install_ok is no, rerun ./install.sh or the latest bootstrap installer.
+    installs. It also checks the live dashboard API when reachable. If install_ok is
+    no, rerun ./install.sh or the latest bootstrap installer. If dashboard_api_guidance
+    is populated, restart llama-model-web and hard refresh the browser.
   llama-model build-runtime --backend auto
   llama-model mode
   llama-model set-mode single --restart

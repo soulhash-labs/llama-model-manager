@@ -1418,8 +1418,17 @@ async function activateContextGlyphos(button) {
     }
     setContextGlyphosLocallyActivated();
     await refreshState();
+    const pipeline = deriveContextGlyphosPipeline(state.data || {});
+    if (pipeline.ready) {
+      showToast("Context + GlyphOS is ready.", "success");
+      return;
+    }
+    const blockers = Array.isArray(pipeline.blockers) && pipeline.blockers.length
+      ? ` Blocked by: ${pipeline.blockers.join(", ")}.`
+      : "";
+    showToast(`Context + GlyphOS activation saved, but it is not ready yet.${blockers}`, "info", { timeout: 6200 });
   }, {
-    successMessage: "Context + GlyphOS activated.",
+    successMessage: "",
   });
 }
 

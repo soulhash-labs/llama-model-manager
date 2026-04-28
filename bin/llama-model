@@ -3133,6 +3133,12 @@ show_doctor() {
     local context_mode_mcp="no"
     local install_ok="yes"
     local install_guidance=""
+    local dashboard_api_reachable="no"
+    local dashboard_api_glyphos_telemetry="unknown"
+    local dashboard_api_context_glyphos_status="unknown"
+    local dashboard_api_glyphos_config="unknown"
+    local dashboard_api_guidance=""
+    local dashboard_state_json=""
 
     pid="$(find_pid)"
     if [[ -n "$pid" ]]; then
@@ -3194,6 +3200,33 @@ show_doctor() {
         install_ok="no"
         install_guidance="Run ./install.sh from the current repo checkout, or rerun the latest bootstrap installer, then restart llama-model-web."
     fi
+    if dashboard_state_json="$(curl -fsS --max-time 2 "${DASHBOARD_SERVICE_URL%/}/api/state" 2>/dev/null)"; then
+        dashboard_api_reachable="yes"
+        while IFS='=' read -r key value; do
+            case "$key" in
+                glyphos_telemetry) dashboard_api_glyphos_telemetry="$value" ;;
+                context_status) dashboard_api_context_glyphos_status="$value" ;;
+                glyphos_config) dashboard_api_glyphos_config="$value" ;;
+            esac
+        done < <(printf '%s' "$dashboard_state_json" | python3 -c '
+import json
+import sys
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = {}
+
+glyphos = data.get("glyphos_telemetry") if isinstance(data.get("glyphos_telemetry"), dict) else {}
+context = data.get("context_glyphos_pipeline") if isinstance(data.get("context_glyphos_pipeline"), dict) else {}
+print("glyphos_telemetry=" + ("yes" if glyphos.get("available") else "no"))
+print("context_status=" + str(context.get("status") or "missing"))
+print("glyphos_config=" + ("yes" if data.get("glyphos_config_exists") else "no"))
+')
+        if [[ "$dashboard_api_glyphos_config" == "yes" && "$dashboard_api_glyphos_telemetry" != "yes" && "$bundled_glyphos" == "yes" ]]; then
+            dashboard_api_guidance="Live dashboard cannot see bundled GlyphOS even though install assets exist; restart llama-model-web and hard refresh the browser."
+        fi
+    fi
 
     printf 'pid: %s\n' "${pid:-stopped}"
     printf 'alias: %s\n' "$alias"
@@ -3212,6 +3245,11 @@ show_doctor() {
     printf 'context_mode_mcp_installed: %s\n' "$context_mode_mcp"
     printf 'install_ok: %s\n' "$install_ok"
     printf 'install_guidance: %s\n' "$install_guidance"
+    printf 'dashboard_api_reachable: %s\n' "$dashboard_api_reachable"
+    printf 'dashboard_api_glyphos_telemetry: %s\n' "$dashboard_api_glyphos_telemetry"
+    printf 'dashboard_api_context_glyphos_status: %s\n' "$dashboard_api_context_glyphos_status"
+    printf 'dashboard_api_glyphos_config: %s\n' "$dashboard_api_glyphos_config"
+    printf 'dashboard_api_guidance: %s\n' "$dashboard_api_guidance"
     printf 'binary_ok: %s\n' "$binary_ok"
     printf 'binary: %s\n' "${SELECTED_LLAMA_SERVER_BIN:-}"
     printf 'binary_source: %s\n' "${SELECTED_LLAMA_SERVER_SOURCE:-none}"

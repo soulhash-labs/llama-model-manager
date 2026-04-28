@@ -123,6 +123,16 @@ class Phase0ContractTests(unittest.TestCase):
             body = exc.read().decode("utf-8")
         return status, json.loads(body)
 
+    def test_static_assets_are_served_without_browser_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self.make_manager(tmpdir)
+            app_server = self.start_app_server(manager)
+            url = f"http://127.0.0.1:{app_server.server_port}/index.html"
+
+            with urllib.request.urlopen(url, timeout=10) as response:
+                self.assertEqual(response.status, HTTPStatus.OK)
+                self.assertEqual(response.headers.get("Cache-Control"), "no-store, max-age=0")
+
     def test_unknown_post_field_is_rejected_with_error_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = self.make_manager(tmpdir)

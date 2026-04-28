@@ -375,6 +375,7 @@ llama-model doctor
 - `install_ok: yes`
 
 If `install_ok: no`, rerun `./install.sh` from the current checkout or rerun the latest bootstrap installer, then restart `llama-model-web`.
+When the dashboard is running, `doctor` also reports `dashboard_api_glyphos_telemetry` and `dashboard_api_context_glyphos_status`; if `dashboard_api_guidance` is populated, restart `llama-model-web` and hard refresh the browser.
 
 ## License
 

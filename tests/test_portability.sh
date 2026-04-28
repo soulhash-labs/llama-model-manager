@@ -789,6 +789,9 @@ EOF
 test_doctor_reports_install_health() {
     local tmp
     local output
+    local api_pid
+    local api_port_file
+    local api_port
 
     tmp="$(mktemp -d)"
     make_env "$tmp"
@@ -816,6 +819,56 @@ test_doctor_reports_install_health() {
     assert_contains "$output" "bundled_glyphos_integration: yes"
     assert_contains "$output" "context_mode_mcp_installed: yes"
     assert_contains "$output" "install_ok: yes"
+    assert_contains "$output" "dashboard_api_reachable: no"
+
+    api_port_file="$tmp/dashboard-api.port"
+    python3 - "$api_port_file" <<'PY' &
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
+import sys
+
+port_file = sys.argv[1]
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != "/api/state":
+            self.send_response(404)
+            self.end_headers()
+            return
+        payload = json.dumps({
+            "glyphos_config_exists": True,
+            "glyphos_telemetry": {"available": False, "routing": {}},
+            "context_glyphos_pipeline": {"status": "activation_pending"},
+        }).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *_args):
+        return
+
+server = HTTPServer(("127.0.0.1", 0), Handler)
+with open(port_file, "w", encoding="utf-8") as handle:
+    handle.write(str(server.server_port))
+server.serve_forever()
+PY
+    api_pid=$!
+    for _ in $(seq 1 50); do
+        [[ -s "$api_port_file" ]] && break
+        sleep 0.05
+    done
+    api_port="$(cat "$api_port_file")"
+    output="$(LLAMA_MODEL_WEB_PORT="$api_port" run_doctor "$tmp")"
+    kill "$api_pid" 2>/dev/null || true
+    wait "$api_pid" 2>/dev/null || true
+
+    assert_contains "$output" "dashboard_api_reachable: yes"
+    assert_contains "$output" "dashboard_api_glyphos_telemetry: no"
+    assert_contains "$output" "dashboard_api_context_glyphos_status: activation_pending"
+    assert_contains "$output" "dashboard_api_glyphos_config: yes"
+    assert_contains "$output" "dashboard_api_guidance: Live dashboard cannot see bundled GlyphOS"
 }
 
 test_dashboard_service_unit_rendering() {
