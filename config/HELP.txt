@@ -10,6 +10,9 @@ Commands:
   llama-model discover [root]
   llama-model current
   llama-model doctor
+    Reports runtime health plus install health. Check install_ok, installed_web_app,
+    bundled_glyphos_integration, and context_mode_mcp_installed after curl/bootstrap
+    installs. If install_ok is no, rerun ./install.sh or the latest bootstrap installer.
   llama-model build-runtime --backend auto
   llama-model mode
   llama-model set-mode single --restart

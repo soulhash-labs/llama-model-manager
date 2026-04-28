@@ -3127,6 +3127,12 @@ show_doctor() {
     local gpu_processes=""
     local cuda_unified_memory="$(cuda_unified_memory_mode)"
     local auto_fit_override_reason=""
+    local installed_web_launcher="no"
+    local installed_web_app="no"
+    local bundled_glyphos="no"
+    local context_mode_mcp="no"
+    local install_ok="yes"
+    local install_guidance=""
 
     pid="$(find_pid)"
     if [[ -n "$pid" ]]; then
@@ -3180,6 +3186,15 @@ show_doctor() {
         binary_ok="yes"
     fi
 
+    [[ -x "$HOME/.local/bin/llama-model-web" ]] && installed_web_launcher="yes"
+    [[ -f "$INSTALLED_APP_ROOT/web/app.py" ]] && installed_web_app="yes"
+    [[ -d "$INSTALLED_APP_ROOT/integrations/public-glyphos-ai-compute/glyphos_ai" ]] && bundled_glyphos="yes"
+    [[ -f "$INSTALLED_APP_ROOT/integrations/context-mode-mcp/package.json" ]] && context_mode_mcp="yes"
+    if [[ "$installed_web_launcher" != "yes" || "$installed_web_app" != "yes" || "$bundled_glyphos" != "yes" || "$context_mode_mcp" != "yes" ]]; then
+        install_ok="no"
+        install_guidance="Run ./install.sh from the current repo checkout, or rerun the latest bootstrap installer, then restart llama-model-web."
+    fi
+
     printf 'pid: %s\n' "${pid:-stopped}"
     printf 'alias: %s\n' "$alias"
     printf 'model: %s\n' "${model_path:-}"
@@ -3190,6 +3205,13 @@ show_doctor() {
     printf 'defaults_file: %s\n' "$DEFAULTS_FILE"
     printf 'registry_file: %s\n' "$MODELS_FILE"
     printf 'log: %s\n' "$LLAMA_SERVER_LOG"
+    printf 'installed_app_root: %s\n' "$INSTALLED_APP_ROOT"
+    printf 'installed_web_launcher: %s\n' "$installed_web_launcher"
+    printf 'installed_web_app: %s\n' "$installed_web_app"
+    printf 'bundled_glyphos_integration: %s\n' "$bundled_glyphos"
+    printf 'context_mode_mcp_installed: %s\n' "$context_mode_mcp"
+    printf 'install_ok: %s\n' "$install_ok"
+    printf 'install_guidance: %s\n' "$install_guidance"
     printf 'binary_ok: %s\n' "$binary_ok"
     printf 'binary: %s\n' "${SELECTED_LLAMA_SERVER_BIN:-}"
     printf 'binary_source: %s\n' "${SELECTED_LLAMA_SERVER_SOURCE:-none}"

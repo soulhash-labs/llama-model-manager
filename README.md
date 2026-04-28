@@ -366,6 +366,16 @@ llama-model sync-glyphos
 llama-model doctor
 ```
 
+`llama-model doctor` also checks install health. After a curl/bootstrap install it should report:
+
+- `installed_web_launcher: yes`
+- `installed_web_app: yes`
+- `bundled_glyphos_integration: yes`
+- `context_mode_mcp_installed: yes`
+- `install_ok: yes`
+
+If `install_ok: no`, rerun `./install.sh` from the current checkout or rerun the latest bootstrap installer, then restart `llama-model-web`.
+
 ## License
 
 - Copyright `2026 soulhash.ai`

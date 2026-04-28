@@ -786,6 +786,38 @@ EOF
     assert_contains "$output" "binary_status: unavailable"
 }
 
+test_doctor_reports_install_health() {
+    local tmp
+    local output
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+
+    output="$(run_doctor "$tmp")"
+    assert_contains "$output" "installed_web_launcher: no"
+    assert_contains "$output" "installed_web_app: no"
+    assert_contains "$output" "bundled_glyphos_integration: no"
+    assert_contains "$output" "context_mode_mcp_installed: no"
+    assert_contains "$output" "install_ok: no"
+    assert_contains "$output" "install_guidance: Run ./install.sh"
+
+    mkdir -p "$tmp/home/.local/bin" \
+        "$tmp/home/.local/share/llama-model-manager/web" \
+        "$tmp/home/.local/share/llama-model-manager/integrations/public-glyphos-ai-compute/glyphos_ai" \
+        "$tmp/home/.local/share/llama-model-manager/integrations/context-mode-mcp"
+    : >"$tmp/home/.local/bin/llama-model-web"
+    chmod +x "$tmp/home/.local/bin/llama-model-web"
+    : >"$tmp/home/.local/share/llama-model-manager/web/app.py"
+    : >"$tmp/home/.local/share/llama-model-manager/integrations/context-mode-mcp/package.json"
+
+    output="$(run_doctor "$tmp")"
+    assert_contains "$output" "installed_web_launcher: yes"
+    assert_contains "$output" "installed_web_app: yes"
+    assert_contains "$output" "bundled_glyphos_integration: yes"
+    assert_contains "$output" "context_mode_mcp_installed: yes"
+    assert_contains "$output" "install_ok: yes"
+}
+
 test_dashboard_service_unit_rendering() {
     local unit
 
@@ -1370,6 +1402,7 @@ main() {
     test_doctor_reports_gpu_pressure_and_process_rows
     test_registry_parsing_preserves_empty_columns
     test_doctor_tolerates_missing_log_markers
+    test_doctor_reports_install_health
     test_dashboard_service_unit_rendering
     test_dashboard_service_status_reports_unsupported_without_systemctl
     test_doctor_reports_external_systemd_owner
