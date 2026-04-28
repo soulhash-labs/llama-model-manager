@@ -74,11 +74,47 @@ RUNTIME_PROFILES_FILE="$CONFIG_DIR/runtime-profiles.json"
 LLAMA_MODEL_WEB_HOST="${LLAMA_MODEL_WEB_HOST:-$DASHBOARD_SERVICE_HOST}"
 LLAMA_MODEL_WEB_PORT="${LLAMA_MODEL_WEB_PORT:-$DASHBOARD_SERVICE_PORT}"
 
+expand_user_path_literal() {
+    local value="$1"
+
+    case "$value" in
+        '$HOME')
+            printf '%s\n' "$HOME"
+            ;;
+        '$HOME'/*)
+            printf '%s/%s\n' "$HOME" "${value#\$HOME/}"
+            ;;
+        '${HOME}')
+            printf '%s\n' "$HOME"
+            ;;
+        '${HOME}'/*)
+            printf '%s/%s\n' "$HOME" "${value#\$\{HOME\}/}"
+            ;;
+        "~")
+            printf '%s\n' "$HOME"
+            ;;
+        "~"/*)
+            printf '%s/%s\n' "$HOME" "${value#\~/}"
+            ;;
+        *)
+            printf '%s\n' "$value"
+            ;;
+    esac
+}
+
 if [[ -f "$DEFAULTS_FILE" ]]; then
     # User-tunable runtime defaults live here, not in the wrapper itself.
     # shellcheck disable=SC1090
     source "$DEFAULTS_FILE"
 fi
+
+LLAMA_SERVER_LOG="$(expand_user_path_literal "$LLAMA_SERVER_LOG")"
+CLAUDE_GATEWAY_LOG="$(expand_user_path_literal "$CLAUDE_GATEWAY_LOG")"
+CLAUDE_GATEWAY_PID_FILE="$(expand_user_path_literal "$CLAUDE_GATEWAY_PID_FILE")"
+CLAUDE_SETTINGS_FILE="$(expand_user_path_literal "$CLAUDE_SETTINGS_FILE")"
+GLYPHOS_CONFIG_FILE="$(expand_user_path_literal "$GLYPHOS_CONFIG_FILE")"
+OPENCODE_CONFIG_FILE="$(expand_user_path_literal "$OPENCODE_CONFIG_FILE")"
+OPENCODE_MODEL_STATE_FILE="$(expand_user_path_literal "$OPENCODE_MODEL_STATE_FILE")"
 
 REQUESTED_LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN:-}"
 mkdir -p "$STATE_DIR"
@@ -2742,6 +2778,8 @@ ${SELECTED_LLAMA_SERVER_GUIDANCE}"
     if [[ -n "$LLAMA_SERVER_EXTRA_ARGS" ]]; then
         mapfile -d '' -t runtime_extra_args < <(split_shell_words "$LLAMA_SERVER_EXTRA_ARGS")
     fi
+
+    mkdir -p "$(dirname "$LLAMA_SERVER_LOG")"
 
     if [[ "$SELECTED_LLAMA_SERVER_BACKEND" == "cuda" || "$device" == cuda* ]]; then
         gpu_total="$(detect_gpu_total_mib || true)"

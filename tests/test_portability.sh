@@ -363,6 +363,32 @@ PY
     assert_contains "$output" "--mmproj '/tmp/My Models/mmproj.gguf'"
 }
 
+test_quoted_home_paths_from_saved_defaults_expand() {
+    local tmp
+    local output
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    cat >"$tmp/config/llama-server/defaults.env" <<'EOF'
+LLAMA_SERVER_LOG='$HOME/models/llama-server.log'
+CLAUDE_GATEWAY_LOG='$HOME/models/claude-gateway.log'
+GLYPHOS_CONFIG_FILE='$HOME/.glyphos/config.yaml'
+EOF
+
+    output="$(
+        HOME="$tmp/home" \
+        XDG_CONFIG_HOME="$tmp/config" \
+        XDG_STATE_HOME="$tmp/state" \
+        LLAMA_SERVER_RUNTIME_DIR="$tmp/runtime" \
+        bash -c 'source "$1"; printf "%s\n%s\n%s\n" "$LLAMA_SERVER_LOG" "$CLAUDE_GATEWAY_LOG" "$GLYPHOS_CONFIG_FILE"' _ "$BIN"
+    )"
+
+    assert_contains "$output" "$tmp/home/models/llama-server.log"
+    assert_contains "$output" "$tmp/home/models/claude-gateway.log"
+    assert_contains "$output" "$tmp/home/.glyphos/config.yaml"
+    assert_not_contains "$output" '$HOME/models/llama-server.log'
+}
+
 
 test_cuda_cc_parsing_rejects_non_numeric_values() {
     # shellcheck disable=SC1090
@@ -1330,6 +1356,7 @@ main() {
     test_install_preserves_real_registry_entries
     test_dependency_install_preview_exists
     test_state_and_shell_split_helpers
+    test_quoted_home_paths_from_saved_defaults_expand
     test_web_round_trip_for_quoted_values
     test_cuda_cc_parsing_rejects_non_numeric_values
     test_startup_log_classifier_emits_actionable_categories
