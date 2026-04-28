@@ -18,6 +18,11 @@ __pycache__/
 state/
 runtime/
 
+# Context Mode MCP generated artifacts
+integrations/context-mode-mcp/node_modules/
+integrations/context-mode-mcp/dist/
+integrations/context-mode-mcp/dashboard/dist/
+
 # Local handoff artifacts
 ._*
 AURORA_HANDOFF.md

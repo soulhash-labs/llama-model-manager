@@ -356,3 +356,19 @@ export const ToolRegistry = {
   ctx_purge: "ctx_purge",
   ctx_dashboard_open: "ctx_dashboard_open",
 } as const;
+
+export type ToolError = z.infer<typeof ToolError>;
+export type Snippet = z.infer<typeof Snippet>;
+export type IndexRef = z.infer<typeof IndexRef>;
+export type SandboxMeta = z.infer<typeof SandboxMeta>;
+export type CtxExecuteRequest = z.infer<typeof CtxExecuteRequest>;
+export type CtxExecuteFileRequest = z.infer<typeof CtxExecuteFileRequest>;
+export type CtxBatchRequest = z.infer<typeof CtxBatchRequest>;
+export type CtxIndexRequest = z.infer<typeof CtxIndexRequest>;
+export type CtxSearchRequest = z.infer<typeof CtxSearchRequest>;
+export type CtxFetchIndexRequest = z.infer<typeof CtxFetchIndexRequest>;
+export type CtxStatsRequest = z.infer<typeof CtxStatsRequest>;
+export type CtxDoctorRequest = z.infer<typeof CtxDoctorRequest>;
+export type CtxUpgradeRequest = z.infer<typeof CtxUpgradeRequest>;
+export type CtxPurgeRequest = z.infer<typeof CtxPurgeRequest>;
+export type CtxDashboardOpenRequest = z.infer<typeof CtxDashboardOpenRequest>;

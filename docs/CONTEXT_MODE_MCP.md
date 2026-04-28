@@ -1,7 +1,7 @@
 # Context-Mode MCP (ACE Context Saturation Defense)
 
 ## Purpose
-Context-Mode MCP is an optional integration under `integrations/context-mode-mcp` that reduces MCP context blowups by sandboxing tool execution, indexing large outputs, and returning compact snippets + IDs instead of raw payloads.
+Context-Mode MCP is an optional integration under `integrations/context-mode-mcp` that reduces MCP context blowups by running tool execution in temporary work directories with allowlist/denylist policy checks, indexing large outputs, and returning compact snippets + IDs instead of raw payloads.
 
 ## Layout
 - `integrations/context-mode-mcp/package.json`

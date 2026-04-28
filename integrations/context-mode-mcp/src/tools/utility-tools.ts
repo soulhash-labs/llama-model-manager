@@ -136,7 +136,7 @@ export async function handleBatchTool(params: {
         ok: false,
         stdout: "",
         snippets: [] as Array<{ chunk_id: string; title: string; snippet: string; score?: number }> ,
-        error: { code: "DENIED", message: commandCheck.reason || "command denied", details: { command } },
+        error: toolError("DENIED", commandCheck.reason || "command denied", { command }),
       };
       outputItems.push(denied);
       rawBytes += requestBytesFromArgs(command);

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -26,7 +27,7 @@ import { startLifecycleGuard } from "./utils/lifecycle";
 
 const STARTED_AT = Date.now();
 
-function withRuntimeSchema() {
+function withRuntimeSchema(_schema?: unknown) {
   return {
     type: "object",
   };
@@ -35,12 +36,12 @@ function withRuntimeSchema() {
 const TOOL_MANIFEST = [
   {
     name: "ctx_execute",
-    description: "Execute code in a sandboxed temp directory and apply auto-indexing policy when output is large.",
+    description: "Execute code in a temporary work directory with allowlist/denylist checks and auto-index large output.",
     inputSchema: withRuntimeSchema(CtxExecuteRequest),
   },
   {
     name: "ctx_execute_file",
-    description: "Execute an existing source file in a sandboxed temp directory and apply output policy.",
+    description: "Copy and execute an existing source file in a temporary work directory with policy checks.",
     inputSchema: withRuntimeSchema(CtxExecuteFileRequest),
   },
   {

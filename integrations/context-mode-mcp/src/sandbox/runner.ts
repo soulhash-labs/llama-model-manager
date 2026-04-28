@@ -74,11 +74,10 @@ function buildCommand(input: ExecutionInput, sandboxDir: string): CommandPlan {
   if (input.filePath) {
     const base = parse(input.filePath).base || `payload-${randomBytes(4).toString("hex")}`;
     const copied = join(sandboxDir, base);
-    copyFileSync(input.filePath, copied);
-
-    if (!isPathAllowed(copied, input.security).allowed) {
+    if (!isPathAllowed(input.filePath, input.security).allowed) {
       throw { code: "DENIED", message: `path denied: ${input.filePath}` } as ToolErrorLike;
     }
+    copyFileSync(input.filePath, copied);
 
     chmodSync(copied, 0o700);
 
@@ -166,7 +165,7 @@ export async function runInSandbox(input: ExecutionInput): Promise<{ output: Exe
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
       shell: false,
-    }) as ChildProcessWithoutNullStreams;
+    }) as unknown as ChildProcessWithoutNullStreams;
 
     const exitPromise = new Promise<number | null>((resolve) => {
       child.once("exit", (code) => resolve(typeof code === "number" ? code : null));
