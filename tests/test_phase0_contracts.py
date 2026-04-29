@@ -5,8 +5,10 @@ import importlib.util
 import hashlib
 import json
 import os
+import sys
 import threading
 import tempfile
+import types
 import unittest
 import time
 import urllib.request
@@ -597,6 +599,35 @@ class Phase0ContractTests(unittest.TestCase):
             routing = telemetry["routing"]
             for key in ("attempts_by_target", "fallback_reason_counts", "total_attempts", "recent_attempts"):
                 self.assertIn(key, routing)
+
+    def test_glyphos_telemetry_prefers_bundled_package_over_stale_loaded_module(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self.make_manager(tmpdir)
+            fake_root = Path(tmpdir) / "stale"
+            fake_package = fake_root / "glyphos_ai"
+            fake_compute = fake_package / "ai_compute"
+            fake_compute.mkdir(parents=True)
+
+            stale_package = types.ModuleType("glyphos_ai")
+            stale_package.__path__ = [str(fake_package)]  # type: ignore[attr-defined]
+            stale_compute = types.ModuleType("glyphos_ai.ai_compute")
+            stale_compute.__path__ = [str(fake_compute)]  # type: ignore[attr-defined]
+            old_modules = {
+                name: sys.modules.get(name)
+                for name in ("glyphos_ai", "glyphos_ai.ai_compute")
+            }
+            sys.modules["glyphos_ai"] = stale_package
+            sys.modules["glyphos_ai.ai_compute"] = stale_compute
+            self.addCleanup(lambda: [
+                sys.modules.pop(name, None) if module is None else sys.modules.__setitem__(name, module)
+                for name, module in old_modules.items()
+            ])
+
+            telemetry = manager.glyphos_telemetry_snapshot()
+
+            self.assertTrue(telemetry["available"])
+            self.assertTrue(telemetry["installed"])
+            self.assertEqual(telemetry["source"], "bundled")
 
     def test_state_falls_back_when_remote_items_shape_is_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

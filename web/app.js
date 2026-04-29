@@ -625,11 +625,12 @@ function deriveContextGlyphosPipeline(data) {
   const defaults = data.defaults || {};
   const enabled = isTruthySetting(defaults.LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE) || contextGlyphosLocallyActivated();
   const glyphosReady = Boolean(data.glyphos_config_exists);
-  const glyphosIntegrationReady = Boolean((data.glyphos_telemetry || {}).available);
+  const glyphosTelemetry = data.glyphos_telemetry || {};
+  const glyphosIntegrationReady = Boolean(glyphosTelemetry.available);
   const blockers = [];
   if (!enabled) blockers.push("activate feature");
   if (!glyphosReady) blockers.push("GlyphOS config missing");
-  if (!glyphosIntegrationReady) blockers.push("GlyphOS integration unavailable");
+  if (!glyphosIntegrationReady) blockers.push(glyphosTelemetry.guidance || "GlyphOS integration unavailable");
   const ready = enabled && glyphosReady && glyphosIntegrationReady;
 
   return {

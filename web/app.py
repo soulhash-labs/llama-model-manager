@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import ipaddress
 import hashlib
 import json
@@ -2591,9 +2592,9 @@ class Manager:
             "enabled": enabled,
             "ready": ready,
             "status": "ready" if ready else ("activation_pending" if enabled else "off"),
-            "label": "Ready" if ready else ("Activate feature" if enabled else "Off"),
+            "label": "Enabled" if ready else ("Blocked" if enabled else "Off"),
             "blockers": blockers,
-            "benefit": "retrieved context + glyph-routed local inference",
+            "benefit": "Feature setting for Context MCP plus GlyphOS local routing.",
         }
 
     def glyphos_telemetry_snapshot(self, *, limit: int = 10) -> dict[str, Any]:
@@ -2622,9 +2623,18 @@ class Manager:
 
         last_error: Exception | None = None
         for prepend in candidates:
+            saved_modules: dict[str, Any] = {}
             try:
                 if prepend:
                     sys.path.insert(0, prepend)
+                    importlib.invalidate_caches()
+                    saved_modules = {
+                        name: module
+                        for name, module in sys.modules.items()
+                        if name == "glyphos_ai" or name.startswith("glyphos_ai.")
+                    }
+                    for name in list(saved_modules):
+                        sys.modules.pop(name, None)
                 from glyphos_ai.ai_compute.router import routing_telemetry_snapshot  # type: ignore
                 routing = routing_telemetry_snapshot(limit=int(limit))
                 if not isinstance(routing, dict):
@@ -2642,6 +2652,10 @@ class Manager:
                 return snapshot
             except Exception as exc:
                 last_error = exc
+                if prepend and saved_modules:
+                    for name in [key for key in list(sys.modules) if key == "glyphos_ai" or key.startswith("glyphos_ai.")]:
+                        sys.modules.pop(name, None)
+                    sys.modules.update(saved_modules)
             finally:
                 if prepend:
                     try:
