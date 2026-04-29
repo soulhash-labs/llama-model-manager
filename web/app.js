@@ -624,15 +624,13 @@ function deriveContextGlyphosPipeline(data) {
 
   const defaults = data.defaults || {};
   const enabled = isTruthySetting(defaults.LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE) || contextGlyphosLocallyActivated();
-  const hasActiveModel = Boolean((data.current || {}).model || data.glyphos_model);
   const glyphosReady = Boolean(data.glyphos_config_exists);
   const glyphosIntegrationReady = Boolean((data.glyphos_telemetry || {}).available);
   const blockers = [];
   if (!enabled) blockers.push("activate feature");
-  if (!hasActiveModel) blockers.push("no active model");
   if (!glyphosReady) blockers.push("GlyphOS config missing");
   if (!glyphosIntegrationReady) blockers.push("GlyphOS integration unavailable");
-  const ready = enabled && hasActiveModel && glyphosReady && glyphosIntegrationReady;
+  const ready = enabled && glyphosReady && glyphosIntegrationReady;
 
   return {
     enabled,
@@ -1015,6 +1013,9 @@ function renderGlyphosTelemetry(glyphosTelemetry, data = {}) {
 
   const telemetry = glyphosTelemetry && typeof glyphosTelemetry === "object" ? glyphosTelemetry : {};
   const available = Boolean(telemetry.available);
+  const installed = Boolean(telemetry.installed);
+  const guidance = String(telemetry.guidance || "").trim();
+  const importError = String(telemetry.error || "").trim();
   const routing = telemetry.routing && typeof telemetry.routing === "object" ? telemetry.routing : {};
   const total = Number(routing.total_attempts || 0);
   const attemptsByTarget = routing.attempts_by_target && typeof routing.attempts_by_target === "object" ? routing.attempts_by_target : {};
@@ -1022,21 +1023,30 @@ function renderGlyphosTelemetry(glyphosTelemetry, data = {}) {
   const recent = Array.isArray(routing.recent_attempts) ? routing.recent_attempts.filter((item) => item && typeof item === "object") : [];
 
   if (!available) {
-    if (badge) badge.textContent = "Unavailable";
-    if (statusNode) statusNode.textContent = "GlyphOS integration unavailable";
-    card?.classList.remove("is-ready", "is-warn");
-    card?.classList.add("is-off");
+    if (badge) badge.textContent = installed ? "Refresh Needed" : "Unavailable";
+    if (statusNode) statusNode.textContent = installed
+      ? "GlyphOS package files are present, but the dashboard cannot import them yet."
+      : "GlyphOS integration files are missing.";
+    card?.classList.remove("is-ready", "is-warn", "is-off");
+    card?.classList.add(installed ? "is-warn" : "is-off");
     badge?.classList.remove("integration-badge-ready", "integration-badge-warn");
-    badge?.classList.add("integration-badge-muted");
-    summaryNode.textContent = "Last route: never observed.";
+    badge?.classList.toggle("integration-badge-warn", installed);
+    badge?.classList.toggle("integration-badge-muted", !installed);
+    summaryNode.textContent = guidance || "Run the latest installer, then restart llama-model-web.";
     setNodeHidden(summaryNode, false);
-    reasonsNode.innerHTML = "";
+    reasonsNode.innerHTML = importError
+      ? `<span class="chip chip-danger" title="${escapeHtml(importError)}">${escapeHtml(importError.slice(0, 96))}</span>`
+      : "";
     recentNode.innerHTML = "";
     return;
   }
 
-  if (badge) badge.textContent = "Configured";
-  if (statusNode) statusNode.textContent = total > 0 ? "Configured for local routing" : "Configured for local routing. No traffic observed yet.";
+  if (badge) badge.textContent = data.glyphos_config_exists ? "Configured" : "Installed";
+  if (statusNode) {
+    statusNode.textContent = data.glyphos_config_exists
+      ? (total > 0 ? "Configured for local routing" : "Configured for local routing. No traffic observed yet.")
+      : "GlyphOS integration installed. Sync GlyphOS to write local routing config.";
+  }
   card?.classList.add("is-ready");
   card?.classList.remove("is-warn", "is-off");
   badge?.classList.add("integration-badge-ready");

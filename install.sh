@@ -37,6 +37,13 @@ compact_home_path() {
     fi
 }
 
+clean_python_cache() {
+    local target="$1"
+    [[ -d "$target" ]] || return 0
+    find "$target" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
+    find "$target" -type f -name '*.pyc' -delete 2>/dev/null || true
+}
+
 mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$APP_DIR" "$APP_SHARE_DIR"
 
 install -m 0755 "$ROOT_DIR/bin/llama-model" "$BIN_DIR/llama-model"
@@ -50,6 +57,8 @@ cp -a "$ROOT_DIR/scripts" "$APP_SHARE_DIR/scripts"
 if [[ -d "$ROOT_DIR/integrations" ]]; then
     rm -rf "$APP_SHARE_DIR/integrations"
     cp -a "$ROOT_DIR/integrations" "$APP_SHARE_DIR/integrations"
+    clean_python_cache "$APP_SHARE_DIR/integrations"
+    printf 'refreshed bundled integrations under %s/integrations\n' "$(compact_home_path "$APP_SHARE_DIR")"
 fi
 if [[ -d "$ROOT_DIR/runtime" ]]; then
     rm -rf "$APP_SHARE_DIR/runtime"

@@ -3130,11 +3130,15 @@ show_doctor() {
     local installed_web_launcher="no"
     local installed_web_app="no"
     local bundled_glyphos="no"
+    local bundled_glyphos_importable="no"
+    local bundled_glyphos_import_error=""
     local context_mode_mcp="no"
     local install_ok="yes"
     local install_guidance=""
     local dashboard_api_reachable="no"
     local dashboard_api_glyphos_telemetry="unknown"
+    local dashboard_api_glyphos_install_detail="unknown"
+    local dashboard_api_glyphos_error=""
     local dashboard_api_context_glyphos_status="unknown"
     local dashboard_api_glyphos_config="unknown"
     local dashboard_api_guidance=""
@@ -3195,8 +3199,23 @@ show_doctor() {
     [[ -x "$HOME/.local/bin/llama-model-web" ]] && installed_web_launcher="yes"
     [[ -f "$INSTALLED_APP_ROOT/web/app.py" ]] && installed_web_app="yes"
     [[ -d "$INSTALLED_APP_ROOT/integrations/public-glyphos-ai-compute/glyphos_ai" ]] && bundled_glyphos="yes"
+    if [[ "$bundled_glyphos" == "yes" ]]; then
+        bundled_glyphos_import_error="$(
+            GLYPHOS_ROOT="$INSTALLED_APP_ROOT/integrations/public-glyphos-ai-compute" python3 - <<'PY' 2>&1
+import os
+import sys
+
+sys.path.insert(0, os.environ["GLYPHOS_ROOT"])
+from glyphos_ai.ai_compute.router import routing_telemetry_snapshot
+
+snapshot = routing_telemetry_snapshot(limit=1)
+if not isinstance(snapshot, dict):
+    raise TypeError("routing_telemetry_snapshot did not return a dict")
+PY
+        )" && bundled_glyphos_importable="yes" || bundled_glyphos_importable="no"
+    fi
     [[ -f "$INSTALLED_APP_ROOT/integrations/context-mode-mcp/package.json" ]] && context_mode_mcp="yes"
-    if [[ "$installed_web_launcher" != "yes" || "$installed_web_app" != "yes" || "$bundled_glyphos" != "yes" || "$context_mode_mcp" != "yes" ]]; then
+    if [[ "$installed_web_launcher" != "yes" || "$installed_web_app" != "yes" || "$bundled_glyphos" != "yes" || "$bundled_glyphos_importable" != "yes" || "$context_mode_mcp" != "yes" ]]; then
         install_ok="no"
         install_guidance="Run ./install.sh from the current repo checkout, or rerun the latest bootstrap installer, then restart llama-model-web."
     fi
@@ -3205,6 +3224,8 @@ show_doctor() {
         while IFS='=' read -r key value; do
             case "$key" in
                 glyphos_telemetry) dashboard_api_glyphos_telemetry="$value" ;;
+                glyphos_install_detail) dashboard_api_glyphos_install_detail="$value" ;;
+                glyphos_error) dashboard_api_glyphos_error="$value" ;;
                 context_status) dashboard_api_context_glyphos_status="$value" ;;
                 glyphos_config) dashboard_api_glyphos_config="$value" ;;
             esac
@@ -3220,11 +3241,15 @@ except Exception:
 glyphos = data.get("glyphos_telemetry") if isinstance(data.get("glyphos_telemetry"), dict) else {}
 context = data.get("context_glyphos_pipeline") if isinstance(data.get("context_glyphos_pipeline"), dict) else {}
 print("glyphos_telemetry=" + ("yes" if glyphos.get("available") else "no"))
+print("glyphos_install_detail=" + ("yes" if "installed" in glyphos else "unknown"))
+print("glyphos_error=" + str(glyphos.get("error") or ""))
 print("context_status=" + str(context.get("status") or "missing"))
 print("glyphos_config=" + ("yes" if data.get("glyphos_config_exists") else "no"))
 ')
         if [[ "$dashboard_api_glyphos_config" == "yes" && "$dashboard_api_glyphos_telemetry" != "yes" && "$bundled_glyphos" == "yes" ]]; then
             dashboard_api_guidance="Live dashboard cannot see bundled GlyphOS even though install assets exist; restart llama-model-web and hard refresh the browser."
+        elif [[ "$dashboard_api_glyphos_install_detail" == "unknown" && "$bundled_glyphos_importable" == "yes" ]]; then
+            dashboard_api_guidance="Live dashboard is running older backend code; restart llama-model-web and hard refresh the browser so the refreshed package state appears."
         fi
     fi
 
@@ -3242,11 +3267,15 @@ print("glyphos_config=" + ("yes" if data.get("glyphos_config_exists") else "no")
     printf 'installed_web_launcher: %s\n' "$installed_web_launcher"
     printf 'installed_web_app: %s\n' "$installed_web_app"
     printf 'bundled_glyphos_integration: %s\n' "$bundled_glyphos"
+    printf 'bundled_glyphos_importable: %s\n' "$bundled_glyphos_importable"
+    printf 'bundled_glyphos_import_error: %s\n' "$bundled_glyphos_import_error"
     printf 'context_mode_mcp_installed: %s\n' "$context_mode_mcp"
     printf 'install_ok: %s\n' "$install_ok"
     printf 'install_guidance: %s\n' "$install_guidance"
     printf 'dashboard_api_reachable: %s\n' "$dashboard_api_reachable"
     printf 'dashboard_api_glyphos_telemetry: %s\n' "$dashboard_api_glyphos_telemetry"
+    printf 'dashboard_api_glyphos_install_detail: %s\n' "$dashboard_api_glyphos_install_detail"
+    printf 'dashboard_api_glyphos_error: %s\n' "$dashboard_api_glyphos_error"
     printf 'dashboard_api_context_glyphos_status: %s\n' "$dashboard_api_context_glyphos_status"
     printf 'dashboard_api_glyphos_config: %s\n' "$dashboard_api_glyphos_config"
     printf 'dashboard_api_guidance: %s\n' "$dashboard_api_guidance"
@@ -3689,6 +3718,28 @@ upstream_api_base() {
     printf 'http://%s:%s/v1\n' "$LLAMA_SERVER_HOST" "$LLAMA_SERVER_PORT"
 }
 
+api_current_model_id() {
+    local api_base
+
+    api_base="$(upstream_api_base)"
+    curl -fsS --max-time 2 "${api_base%/}/models" 2>/dev/null | python3 -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+
+items = payload.get("data", []) if isinstance(payload, dict) else []
+for item in items:
+    if isinstance(item, dict) and item.get("id"):
+        print(str(item["id"]))
+        raise SystemExit(0)
+raise SystemExit(1)
+'
+}
+
 resolve_sync_target() {
     local spec="${1:-}"
     local resolved=""
@@ -3710,11 +3761,17 @@ resolve_sync_target() {
         pid="$(find_pid)"
         if [[ -n "$pid" ]]; then
             model_path="$(cmd_arg_from_pid "$pid" -m || true)"
-            [[ -n "$model_path" ]] || die "running llama-server on port $LLAMA_SERVER_PORT did not report a model path"
-            alias="$(lookup_alias_for_path "$model_path" || true)"
-            [[ -n "$alias" ]] || alias="custom"
+            if [[ -n "$model_path" ]]; then
+                alias="$(lookup_alias_for_path "$model_path" || true)"
+                [[ -n "$alias" ]] || alias="custom"
+                source="running-server"
+            else
+                model_path="$(api_current_model_id || true)"
+                [[ -n "$model_path" ]] || die "running llama-server on port $LLAMA_SERVER_PORT did not report a model path or OpenAI model id"
+                alias="custom"
+                source="running-api"
+            fi
             context="$(cmd_arg_from_pid "$pid" -c || true)"
-            source="running-server"
         elif read_state_file && [[ -n "${CURRENT_MODEL:-}" ]]; then
             model_path="$CURRENT_MODEL"
             alias="${CURRENT_ALIAS:-custom}"
@@ -3725,11 +3782,15 @@ resolve_sync_target() {
         fi
     fi
 
-    [[ -f "$model_path" ]] || die "model not found: $model_path"
+    [[ "$source" == "running-api" || -f "$model_path" ]] || die "model not found: $model_path"
 
     SYNC_TARGET_SOURCE="$source"
     SYNC_TARGET_ALIAS="$alias"
-    SYNC_TARGET_MODEL_PATH="$(canonicalize_path "$model_path")"
+    if [[ "$source" == "running-api" ]]; then
+        SYNC_TARGET_MODEL_PATH="$model_path"
+    else
+        SYNC_TARGET_MODEL_PATH="$(canonicalize_path "$model_path")"
+    fi
     SYNC_TARGET_MODEL_NAME="$(basename "$SYNC_TARGET_MODEL_PATH")"
     if [[ -n "$alias" && "$alias" != "custom" ]]; then
         SYNC_TARGET_MODEL_ID="$alias"

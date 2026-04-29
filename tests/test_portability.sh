@@ -210,6 +210,8 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$install_script" "llama-model sync-openclaw"
     assert_contains "$install_script" "llama-model sync-claude"
     assert_contains "$install_script" "llama-model sync-glyphos"
+    assert_contains "$install_script" "refreshed bundled integrations"
+    assert_contains "$install_script" "clean_python_cache"
     assert_contains "$readme" "integrations/public-glyphos-ai-compute/"
     assert_contains "$help" "bundled public copy lives under integrations/public-glyphos-ai-compute/"
     assert_contains "$install_script" "Bundled public GlyphOS AI Compute package"
@@ -824,6 +826,29 @@ test_doctor_reports_install_health() {
     assert_contains "$output" "installed_web_launcher: yes"
     assert_contains "$output" "installed_web_app: yes"
     assert_contains "$output" "bundled_glyphos_integration: yes"
+    assert_contains "$output" "bundled_glyphos_importable: no"
+    assert_contains "$output" "context_mode_mcp_installed: yes"
+    assert_contains "$output" "install_ok: no"
+    assert_contains "$output" "install_guidance: Run ./install.sh"
+
+    mkdir -p "$tmp/home/.local/share/llama-model-manager/integrations/public-glyphos-ai-compute/glyphos_ai/ai_compute"
+    : >"$tmp/home/.local/share/llama-model-manager/integrations/public-glyphos-ai-compute/glyphos_ai/__init__.py"
+    : >"$tmp/home/.local/share/llama-model-manager/integrations/public-glyphos-ai-compute/glyphos_ai/ai_compute/__init__.py"
+    cat >"$tmp/home/.local/share/llama-model-manager/integrations/public-glyphos-ai-compute/glyphos_ai/ai_compute/router.py" <<'PY'
+def routing_telemetry_snapshot(limit=1):
+    return {
+        "attempts_by_target": {},
+        "fallback_reason_counts": {},
+        "total_attempts": 0,
+        "recent_attempts": [],
+    }
+PY
+
+    output="$(LLAMA_MODEL_WEB_PORT=9 run_doctor "$tmp")"
+    assert_contains "$output" "installed_web_launcher: yes"
+    assert_contains "$output" "installed_web_app: yes"
+    assert_contains "$output" "bundled_glyphos_integration: yes"
+    assert_contains "$output" "bundled_glyphos_importable: yes"
     assert_contains "$output" "context_mode_mcp_installed: yes"
     assert_contains "$output" "install_ok: yes"
     assert_contains "$output" "dashboard_api_reachable: no"
@@ -844,7 +869,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         payload = json.dumps({
             "glyphos_config_exists": True,
-            "glyphos_telemetry": {"available": False, "routing": {}},
+            "glyphos_telemetry": {"available": False, "error": "missing router", "routing": {}},
             "context_glyphos_pipeline": {"status": "activation_pending"},
         }).encode("utf-8")
         self.send_response(200)
@@ -873,6 +898,8 @@ PY
 
     assert_contains "$output" "dashboard_api_reachable: yes"
     assert_contains "$output" "dashboard_api_glyphos_telemetry: no"
+    assert_contains "$output" "dashboard_api_glyphos_install_detail: unknown"
+    assert_contains "$output" "dashboard_api_glyphos_error: missing router"
     assert_contains "$output" "dashboard_api_context_glyphos_status: activation_pending"
     assert_contains "$output" "dashboard_api_glyphos_config: yes"
     assert_contains "$output" "dashboard_api_guidance: Live dashboard cannot see bundled GlyphOS"
@@ -1239,10 +1266,21 @@ EOF
 }
 
 test_bundled_glyphos_public_package_exists() {
+    local api_client
+
     [[ -f "$ROOT_DIR/integrations/public-glyphos-ai-compute/README.md" ]] || fail "expected bundled public GlyphOS README"
     [[ -f "$ROOT_DIR/integrations/public-glyphos-ai-compute/glyphos_ai/ai_compute/api_client.py" ]] || fail "expected bundled GlyphOS api_client"
     [[ -f "$ROOT_DIR/integrations/public-glyphos-ai-compute/glyphos_ai/glyph/encoder.py" ]] || fail "expected bundled GlyphOS encoder"
     [[ ! -e "$ROOT_DIR/integrations/public-glyphos-ai-compute/q45_engine" ]] || fail "bundled public GlyphOS package must not include q45_engine"
+
+    api_client="$(cat "$ROOT_DIR/integrations/public-glyphos-ai-compute/glyphos_ai/ai_compute/api_client.py")"
+    assert_not_contains "$api_client" "import requests"
+    PYTHONPATH="$ROOT_DIR/integrations/public-glyphos-ai-compute" python3 - <<'PY'
+from glyphos_ai.ai_compute.router import routing_telemetry_snapshot
+
+snapshot = routing_telemetry_snapshot(limit=1)
+assert isinstance(snapshot, dict)
+PY
 }
 
 test_integration_sync_cli_glyphos_entrypoint() {
@@ -1292,6 +1330,67 @@ EOF
     assert_contains "$config" 'model: Qwen3.5-9B-Q8_0.gguf'
     assert_contains "$config" 'timeout: 300'
     assert_contains "$config" 'openai:'
+}
+
+test_sync_glyphos_uses_openai_model_id_when_process_hides_model_path() {
+    local tmp
+    local api_pid
+    local fake_pid
+    local output
+    local config
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    cat >"$tmp/llama-server" <<'EOF'
+#!/usr/bin/env bash
+sleep 60
+EOF
+    chmod +x "$tmp/llama-server"
+
+    python3 - <<'PY' &
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != "/v1/models":
+            self.send_response(404)
+            self.end_headers()
+            return
+        payload = json.dumps({"data": [{"id": "external-model-from-api.gguf"}]}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *_args):
+        return
+
+HTTPServer(("127.0.0.1", 19081), Handler).serve_forever()
+PY
+    api_pid=$!
+    "$tmp/llama-server" --port 19081 &
+    fake_pid=$!
+
+    for _ in $(seq 1 50); do
+        if curl -fsS "http://127.0.0.1:19081/v1/models" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.05
+    done
+
+    output="$(run_cli "$tmp" sync-glyphos)"
+    kill "$fake_pid" "$api_pid" 2>/dev/null || true
+    wait "$fake_pid" 2>/dev/null || true
+    wait "$api_pid" 2>/dev/null || true
+
+    assert_contains "$output" "status: synced"
+    assert_contains "$output" "source: running-api"
+    assert_contains "$output" "glyphos_model: external-model-from-api.gguf"
+
+    config="$(cat "$tmp/home/.glyphos/config.yaml")"
+    assert_contains "$config" 'model: external-model-from-api.gguf'
 }
 
 test_sync_claude_updates_settings() {
@@ -1476,6 +1575,7 @@ main() {
     test_download_lifecycle_cli_fallbacks
     test_sync_openclaw_updates_profile_config
     test_sync_glyphos_updates_config
+    test_sync_glyphos_uses_openai_model_id_when_process_hides_model_path
     test_sync_claude_updates_settings
     test_claude_gateway_detects_existing_listener
     test_claude_gateway_timeout_default_visible

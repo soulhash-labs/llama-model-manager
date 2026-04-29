@@ -5,11 +5,47 @@ API clients for local and external AI backends.
 from __future__ import annotations
 
 import os
+import json
 import warnings
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib import request as urlrequest
+from urllib.error import URLError, HTTPError
 
-import requests
+
+class _HttpJsonResponse:
+    def __init__(self, status_code: int, payload: dict[str, Any]):
+        self.status_code = status_code
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self) -> dict[str, Any]:
+        return self._payload
+
+
+def _http_json(method: str, url: str, *, payload: Optional[dict[str, Any]] = None, headers: Optional[dict[str, str]] = None, timeout: int = 30) -> _HttpJsonResponse:
+    data = None
+    request_headers = {"Content-Type": "application/json", **(headers or {})}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+    req = urlrequest.Request(url, data=data, headers=request_headers, method=method)
+    try:
+        with urlrequest.urlopen(req, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+            parsed = json.loads(raw) if raw else {}
+            return _HttpJsonResponse(int(response.status), parsed if isinstance(parsed, dict) else {})
+    except HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except Exception:
+            parsed = {"error": raw}
+        return _HttpJsonResponse(int(exc.code), parsed if isinstance(parsed, dict) else {"error": raw})
+    except URLError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def _env_first(*names: str, default: str = "") -> str:
@@ -131,7 +167,7 @@ class LlamaCppClient(BaseChatClient):
 
     def _check_availability(self) -> None:
         try:
-            response = requests.get(self._models_url(), timeout=2)
+            response = _http_json("GET", self._models_url(), timeout=2)
             self._available = response.status_code == 200
         except Exception:
             self._available = False
@@ -143,7 +179,7 @@ class LlamaCppClient(BaseChatClient):
         if self.model:
             return self.model
         try:
-            response = requests.get(self._models_url(), timeout=5)
+            response = _http_json("GET", self._models_url(), timeout=5)
             response.raise_for_status()
             payload = response.json()
             models = payload.get("data", []) if isinstance(payload, dict) else []
@@ -158,9 +194,10 @@ class LlamaCppClient(BaseChatClient):
         if not self._available:
             return f"[llama.cpp offline] Processing: {prompt[:50]}..."
         try:
-            response = requests.post(
+            response = _http_json(
+                "POST",
                 self._chat_url(),
-                json={
+                payload={
                     "model": kwargs.get("model", self._resolve_model()),
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": kwargs.get("temperature", 0.7),
@@ -239,13 +276,14 @@ class XAIClient(BaseChatClient):
         if not self._available:
             return f"[xAI not configured] Processing: {prompt[:50]}..."
         try:
-            response = requests.post(
+            response = _http_json(
+                "POST",
                 "https://api.x.ai/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                 },
-                json={
+                payload={
                     "model": kwargs.get("model", self.model),
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": kwargs.get("max_tokens", self.max_tokens),

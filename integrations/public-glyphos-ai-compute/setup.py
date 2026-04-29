@@ -14,7 +14,7 @@ setup(
     packages=find_packages(),
     package_data={"glyphos_ai": ["config/*.yaml"]},
     include_package_data=True,
-    install_requires=["requests>=2.28.0"],
+    install_requires=[],
     python_requires=">=3.8",
     entry_points={
         "console_scripts": [

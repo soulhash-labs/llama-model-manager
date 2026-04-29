@@ -2574,20 +2574,17 @@ class Manager:
         glyphos_telemetry: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         enabled = str(defaults.get("LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE", "")).strip().lower() in {"1", "true", "yes", "on"}
-        has_active_model = bool(str(current.get("model", "")).strip())
         glyphos_ready = self.glyphos_config_file.exists()
         glyphos_integration_ready = bool((glyphos_telemetry or {}).get("available"))
         context_ready = bool(context_mode_mcp.get("available"))
-        ready = enabled and glyphos_ready and glyphos_integration_ready and context_ready and has_active_model
+        ready = enabled and glyphos_ready and glyphos_integration_ready and context_ready
         blockers: list[str] = []
         if not enabled:
             blockers.append("activate feature")
-        if not has_active_model:
-            blockers.append("no active model")
         if not glyphos_ready:
             blockers.append("GlyphOS config missing")
         if not glyphos_integration_ready:
-            blockers.append("GlyphOS integration unavailable")
+            blockers.append(str((glyphos_telemetry or {}).get("guidance") or "GlyphOS integration unavailable"))
         if not context_ready:
             blockers.append("Context Mode MCP package missing")
         return {
@@ -2606,12 +2603,18 @@ class Manager:
             "total_attempts": 0,
             "recent_attempts": [],
         }
-        snapshot: dict[str, Any] = {"available": False, "routing": baseline_routing}
+        integration_root = (self.app_root.parent / "integrations" / "public-glyphos-ai-compute").resolve()
+        snapshot: dict[str, Any] = {
+            "available": False,
+            "installed": integration_root.is_dir() and (integration_root / "glyphos_ai").is_dir(),
+            "source": "bundled" if integration_root.is_dir() else "python",
+            "integration_root": str(integration_root),
+            "routing": baseline_routing,
+        }
         if self.demo:
             return snapshot
 
         # Prefer installed package import; fall back to repo-local integration path.
-        integration_root = (self.app_root.parent / "integrations" / "public-glyphos-ai-compute").resolve()
         candidates: list[str] = []
         if str(integration_root) not in sys.path and integration_root.is_dir():
             candidates.append(str(integration_root))
@@ -2628,7 +2631,14 @@ class Manager:
                     routing = dict(baseline_routing)
                 else:
                     routing = {**baseline_routing, **routing}
-                snapshot = {"available": True, "routing": routing}
+                snapshot = {
+                    **snapshot,
+                    "available": True,
+                    "source": "bundled" if prepend else "python",
+                    "routing": routing,
+                    "error": "",
+                    "guidance": "",
+                }
                 return snapshot
             except Exception as exc:
                 last_error = exc
@@ -2641,6 +2651,11 @@ class Manager:
 
         if last_error is not None:
             snapshot["error"] = str(last_error)
+            snapshot["guidance"] = (
+                "Bundled GlyphOS files are present but not importable. Rerun the installer to refresh integrations, then restart llama-model-web."
+                if snapshot["installed"]
+                else "Bundled GlyphOS files are missing. Rerun the installer to refresh the local package."
+            )
         return snapshot
 
     def sync_opencode(self, preset: str = "balanced") -> dict[str, str]:
