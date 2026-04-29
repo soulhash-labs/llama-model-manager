@@ -133,6 +133,27 @@ class Phase0ContractTests(unittest.TestCase):
                 self.assertEqual(response.status, HTTPStatus.OK)
                 self.assertEqual(response.headers.get("Cache-Control"), "no-store, max-age=0")
 
+    def test_state_includes_dashboard_session_start_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self.make_manager(tmpdir)
+
+            payload = manager.state()
+            started_at = payload["meta"]["dashboard_started_at"]
+
+            self.assertIsInstance(started_at, str)
+            self.assertTrue(started_at)
+            self.assertEqual(started_at, manager.started_at)
+
+    def test_dashboard_markup_separates_glyph_routes_from_control_activity(self) -> None:
+        html = (ROOT_DIR / "web" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("Observed Glyph Routes", html)
+        self.assertIn('id="observed-glyph-feed"', html)
+        self.assertIn('id="glyphos-badge"', html)
+        self.assertIn('id="glyphos-status"', html)
+        self.assertIn('id="toggle-activity-panel"', html)
+        self.assertIn("Control-plane actions only", html)
+
     def test_unknown_post_field_is_rejected_with_error_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = self.make_manager(tmpdir)

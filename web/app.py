@@ -453,6 +453,7 @@ class Manager:
     def __init__(self, app_root: Path, *, demo: bool = False) -> None:
         self.app_root = app_root
         self.demo = demo
+        self.started_at = datetime.now(timezone.utc).isoformat()
         self.home = Path.home()
         self.xdg_config_home = Path(os.environ.get("XDG_CONFIG_HOME", self.home / ".config"))
         self.xdg_state_home = Path(os.environ.get("XDG_STATE_HOME", self.home / ".local" / "state"))
@@ -2726,6 +2727,7 @@ class Manager:
                 "meta": {
                     "home_dir": str(self.home),
                     "dashboard_service_managed": False,
+                    "dashboard_started_at": self.started_at,
                 },
                 "defaults": dict(DEMO_STATE["defaults"]),
                 "current": dict(DEMO_STATE["current"]),
@@ -2778,6 +2780,7 @@ class Manager:
             "meta": {
                 "home_dir": str(self.home),
                 "dashboard_service_managed": os.environ.get("LLAMA_MODEL_WEB_SERVICE") == "1",
+                "dashboard_started_at": self.started_at,
             },
             "defaults": defaults,
             "current": current,

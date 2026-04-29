@@ -191,17 +191,6 @@
           <pre id="logs-output" class="log-box hidden"></pre>
         </section>
 
-        <section class="panel activity-panel">
-          <div class="panel-head panel-head-anchored">
-            <div>
-              <span class="panel-tag">Audit</span>
-              <h2>Recent Activity</h2>
-              <p>Recent API actions, including downloads, mode toggles, and sync operations.</p>
-            </div>
-          </div>
-          <div id="activity-feed" class="activity-feed" aria-live="polite"></div>
-        </section>
-
         <section class="panel">
           <div class="panel-head panel-head-anchored">
             <div>
@@ -698,8 +687,12 @@
                 <button id="claude-gateway-logs" class="button button-small" title="Show recent Claude gateway logs.">Logs</button>
               </div>
             </article>
-            <article class="integration-card">
+            <article id="glyphos-card" class="integration-card pipeline-card">
               <span class="metric-label">GlyphOS AI Compute</span>
+              <div class="integration-chip-row">
+                <span id="glyphos-badge" class="integration-badge integration-badge-muted">Unavailable</span>
+              </div>
+              <code id="glyphos-status">-</code>
               <code id="glyphos-model">-</code>
               <span id="glyphos-path" class="metric-note">-</span>
               <span id="glyphos-telemetry-summary" class="metric-note">-</span>
@@ -724,6 +717,51 @@
             </article>
           </div>
           <pre id="claude-gateway-logs-output" class="log-box hidden"></pre>
+        </section>
+
+        <section class="panel observed-panel">
+          <div class="panel-head">
+            <div>
+              <span class="panel-tag">Observed Traffic</span>
+              <h2>Observed Glyph Routes</h2>
+              <p>Actual GlyphOS-routed traffic observed by this dashboard session. Sync and activation only change configuration.</p>
+            </div>
+          </div>
+          <div class="observed-grid">
+            <article class="observed-card">
+              <span class="metric-label">Last Route</span>
+              <strong id="observed-glyph-last-status">Never observed</strong>
+              <span id="observed-glyph-last-detail" class="metric-note">No glyph-routed traffic has been seen by this dashboard session yet.</span>
+            </article>
+            <article class="observed-card">
+              <span class="metric-label">Observed This Session</span>
+              <strong id="observed-glyph-total">0</strong>
+              <span id="observed-glyph-total-detail" class="metric-note">No glyph route attempts observed in this dashboard session.</span>
+            </article>
+            <article class="observed-card">
+              <span class="metric-label">Recent Targets</span>
+              <strong id="observed-glyph-targets">None yet</strong>
+              <span id="observed-glyph-targets-detail" class="metric-note">Targets will appear here after the first observed glyph route.</span>
+            </article>
+          </div>
+          <div id="observed-glyph-feed" class="telemetry-list observed-feed" aria-live="polite"></div>
+        </section>
+
+        <section class="panel activity-panel is-collapsed">
+          <div class="panel-head panel-head-anchored">
+            <div>
+              <span class="panel-tag">Audit</span>
+              <h2>Recent Activity</h2>
+              <p>Control-plane actions only: downloads, mode toggles, sync calls, and feature activation. This does not prove model inference or glyph-routed traffic.</p>
+              <p id="activity-session-note" class="panel-guidance"></p>
+            </div>
+            <div class="inline-actions">
+              <button id="toggle-activity-panel" class="button" type="button">Show Audit</button>
+            </div>
+          </div>
+          <div id="activity-panel-body">
+            <div id="activity-feed" class="activity-feed" aria-live="polite"></div>
+          </div>
         </section>
       </main>
 

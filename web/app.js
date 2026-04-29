@@ -3,6 +3,7 @@ const state = {
   discovery: [],
   discoveryScanned: false,
   toastId: 0,
+  lastObservedGlyphKey: "",
 };
 
 const STORAGE_KEYS = {
@@ -12,6 +13,7 @@ const STORAGE_KEYS = {
   remoteHideGated: "llama-model-manager.remoteHideGated",
   remoteDestinationRoot: "llama-model-manager.remoteDestinationRoot",
   contextGlyphosActivated: "llama-model-manager.contextGlyphosActivated",
+  activityPanelVisible: "llama-model-manager.activityPanelVisible",
 };
 
 function $(selector) {
@@ -47,6 +49,42 @@ function formatLocalTime(value) {
   const parsed = new Date(text);
   if (!Number.isFinite(parsed.getTime())) return text;
   return parsed.toLocaleString();
+}
+
+function formatRelativeTime(value) {
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(parsed.getTime())) return "";
+  const seconds = Math.max(0, Math.round((Date.now() - parsed.getTime()) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return `${days}d ago`;
+}
+
+function dateFromGlyphAttempt(item) {
+  const time = Number(item?.time || 0);
+  if (Number.isFinite(time) && time > 0) {
+    return new Date(time * 1000);
+  }
+  const text = String(item?.happened_at || item?.created_at || "").trim();
+  if (!text) return null;
+  const parsed = new Date(text);
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
+function isAtOrAfter(value, startValue) {
+  if (!startValue) return true;
+  const itemDate = value instanceof Date ? value : new Date(value);
+  const startDate = new Date(startValue);
+  if (!Number.isFinite(itemDate.getTime()) || !Number.isFinite(startDate.getTime())) return true;
+  return itemDate.getTime() >= startDate.getTime();
+}
+
+function setNodeHidden(node, hidden) {
+  if (node) node.classList.toggle("hidden", Boolean(hidden));
 }
 
 function titleize(value) {
@@ -408,15 +446,17 @@ function renderStatus(data) {
   const current = data.current || {};
   const doctor = data.doctor || {};
   const mode = data.mode || {};
-  const nextMode = mode.configured_mode === "single-client" ? "Switch To Multi Client" : "Switch To Single Client";
+  const effectiveMode = mode.active_mode || mode.configured_mode || "";
+  const nextMode = effectiveMode === "single-client" ? "Switch To Multi Client" : "Switch To Single Client";
 
   renderNotice(data);
   renderHero(data);
   renderDashboardService(data.dashboard_service || {});
   renderOwnershipConflict(doctor);
-  renderOperationActivity(data.operation_activity || {});
-  renderGlyphosTelemetry(data.glyphos_telemetry || {});
-  renderContextGlyphosPipeline(deriveContextGlyphosPipeline(data), deriveContextModeMcp(data));
+  renderOperationActivity(data.operation_activity || {}, data.meta || {});
+  renderGlyphosTelemetry(data.glyphos_telemetry || {}, data);
+  renderObservedGlyphRoutes(data.glyphos_telemetry || {}, data.meta?.dashboard_started_at || "");
+  renderContextGlyphosPipeline(deriveContextGlyphosPipeline(data), deriveContextModeMcp(data), data.glyphos_telemetry || {});
 
   setText("#metric-model", current.alias || "stopped");
   setText("#metric-model-path", current.model || "No model running");
@@ -508,14 +548,15 @@ function renderStatus(data) {
   ]) || "-");
   setText("#glyphos-model", data.glyphos_model || "-");
   setText("#glyphos-path", joinNotes([
-    data.glyphos_config_exists ? "config present" : "config missing",
     displayPath(data.glyphos_config_file || ""),
-    data.glyphos_routing_preference ? `route ${data.glyphos_routing_preference}` : "",
+    data.glyphos_routing_preference || "",
   ]) || "-");
   setText("#toggle-mode", nextMode);
   setTitle(
     "#toggle-mode",
-    mode.configured_mode === "single-client"
+    mode.active_mode && mode.configured_mode && mode.active_mode !== mode.configured_mode
+      ? `Runtime is currently ${modeLabel(mode.active_mode)} but defaults are configured for ${modeLabel(mode.configured_mode)}. The next switch follows the active runtime mode.`
+      : effectiveMode === "single-client"
       ? "Restart the server in multi-client mode so multiple requests can run at once."
       : "Restart the server in single-client mode so one request runs at a time.",
   );
@@ -539,6 +580,31 @@ function setContextGlyphosLocallyActivated() {
   } catch {
     // Backend defaults remain the source of truth if browser storage is unavailable.
   }
+}
+
+function activityPanelVisible() {
+  try {
+    return window.localStorage.getItem(STORAGE_KEYS.activityPanelVisible) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function setActivityPanelVisible(visible) {
+  try {
+    window.localStorage.setItem(STORAGE_KEYS.activityPanelVisible, visible ? "1" : "0");
+  } catch {
+    // Visibility falls back to the default collapsed state if storage is unavailable.
+  }
+}
+
+function renderActivityPanelVisibility(visible = activityPanelVisible()) {
+  const panel = $(".activity-panel");
+  const button = $("#toggle-activity-panel");
+  const body = $("#activity-panel-body");
+  panel?.classList.toggle("is-collapsed", !visible);
+  if (button) button.textContent = visible ? "Hide Audit" : "Show Audit";
+  if (body) body.hidden = !visible;
 }
 
 function deriveContextModeMcp(data) {
@@ -572,42 +638,52 @@ function deriveContextGlyphosPipeline(data) {
     enabled,
     ready,
     status: ready ? "ready" : (enabled ? "activation_pending" : "off"),
-    label: ready ? "Ready" : (enabled ? "Activate feature" : "Off"),
+    label: ready ? "Enabled" : (enabled ? "Blocked" : "Off"),
     blockers,
-    benefit: "retrieved context + glyph-routed local inference",
+    benefit: "Feature setting for Context MCP plus GlyphOS local routing.",
   };
 }
 
-function renderContextGlyphosPipeline(pipeline, contextModeMcp) {
+function renderContextGlyphosPipeline(pipeline, contextModeMcp, glyphosTelemetry = {}) {
   const card = $("#context-glyphos-card");
   const badge = $("#context-glyphos-badge");
   const blockersNode = $("#context-glyphos-blockers");
   if (!card || !badge || !blockersNode) return;
 
   const status = pipeline.status || "off";
+  const enabled = Boolean(pipeline.enabled);
+  const routing = glyphosTelemetry?.routing && typeof glyphosTelemetry.routing === "object" ? glyphosTelemetry.routing : {};
+  const observedAttempts = Number(routing.total_attempts || 0);
   card.classList.toggle("is-ready", status === "ready");
   card.classList.toggle("is-warn", status === "activation_pending");
   card.classList.toggle("is-off", status === "off");
-  badge.textContent = pipeline.label || "Off";
+  badge.textContent = status === "ready" ? "Enabled" : status === "activation_pending" ? "Blocked" : "Off";
   badge.classList.toggle("integration-badge-ready", status === "ready");
   badge.classList.toggle("integration-badge-warn", status === "activation_pending");
   badge.classList.toggle("integration-badge-muted", status === "off");
 
-  setText("#context-glyphos-status", status === "ready" ? "Combined pipeline ready" : status === "activation_pending" ? "Activate feature to finish readiness" : "Combined pipeline off");
+  setText("#context-glyphos-status", status === "ready" ? "Combined pipeline configured" : status === "activation_pending" ? "Feature enabled, waiting on prerequisites" : "Combined pipeline disabled");
   setText("#context-glyphos-path", joinNotes([
     contextModeMcp.available ? "Context MCP present" : "Context MCP missing",
     contextModeMcp.lifecycle_matrix_exists ? "lifecycle check available" : "",
     contextModeMcp.typecheck_script_exists ? "typecheck available" : "",
     contextModeMcp.root ? displayPath(contextModeMcp.root) : "",
   ]) || "-");
-  setText("#context-glyphos-benefit", pipeline.benefit || "retrieved context + glyph-routed local inference");
+  setText(
+    "#context-glyphos-benefit",
+    enabled
+      ? (observedAttempts > 0
+        ? `Feature is enabled. Glyph-routed traffic has been observed in this dashboard session (${observedAttempts} attempts).`
+        : "Feature is enabled, but no glyph-routed traffic has been observed in this dashboard session.")
+      : "Activate Feature enables the combined setting and syncs GlyphOS configuration. Observed traffic appears separately.",
+  );
 
   blockersNode.innerHTML = "";
   const blockers = Array.isArray(pipeline.blockers) ? pipeline.blockers : [];
   if (!blockers.length) {
     const chip = document.createElement("span");
     chip.className = "chip chip-success";
-    chip.textContent = "ready";
+    chip.textContent = "configured";
     blockersNode.append(chip);
     return;
   }
@@ -847,18 +923,50 @@ function downloadStatusLabel(job) {
   return status;
 }
 
-function renderOperationActivity(activityStore) {
+function activityLabel(route, action) {
+  const labels = {
+    "/api/glyphos/sync": "config sync",
+    "/api/context-glyphos/activate": "feature enable",
+    "/api/opencode/sync": "config sync",
+    "/api/openclaw/sync": "config sync",
+    "/api/claude/sync": "config sync",
+  };
+  return labels[route] || action || "api";
+}
+
+function activityDetailNotes(route, existingDetail) {
+  const notes = [];
+  if (route === "/api/glyphos/sync") {
+    notes.push("control action only", "writes GlyphOS config", "does not prove routed traffic");
+  } else if (route === "/api/context-glyphos/activate") {
+    notes.push("control action only", "enables combined feature setting", "does not prove routed traffic");
+  }
+  if (existingDetail) notes.push(existingDetail);
+  return joinNotes(notes);
+}
+
+function renderOperationActivity(activityStore, meta = {}) {
   const feed = $("#activity-feed");
+  const note = $("#activity-session-note");
   if (!feed) return;
   const store = activityStore && typeof activityStore === "object" ? activityStore : {};
-  const events = Array.isArray(store.events) ? store.events.filter((event) => event && typeof event === "object") : [];
+  const allEvents = Array.isArray(store.events) ? store.events.filter((event) => event && typeof event === "object") : [];
+  const startedAt = String(meta.dashboard_started_at || "");
+  const events = allEvents.filter((event) => isAtOrAfter(event.happened_at || "", startedAt));
+  const olderCount = Math.max(0, allEvents.length - events.length);
+  const startedLabel = formatLocalTime(startedAt);
+  if (note) {
+    note.textContent = olderCount
+      ? `${olderCount} older control ${olderCount === 1 ? "entry is" : "entries are"} hidden. Showing actions recorded since this dashboard process started${startedLabel ? ` at ${startedLabel}` : ""}.`
+      : `Showing actions recorded since this dashboard process started${startedLabel ? ` at ${startedLabel}` : ""}.`;
+  }
 
   if (!events.length) {
     feed.innerHTML = `
       <div class="activity-empty">
         <span class="empty-eyebrow">No Activity</span>
-        <strong class="empty-title">No operations recorded yet.</strong>
-        <span class="empty-copy">Actions like downloads, sync calls, and mode toggles appear here.</span>
+        <strong class="empty-title">No control actions recorded in this dashboard session.</strong>
+        <span class="empty-copy">Audit entries are control-plane only and do not prove inference or glyph-routed traffic.</span>
       </div>
     `;
     return;
@@ -873,14 +981,14 @@ function renderOperationActivity(activityStore) {
     const happenedAt = formatLocalTime(event.happened_at || "");
     const errorCode = String(event.error_code || "");
     const errorMessage = String(event.error_message || "");
-    const detail = errorMessage || errorCode ? joinNotes([errorCode, errorMessage]) : "";
+    const detail = activityDetailNotes(route, errorMessage || errorCode ? joinNotes([errorCode, errorMessage]) : "");
 
     return `
       <article class="activity-event">
         <div class="activity-main">
           <div class="activity-title">
             <span class="status-pill status-${escapeHtml(status || "unknown")}">${escapeHtml(titleize(status || "unknown"))}</span>
-            <strong>${escapeHtml(joinNotes([action || "api", route || ""]))}</strong>
+            <strong>${escapeHtml(joinNotes([activityLabel(route, action), route || ""]))}</strong>
           </div>
           <div class="activity-meta">${escapeHtml(joinNotes([
             actor ? `actor ${actor}` : "",
@@ -896,7 +1004,10 @@ function renderOperationActivity(activityStore) {
   feed.innerHTML = rows.join("");
 }
 
-function renderGlyphosTelemetry(glyphosTelemetry) {
+function renderGlyphosTelemetry(glyphosTelemetry, data = {}) {
+  const card = $("#glyphos-card");
+  const badge = $("#glyphos-badge");
+  const statusNode = $("#glyphos-status");
   const summaryNode = $("#glyphos-telemetry-summary");
   const reasonsNode = $("#glyphos-telemetry-reasons");
   const recentNode = $("#glyphos-telemetry-recent");
@@ -911,20 +1022,47 @@ function renderGlyphosTelemetry(glyphosTelemetry) {
   const recent = Array.isArray(routing.recent_attempts) ? routing.recent_attempts.filter((item) => item && typeof item === "object") : [];
 
   if (!available) {
-    summaryNode.textContent = "Telemetry unavailable (GlyphOS integration not installed).";
+    if (badge) badge.textContent = "Unavailable";
+    if (statusNode) statusNode.textContent = "GlyphOS integration unavailable";
+    card?.classList.remove("is-ready", "is-warn");
+    card?.classList.add("is-off");
+    badge?.classList.remove("integration-badge-ready", "integration-badge-warn");
+    badge?.classList.add("integration-badge-muted");
+    summaryNode.textContent = "Last route: never observed.";
+    setNodeHidden(summaryNode, false);
     reasonsNode.innerHTML = "";
     recentNode.innerHTML = "";
     return;
   }
 
+  if (badge) badge.textContent = "Configured";
+  if (statusNode) statusNode.textContent = total > 0 ? "Configured for local routing" : "Configured for local routing. No traffic observed yet.";
+  card?.classList.add("is-ready");
+  card?.classList.remove("is-warn", "is-off");
+  badge?.classList.add("integration-badge-ready");
+  badge?.classList.remove("integration-badge-warn", "integration-badge-muted");
+
+  const last = recent[0] || null;
+  const lastDate = last ? dateFromGlyphAttempt(last) : null;
+  const lastLabel = last ? joinNotes([
+    `Last route: ${last.success ? "ok" : "error"}`,
+    last.target ? `target ${last.target}` : "",
+    last.reason_code ? `reason ${last.reason_code}` : "",
+    lastDate ? formatLocalTime(lastDate) : "",
+    lastDate ? formatRelativeTime(lastDate) : "",
+  ]) : "Last route: never observed.";
+
+  if (total === 0) {
+    summaryNode.textContent = "";
+    setNodeHidden(summaryNode, true);
+  } else {
+    summaryNode.textContent = lastLabel;
+    setNodeHidden(summaryNode, false);
+  }
+
   const targetBits = Object.entries(attemptsByTarget)
     .map(([target, count]) => `${target} ${count}`)
     .slice(0, 6);
-
-  summaryNode.textContent = joinNotes([
-    Number.isFinite(total) ? `${total} route attempt${total === 1 ? "" : "s"}` : "",
-    targetBits.length ? `targets: ${targetBits.join(", ")}` : "",
-  ]) || "No routing attempts recorded yet.";
 
   const reasonPairs = Object.entries(reasonCounts)
     .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))
@@ -940,15 +1078,120 @@ function renderGlyphosTelemetry(glyphosTelemetry) {
     const reason = String(item.reason_code || "");
     const success = Boolean(item.success);
     const latency = Number(item.latency_ms || 0);
-    const time = item.time ? new Date(Number(item.time) * 1000).toLocaleTimeString() : "";
+    const time = dateFromGlyphAttempt(item);
     const label = joinNotes([
       success ? "ok" : "error",
       target,
       reason,
       Number.isFinite(latency) && latency > 0 ? `${latency}ms` : "",
-      time,
+      time ? formatLocalTime(time) : "",
+      time ? formatRelativeTime(time) : "",
     ]);
     return `<div class="telemetry-item">${escapeHtml(label)}</div>`;
+  }).join("");
+
+  if (total === 0) {
+    recentNode.innerHTML = '<div class="telemetry-item">idle</div>';
+  } else if (!targetBits.length) {
+    reasonsNode.innerHTML = '<span class="chip chip-neutral">observed</span>';
+  }
+}
+
+function glyphAttemptKey(item) {
+  if (!item) return "";
+  return [
+    item.time || "",
+    item.target || "",
+    item.reason_code || "",
+    item.success ? "ok" : "error",
+  ].join("|");
+}
+
+function pulseObservedGlyphRoutes() {
+  ["#observed-glyph-last-status", "#observed-glyph-total", "#observed-glyph-targets", "#observed-glyph-feed"].forEach((selector) => {
+    const node = $(selector);
+    if (!node) return;
+    node.classList.remove("pulse-signal");
+    void node.offsetWidth;
+    node.classList.add("pulse-signal");
+  });
+}
+
+function renderObservedGlyphRoutes(glyphosTelemetry, dashboardStartedAt = "") {
+  const feed = $("#observed-glyph-feed");
+  if (!feed) return;
+  const telemetry = glyphosTelemetry && typeof glyphosTelemetry === "object" ? glyphosTelemetry : {};
+  const routing = telemetry.routing && typeof telemetry.routing === "object" ? telemetry.routing : {};
+  const total = Number(routing.total_attempts || 0);
+  const recent = Array.isArray(routing.recent_attempts) ? routing.recent_attempts.filter((item) => item && typeof item === "object") : [];
+  const sessionRecent = recent.filter((item) => {
+    const date = dateFromGlyphAttempt(item);
+    return !date || isAtOrAfter(date, dashboardStartedAt);
+  });
+  const observedCount = Number.isFinite(total) && total > sessionRecent.length ? total : sessionRecent.length;
+  const latest = sessionRecent[0] || null;
+  const latestKey = glyphAttemptKey(latest);
+  if (latestKey && state.lastObservedGlyphKey && latestKey !== state.lastObservedGlyphKey) {
+    pulseObservedGlyphRoutes();
+  }
+  if (latestKey) state.lastObservedGlyphKey = latestKey;
+
+  if (!Boolean(telemetry.available) || !observedCount || !sessionRecent.length) {
+    setText("#observed-glyph-last-status", "Never observed");
+    setText("#observed-glyph-last-detail", observedCount ? "Glyph route attempts were counted, but no recent route detail is available." : "No glyph-routed traffic has been seen by this dashboard session yet.");
+    setText("#observed-glyph-total", String(observedCount || 0));
+    setText("#observed-glyph-total-detail", observedCount ? `${observedCount} glyph route ${observedCount === 1 ? "attempt was" : "attempts were"} counted in this dashboard session.` : "No glyph route attempts observed in this dashboard session.");
+    setText("#observed-glyph-targets", "None yet");
+    setText("#observed-glyph-targets-detail", "Targets will appear here after the first observed glyph route.");
+    feed.innerHTML = `
+      <div class="activity-empty">
+        <span class="empty-eyebrow">No Observed Routes</span>
+        <strong class="empty-title">No glyph-routed traffic observed yet.</strong>
+        <span class="empty-copy">Sync and Activate Feature write configuration only. The first routed inference call will appear here.</span>
+      </div>
+    `;
+    return;
+  }
+
+  const latestDate = dateFromGlyphAttempt(latest);
+  const targetCounts = new Map();
+  sessionRecent.forEach((item) => {
+    const target = String(item.target || "unknown");
+    targetCounts.set(target, (targetCounts.get(target) || 0) + 1);
+  });
+  const targetSummary = [...targetCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([target, count]) => `${target} ${count}`)
+    .join(", ");
+
+  setText("#observed-glyph-last-status", latest.success ? "Observed OK" : "Observed Error");
+  setText("#observed-glyph-last-detail", joinNotes([
+    latest.target ? `target ${latest.target}` : "",
+    latest.reason_code ? `reason ${latest.reason_code}` : "",
+    latestDate ? formatLocalTime(latestDate) : "",
+    latestDate ? formatRelativeTime(latestDate) : "",
+  ]) || "-");
+  setText("#observed-glyph-total", String(observedCount));
+  setText("#observed-glyph-total-detail", `${observedCount} glyph route ${observedCount === 1 ? "attempt" : "attempts"} observed in this dashboard session.`);
+  setText("#observed-glyph-targets", targetSummary || "Unknown");
+  setText("#observed-glyph-targets-detail", "Most recent observed route targets in this dashboard session.");
+
+  feed.innerHTML = sessionRecent.slice(0, 10).map((item) => {
+    const date = dateFromGlyphAttempt(item);
+    const latency = Number(item.latency_ms || 0);
+    return `
+      <div class="telemetry-item">
+        ${escapeHtml(joinNotes([
+          item.success ? "ok" : "error",
+          item.target ? `target ${item.target}` : "",
+          item.reason_code ? `reason ${item.reason_code}` : "",
+          Number.isFinite(latency) && latency > 0 ? `${latency}ms` : "",
+          date ? formatLocalTime(date) : "",
+          date ? formatRelativeTime(date) : "",
+        ]))}
+      </div>
+    `;
   }).join("");
 }
 
@@ -1475,7 +1718,9 @@ async function saveDefaults(event) {
 }
 
 async function performModeToggle(button) {
-  const nextMode = state.data?.mode?.configured_mode === "single-client" ? "multi" : "single";
+  const mode = state.data?.mode || {};
+  const effectiveMode = mode.active_mode || mode.configured_mode || "";
+  const nextMode = effectiveMode === "single-client" ? "multi" : "single";
   await withButtonBusy(button, "Switching...", async () => {
     await api("/api/mode", {
       method: "POST",
@@ -1836,6 +2081,11 @@ function bindEvents() {
     successMessage: "Dashboard state refreshed.",
   }).catch(showError));
   $("#toggle-mode").addEventListener("click", (event) => performModeToggle(event.currentTarget).catch(showError));
+  $("#toggle-activity-panel")?.addEventListener("click", () => {
+    const visible = !activityPanelVisible();
+    setActivityPanelVisible(visible);
+    renderActivityPanelVisibility(visible);
+  });
   $("#restart-server").addEventListener("click", (event) => withButtonBusy(event.currentTarget, "Restarting...", async () => {
     await api("/api/restart", { method: "POST", body: JSON.stringify({}) });
     await refreshState();
@@ -1934,6 +2184,7 @@ function showError(error) {
 async function main() {
   loadCleanupRetentionPreference();
   loadRemotePreferences();
+  renderActivityPanelVisibility();
   bindEvents();
   await refreshState();
   renderDiscovery(state.discovery);

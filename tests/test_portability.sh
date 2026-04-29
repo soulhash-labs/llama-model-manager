@@ -199,6 +199,10 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$web_index" "Claude Gateway Timeout (s)"
     assert_contains "$web_index" "Remote Models"
     assert_contains "$web_index" "Download Jobs"
+    assert_contains "$web_index" "Observed Glyph Routes"
+    assert_contains "$web_index" "Control-plane actions only"
+    assert_contains "$web_index" "toggle-activity-panel"
+    assert_contains "$web_index" "glyphos-badge"
     assert_contains "$web_index" "CUDA Unified Memory (experimental)"
     assert_not_contains "$web_index" "GPU-aware defaults"
     assert_contains "$install_script" "Would you like to check/install build dependencies"
@@ -243,8 +247,11 @@ test_installers_support_bootstrap_tty_handoff_and_empty_registry_seed() {
     app_py="$(cat "$ROOT_DIR/web/app.py")"
     app_js="$(cat "$ROOT_DIR/web/app.js")"
     assert_contains "$app_py" '"home_dir": str(self.home)'
+    assert_contains "$app_py" '"dashboard_started_at": self.started_at'
     assert_contains "$app_py" 'GGML_CUDA_ENABLE_UNIFIED_MEMORY'
     assert_contains "$app_js" 'function displayPath(path) {'
+    assert_contains "$app_js" 'function renderObservedGlyphRoutes'
+    assert_contains "$app_js" 'llama-model-manager.activityPanelVisible'
     assert_contains "$app_js" 'default-cuda-unified-memory'
     assert_contains "$app_js" 'return `~/${value.slice(homeDir.length + 1)}`;'
 }
