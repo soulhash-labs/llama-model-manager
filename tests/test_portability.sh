@@ -796,7 +796,7 @@ test_doctor_reports_install_health() {
     tmp="$(mktemp -d)"
     make_env "$tmp"
 
-    output="$(run_doctor "$tmp")"
+    output="$(LLAMA_MODEL_WEB_PORT=9 run_doctor "$tmp")"
     assert_contains "$output" "installed_web_launcher: no"
     assert_contains "$output" "installed_web_app: no"
     assert_contains "$output" "bundled_glyphos_integration: no"
@@ -813,7 +813,7 @@ test_doctor_reports_install_health() {
     : >"$tmp/home/.local/share/llama-model-manager/web/app.py"
     : >"$tmp/home/.local/share/llama-model-manager/integrations/context-mode-mcp/package.json"
 
-    output="$(run_doctor "$tmp")"
+    output="$(LLAMA_MODEL_WEB_PORT=9 run_doctor "$tmp")"
     assert_contains "$output" "installed_web_launcher: yes"
     assert_contains "$output" "installed_web_app: yes"
     assert_contains "$output" "bundled_glyphos_integration: yes"

@@ -507,8 +507,11 @@ class Manager:
         timeout_seconds = parse_cli_timeout_seconds()
 
         command = [str(self.cli_bin), *args]
+        env = os.environ.copy()
+        if args and args[0] == "doctor":
+            env["LLAMA_MODEL_DOCTOR_SKIP_DASHBOARD_API"] = "1"
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout_seconds)
+            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout_seconds, env=env)
         except subprocess.TimeoutExpired as exc:
             command_text = " ".join(shlex.quote(item) for item in command)
             raise CommandTimeoutError(command_text, timeout_seconds) from exc
