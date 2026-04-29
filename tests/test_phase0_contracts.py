@@ -629,6 +629,39 @@ class Phase0ContractTests(unittest.TestCase):
             self.assertTrue(telemetry["installed"])
             self.assertEqual(telemetry["source"], "bundled")
 
+    def test_glyphos_telemetry_finds_installed_integration_when_web_root_is_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app_root = Path(tmpdir) / "isolated-web"
+            app_root.mkdir()
+            data_root = Path(tmpdir) / "data"
+            installed_root = data_root / "llama-model-manager" / "integrations" / "public-glyphos-ai-compute"
+            installed_package = installed_root / "glyphos_ai" / "ai_compute"
+            installed_package.mkdir(parents=True)
+            (installed_root / "glyphos_ai" / "__init__.py").write_text("", encoding="utf-8")
+            (installed_package / "__init__.py").write_text("", encoding="utf-8")
+            (installed_package / "router.py").write_text(
+                "def routing_telemetry_snapshot(limit=10):\n"
+                "    return {'attempts_by_target': {}, 'fallback_reason_counts': {}, 'total_attempts': 0, 'recent_attempts': []}\n",
+                encoding="utf-8",
+            )
+            env = {
+                "HOME": str(Path(tmpdir) / "home"),
+                "XDG_CONFIG_HOME": str(Path(tmpdir) / "config"),
+                "XDG_STATE_HOME": str(Path(tmpdir) / "state"),
+                "XDG_DATA_HOME": str(data_root),
+                "LLAMA_MODEL_WEB_DISABLE_ACTIVITY_LOG": "1",
+            }
+            Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
+            (Path(env["XDG_CONFIG_HOME"]) / "llama-server").mkdir(parents=True)
+            with mock.patch.dict(os.environ, env, clear=False):
+                manager = WEB_APP.Manager(app_root)
+
+            telemetry = manager.glyphos_telemetry_snapshot()
+
+            self.assertTrue(telemetry["available"])
+            self.assertTrue(telemetry["installed"])
+            self.assertEqual(Path(telemetry["integration_root"]), installed_root)
+
     def test_state_falls_back_when_remote_items_shape_is_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = self.make_manager(tmpdir)

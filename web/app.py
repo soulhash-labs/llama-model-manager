@@ -466,7 +466,14 @@ class Manager:
         self.opencode_model_state_file = Path(os.environ.get("OPENCODE_MODEL_STATE_FILE", self.xdg_state_home / "opencode" / "model.json"))
         self.claude_settings_file = Path(os.environ.get("CLAUDE_SETTINGS_FILE", self.home / ".claude" / "settings.json"))
         self.glyphos_config_file = Path(os.environ.get("GLYPHOS_CONFIG_FILE", self.home / ".glyphos" / "config.yaml"))
-        self.context_mode_mcp_root = Path(os.environ.get("CONTEXT_MODE_MCP_ROOT", self.app_root.parent / "integrations" / "context-mode-mcp"))
+        self.glyphos_integration_root = self.resolve_bundled_integration_root(
+            "public-glyphos-ai-compute",
+            "GLYPHOS_INTEGRATION_ROOT",
+        )
+        self.context_mode_mcp_root = self.resolve_bundled_integration_root(
+            "context-mode-mcp",
+            "CONTEXT_MODE_MCP_ROOT",
+        )
         self.remote_models_file = self.xdg_state_home / "llama-server" / "remote-models.json"
         self.download_jobs_file = self.xdg_state_home / "llama-server" / "download-jobs.json"
         self.download_policy_file = self.xdg_state_home / "llama-server" / "download-policy.json"
@@ -484,6 +491,18 @@ class Manager:
         self.download_queue_paused = self.initial_download_queue_paused()
         if not self.demo and self.download_jobs_file.exists():
             self.recover_stale_download_jobs()
+
+    def resolve_bundled_integration_root(self, integration_name: str, env_name: str) -> Path:
+        explicit = os.environ.get(env_name, "").strip()
+        candidates = [
+            Path(explicit) if explicit else None,
+            self.app_root.parent / "integrations" / integration_name,
+            Path(os.environ.get("XDG_DATA_HOME", self.home / ".local" / "share")) / "llama-model-manager" / "integrations" / integration_name,
+        ]
+        for candidate in candidates:
+            if candidate and candidate.is_dir():
+                return candidate.resolve()
+        return (self.app_root.parent / "integrations" / integration_name).resolve()
 
     def _resolve_cli_bin(self) -> Path:
         env_bin = os.environ.get("LLAMA_MODEL_BIN")
@@ -2604,7 +2623,7 @@ class Manager:
             "total_attempts": 0,
             "recent_attempts": [],
         }
-        integration_root = (self.app_root.parent / "integrations" / "public-glyphos-ai-compute").resolve()
+        integration_root = self.glyphos_integration_root.resolve()
         snapshot: dict[str, Any] = {
             "available": False,
             "installed": integration_root.is_dir() and (integration_root / "glyphos_ai").is_dir(),

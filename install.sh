@@ -44,6 +44,33 @@ clean_python_cache() {
     find "$target" -type f -name '*.pyc' -delete 2>/dev/null || true
 }
 
+require_source_tree() {
+    local missing=0
+
+    [[ -f "$ROOT_DIR/web/app.py" ]] || {
+        printf 'error: installer payload is missing web/app.py\n' >&2
+        missing=1
+    }
+    [[ -f "$ROOT_DIR/scripts/integration_sync.py" ]] || {
+        printf 'error: installer payload is missing scripts/integration_sync.py\n' >&2
+        missing=1
+    }
+    [[ -d "$ROOT_DIR/integrations/public-glyphos-ai-compute/glyphos_ai" ]] || {
+        printf 'error: installer payload is missing integrations/public-glyphos-ai-compute/glyphos_ai\n' >&2
+        missing=1
+    }
+    [[ -f "$ROOT_DIR/integrations/context-mode-mcp/package.json" ]] || {
+        printf 'error: installer payload is missing integrations/context-mode-mcp/package.json\n' >&2
+        missing=1
+    }
+
+    if [[ "$missing" -ne 0 ]]; then
+        printf 'error: download the full llama-model-manager archive and rerun install.sh\n' >&2
+        exit 1
+    fi
+}
+
+require_source_tree
 mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$APP_DIR" "$APP_SHARE_DIR"
 
 install -m 0755 "$ROOT_DIR/bin/llama-model" "$BIN_DIR/llama-model"
@@ -54,12 +81,10 @@ rm -rf "$APP_SHARE_DIR/web"
 cp -a "$ROOT_DIR/web" "$APP_SHARE_DIR/web"
 rm -rf "$APP_SHARE_DIR/scripts"
 cp -a "$ROOT_DIR/scripts" "$APP_SHARE_DIR/scripts"
-if [[ -d "$ROOT_DIR/integrations" ]]; then
-    rm -rf "$APP_SHARE_DIR/integrations"
-    cp -a "$ROOT_DIR/integrations" "$APP_SHARE_DIR/integrations"
-    clean_python_cache "$APP_SHARE_DIR/integrations"
-    printf 'refreshed bundled integrations under %s/integrations\n' "$(compact_home_path "$APP_SHARE_DIR")"
-fi
+rm -rf "$APP_SHARE_DIR/integrations"
+cp -a "$ROOT_DIR/integrations" "$APP_SHARE_DIR/integrations"
+clean_python_cache "$APP_SHARE_DIR/integrations"
+printf 'refreshed bundled integrations under %s/integrations\n' "$(compact_home_path "$APP_SHARE_DIR")"
 if [[ -d "$ROOT_DIR/runtime" ]]; then
     rm -rf "$APP_SHARE_DIR/runtime"
     cp -a "$ROOT_DIR/runtime" "$APP_SHARE_DIR/runtime"

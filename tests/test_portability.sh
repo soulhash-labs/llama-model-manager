@@ -170,12 +170,14 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     local defaults
     local web_index
     local install_script
+    local bootstrap
 
     readme="$(cat "$ROOT_DIR/README.md")"
     help="$(cat "$ROOT_DIR/config/HELP.txt")"
     defaults="$(cat "$ROOT_DIR/config/defaults.env.example")"
     web_index="$(cat "$ROOT_DIR/web/index.html")"
     install_script="$(cat "$ROOT_DIR/install.sh")"
+    bootstrap="$(cat "$ROOT_DIR/install-bootstrap.sh")"
 
     assert_contains "$readme" "backend-, platform-, and architecture-specific"
     assert_contains "$readme" "shows the install commands it plans to run"
@@ -210,8 +212,12 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$install_script" "llama-model sync-openclaw"
     assert_contains "$install_script" "llama-model sync-claude"
     assert_contains "$install_script" "llama-model sync-glyphos"
+    assert_contains "$install_script" "require_source_tree"
+    assert_contains "$install_script" "installer payload is missing integrations/public-glyphos-ai-compute/glyphos_ai"
     assert_contains "$install_script" "refreshed bundled integrations"
     assert_contains "$install_script" "clean_python_cache"
+    assert_contains "$bootstrap" "installer archive is missing bundled GlyphOS AI Compute integration"
+    assert_contains "$bootstrap" "installer archive is missing Context Mode MCP integration"
     assert_contains "$readme" "integrations/public-glyphos-ai-compute/"
     assert_contains "$help" "bundled public copy lives under integrations/public-glyphos-ai-compute/"
     assert_contains "$install_script" "Bundled public GlyphOS AI Compute package"
@@ -256,6 +262,24 @@ test_installers_support_bootstrap_tty_handoff_and_empty_registry_seed() {
     assert_contains "$app_js" 'llama-model-manager.activityPanelVisible'
     assert_contains "$app_js" 'default-cuda-unified-memory'
     assert_contains "$app_js" 'return `~/${value.slice(homeDir.length + 1)}`;'
+}
+
+test_install_fails_when_required_integrations_are_missing() {
+    local tmp
+    local source
+    local err
+
+    tmp="$(mktemp -d)"
+    source="$tmp/source"
+    mkdir -p "$source"
+    cp -a "$ROOT_DIR"/bin "$ROOT_DIR"/config "$ROOT_DIR"/desktop "$ROOT_DIR"/scripts "$ROOT_DIR"/web "$source"/
+    cp "$ROOT_DIR/install.sh" "$source/install.sh"
+
+    err="$tmp/install.err"
+    if env HOME="$tmp/home" XDG_CONFIG_HOME="$tmp/config" XDG_DATA_HOME="$tmp/data" bash "$source/install.sh" >"$tmp/install.out" 2>"$err"; then
+        fail "expected install.sh to fail when integrations are missing"
+    fi
+    assert_contains "$(cat "$err")" "installer payload is missing integrations/public-glyphos-ai-compute/glyphos_ai"
 }
 
 
@@ -1543,6 +1567,7 @@ main() {
     test_no_safe_binary_path_reports_build_guidance
     test_docs_no_longer_imply_universal_gpu_binary
     test_installers_support_bootstrap_tty_handoff_and_empty_registry_seed
+    test_install_fails_when_required_integrations_are_missing
     test_install_migrates_placeholder_seed_registry
     test_install_preserves_real_registry_entries
     test_dependency_install_preview_exists

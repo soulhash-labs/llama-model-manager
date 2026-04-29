@@ -48,6 +48,23 @@ SOURCE_DIR="$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
     exit 1
 }
 
+[ -f "$SOURCE_DIR/web/app.py" ] || {
+    printf '%s\n' "error: installer archive is missing web/app.py" >&2
+    exit 1
+}
+[ -f "$SOURCE_DIR/scripts/integration_sync.py" ] || {
+    printf '%s\n' "error: installer archive is missing scripts/integration_sync.py" >&2
+    exit 1
+}
+[ -d "$SOURCE_DIR/integrations/public-glyphos-ai-compute/glyphos_ai" ] || {
+    printf '%s\n' "error: installer archive is missing bundled GlyphOS AI Compute integration" >&2
+    exit 1
+}
+[ -f "$SOURCE_DIR/integrations/context-mode-mcp/package.json" ] || {
+    printf '%s\n' "error: installer archive is missing Context Mode MCP integration" >&2
+    exit 1
+}
+
 if ! need_cmd bash; then
     printf '%s\n' "error: bash is required to run the local installer" >&2
     exit 1
