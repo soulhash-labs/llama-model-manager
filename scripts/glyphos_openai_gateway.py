@@ -9,7 +9,9 @@ import json
 import math
 import os
 from pathlib import Path
+import shlex
 import sys
+import subprocess
 import time
 from typing import Any, Iterator
 from urllib import request as urlrequest
@@ -196,14 +198,331 @@ def messages_to_prompt(messages: Any) -> str:
     return "\n\n".join(lines)
 
 
+def context_pipeline_enabled() -> bool:
+    return os.environ.get("LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def context_mcp_root() -> Path:
+    return APP_ROOT / "integrations" / "context-mode-mcp"
+
+
 def context_status() -> tuple[str, bool]:
-    enabled = os.environ.get("LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE", "").strip().lower() in {"1", "true", "yes", "on"}
+    enabled = context_pipeline_enabled()
     if not enabled:
         return "disabled", False
-    root = APP_ROOT / "integrations" / "context-mode-mcp"
+    root = context_mcp_root()
     if not (root / "package.json").is_file():
         return "missing", False
-    return "available_not_enriching", False
+    return "available_no_context", False
+
+
+def compact_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+
+
+def extract_payload_context(payload: dict[str, Any]) -> Any:
+    metadata = payload.get("metadata")
+    candidates = [
+        payload.get("lmm_context"),
+        payload.get("retrieved_context"),
+        payload.get("context"),
+    ]
+    if isinstance(metadata, dict):
+        candidates.extend([
+            metadata.get("lmm_context"),
+            metadata.get("retrieved_context"),
+            metadata.get("context"),
+        ])
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        if isinstance(candidate, str) and not candidate.strip():
+            continue
+        return candidate
+    return ""
+
+
+def context_to_text(context: Any) -> str:
+    if context is None:
+        return ""
+    if isinstance(context, str):
+        return context.strip()
+    return compact_json(context)
+
+
+def command_context_from_output(raw: str) -> Any:
+    raw = raw.strip()
+    if not raw:
+        return ""
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+    if not isinstance(parsed, dict):
+        return parsed
+    for key in ("retrieved_context", "context", "text", "markdown"):
+        if parsed.get(key):
+            return parsed[key]
+    items = parsed.get("items") or parsed.get("results") or parsed.get("snippets")
+    if isinstance(items, list):
+        pieces: list[str] = []
+        for item in items:
+            if isinstance(item, dict):
+                text = item.get("text") or item.get("content") or item.get("snippet")
+                title = item.get("title") or item.get("path") or item.get("uri")
+                if text:
+                    pieces.append(f"{title}: {text}" if title else str(text))
+            elif item:
+                pieces.append(str(item))
+        return "\n".join(pieces)
+    return parsed
+
+
+def retrieve_context(payload: dict[str, Any], prompt: str, *, model: str, stream: bool) -> dict[str, Any]:
+    enabled = os.environ.get("LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE", "").strip().lower() in {"1", "true", "yes", "on"}
+    started = time.perf_counter()
+    result: dict[str, Any] = {
+        "status": "disabled",
+        "used": False,
+        "context": "",
+        "source": "",
+        "error": "",
+        "latency_ms": 0,
+    }
+    if not enabled:
+        return result
+    root = context_mcp_root()
+    if not (root / "package.json").is_file():
+        result.update({"status": "missing"})
+        return result
+
+    payload_context = extract_payload_context(payload)
+    if payload_context:
+        text = context_to_text(payload_context)
+        result.update({
+            "status": "retrieved_from_payload",
+            "used": bool(text),
+            "context": text,
+            "source": "payload",
+            "latency_ms": round((time.perf_counter() - started) * 1000),
+        })
+        return result
+
+    command = os.environ.get("LMM_CONTEXT_MCP_COMMAND", "").strip()
+    if not command:
+        result.update({
+            "status": "available_no_context",
+            "source": "context-mode-mcp",
+            "latency_ms": round((time.perf_counter() - started) * 1000),
+        })
+        return result
+
+    timeout_ms = request_int({"timeout": os.environ.get("LMM_CONTEXT_MCP_TIMEOUT_MS", "1500")}, "timeout", 1500)
+    request_payload = {
+        "tool": "ctx_search",
+        "query": prompt[-4000:],
+        "limit": 8,
+        "model": model,
+        "stream": stream,
+        "messages": payload.get("messages", []),
+        "metadata": payload.get("metadata", {}),
+    }
+    try:
+        completed = subprocess.run(
+            shlex.split(command),
+            input=compact_json(request_payload),
+            text=True,
+            capture_output=True,
+            timeout=timeout_ms / 1000,
+            cwd=str(root),
+            check=False,
+        )
+        if completed.returncode != 0:
+            stderr = completed.stderr.strip() or f"exit {completed.returncode}"
+            result.update({"status": "error", "source": "context-mode-mcp", "error": stderr[:400]})
+            return result
+        text = context_to_text(command_context_from_output(completed.stdout))
+        result.update({
+            "status": "retrieved" if text else "empty",
+            "used": bool(text),
+            "context": text,
+            "source": "context-mode-mcp",
+        })
+        return result
+    except subprocess.TimeoutExpired:
+        result.update({"status": "timeout", "source": "context-mode-mcp", "error": f"timeout after {timeout_ms}ms"})
+        return result
+    except Exception as exc:
+        result.update({"status": "error", "source": "context-mode-mcp", "error": str(exc)[:400]})
+        return result
+    finally:
+        result["latency_ms"] = round((time.perf_counter() - started) * 1000)
+
+
+GLYPH_KEY_ALIASES = {
+    "path": "p",
+    "file": "f",
+    "title": "t",
+    "uri": "u",
+    "content": "c",
+    "text": "x",
+    "snippet": "s",
+    "summary": "m",
+    "score": "r",
+    "line": "l",
+    "lines": "ls",
+    "language": "g",
+}
+
+
+def alias_context_keys(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {GLYPH_KEY_ALIASES.get(str(key), str(key)): alias_context_keys(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [alias_context_keys(item) for item in value]
+    return value
+
+
+def repeated_line_payload(text: str) -> str:
+    counts: dict[str, int] = {}
+    order: list[str] = []
+    for line in (item.strip() for item in text.splitlines()):
+        if not line:
+            continue
+        if line not in counts:
+            order.append(line)
+        counts[line] = counts.get(line, 0) + 1
+    repeated = [{"n": counts[line], "x": line} for line in order if counts[line] > 1]
+    if not repeated:
+        return ""
+    singles = [line for line in order if counts[line] == 1]
+    return "GE1-LINES " + compact_json({"repeat": repeated, "single": singles})
+
+
+def glyph_encode_context(context: str) -> dict[str, Any]:
+    raw = context.strip()
+    raw_chars = len(raw)
+    result: dict[str, Any] = {
+        "status": "skipped",
+        "used": False,
+        "raw_context_chars": raw_chars,
+        "encoded_context_chars": 0,
+        "estimated_token_delta": 0,
+        "encoding_ratio": 1.0,
+        "encoded_context": "",
+        "error": "",
+        "latency_ms": 0,
+    }
+    started = time.perf_counter()
+    try:
+        if not raw:
+            return result
+        if os.environ.get("LMM_GLYPH_ENCODING_DISABLED", "").strip().lower() in {"1", "true", "yes", "on"}:
+            result["status"] = "disabled"
+            return result
+        if os.environ.get("LMM_GLYPH_ENCODING_FORCE_ERROR", "").strip():
+            raise RuntimeError("forced glyph encoding failure")
+        encoded = ""
+        try:
+            parsed = json.loads(raw)
+            encoded = "GE1-JSON " + compact_json(alias_context_keys(parsed))
+        except json.JSONDecodeError:
+            encoded = repeated_line_payload(raw)
+        if not encoded:
+            result["status"] = "raw_unstructured"
+            return result
+        encoded_chars = len(encoded)
+        if encoded_chars >= raw_chars:
+            result.update({
+                "status": "raw_not_smaller",
+                "encoded_context_chars": encoded_chars,
+                "encoding_ratio": round(encoded_chars / raw_chars, 4) if raw_chars else 1.0,
+            })
+            return result
+        result.update({
+            "status": "encoded",
+            "used": True,
+            "encoded_context_chars": encoded_chars,
+            "estimated_token_delta": round((raw_chars - encoded_chars) / 4),
+            "encoding_ratio": round(encoded_chars / raw_chars, 4),
+            "encoded_context": encoded,
+        })
+        return result
+    except Exception as exc:
+        result.update({"status": "error_raw_fallback", "error": str(exc)[:400]})
+        return result
+    finally:
+        result["latency_ms"] = round((time.perf_counter() - started) * 1000)
+
+
+def assemble_prompt(raw_prompt: str, context_result: dict[str, Any], encoding_result: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    context = str(context_result.get("context") or "").strip()
+    if not context:
+        return raw_prompt, {
+            "assembly_status": "raw_prompt",
+            "assembled_prompt_chars": len(raw_prompt),
+            "context_block_chars": 0,
+        }
+    if encoding_result.get("used"):
+        context_block = "\n".join([
+            "[Glyph Encoding v1]",
+            "Decode this compact context before reasoning. Key aliases: p=path, f=file, t=title, u=uri, c=content, x=text, s=snippet, m=summary, r=score.",
+            str(encoding_result.get("encoded_context", "")),
+        ])
+        assembly_status = "glyph_encoded_context"
+    else:
+        context_block = "\n".join([
+            "[Retrieved Context]",
+            context,
+        ])
+        assembly_status = "raw_context"
+    assembled = "\n\n".join([
+        "System: Use retrieved context only as supporting evidence. The latest user instruction below overrides retrieved or encoded context.",
+        context_block,
+        "[Conversation and latest user request]",
+        raw_prompt,
+    ])
+    return assembled, {
+        "assembly_status": assembly_status,
+        "assembled_prompt_chars": len(assembled),
+        "context_block_chars": len(context_block),
+    }
+
+
+def prepare_gateway_pipeline(payload: dict[str, Any], raw_prompt: str, *, model: str, stream: bool) -> tuple[str, dict[str, Any]]:
+    request_lifecycle = {
+        "raw_messages": payload.get("messages", []),
+        "model": model,
+        "temperature": payload.get("temperature", 0.7),
+        "max_tokens": payload.get("max_tokens", 1000),
+        "stream": stream,
+        "harness_identity": "",
+        "workspace": payload.get("workspace") or (payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}).get("workspace", ""),
+        "session": payload.get("session") or (payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}).get("session", ""),
+    }
+    context_result = retrieve_context(payload, raw_prompt, model=model, stream=stream)
+    encoding_result = glyph_encode_context(str(context_result.get("context") or "")) if context_result.get("used") else glyph_encode_context("")
+    assembled_prompt, assembly = assemble_prompt(raw_prompt, context_result, encoding_result)
+    pipeline_mode = "routed-full" if context_result.get("used") else "routed-basic"
+    pipeline = {
+        "mode": pipeline_mode,
+        "request": request_lifecycle,
+        "context_status": context_result.get("status", "unknown"),
+        "context_used": bool(context_result.get("used")),
+        "context_source": context_result.get("source", ""),
+        "context_error": context_result.get("error", ""),
+        "context_latency_ms": context_result.get("latency_ms", 0),
+        "glyph_encoding_status": encoding_result.get("status", "skipped"),
+        "glyph_encoding_used": bool(encoding_result.get("used")),
+        "raw_context_chars": encoding_result.get("raw_context_chars", 0),
+        "encoded_context_chars": encoding_result.get("encoded_context_chars", 0),
+        "estimated_token_delta": encoding_result.get("estimated_token_delta", 0),
+        "encoding_ratio": encoding_result.get("encoding_ratio", 1.0),
+        "glyph_encoding_error": encoding_result.get("error", ""),
+        "glyph_encoding_latency_ms": encoding_result.get("latency_ms", 0),
+        **assembly,
+    }
+    return assembled_prompt, pipeline
 
 
 def create_router():
@@ -276,8 +595,7 @@ def completion_payload(
     started: float,
     model: str,
     routed: dict[str, Any],
-    context_state: str,
-    context_used: bool,
+    pipeline: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "id": f"chatcmpl-lmm-{int(started * 1000)}",
@@ -293,9 +611,16 @@ def completion_payload(
         ],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         "lmm": {
-            "route_mode": "routed",
-            "context_status": context_state,
-            "context_used": context_used,
+            "route_mode": pipeline.get("mode", "routed-basic"),
+            "context_status": pipeline.get("context_status", "unknown"),
+            "context_used": bool(pipeline.get("context_used")),
+            "glyph_encoding_status": pipeline.get("glyph_encoding_status", "skipped"),
+            "glyph_encoding_used": bool(pipeline.get("glyph_encoding_used")),
+            "raw_context_chars": pipeline.get("raw_context_chars", 0),
+            "encoded_context_chars": pipeline.get("encoded_context_chars", 0),
+            "estimated_token_delta": pipeline.get("estimated_token_delta", 0),
+            "encoding_ratio": pipeline.get("encoding_ratio", 1.0),
+            "assembly_status": pipeline.get("assembly_status", "raw_prompt"),
             "glyphos_target": routed["target"],
             "glyphos_reason_code": routed["reason_code"],
             "glyphos_reason": routed["reason"],
@@ -399,9 +724,11 @@ class GatewayHandler(BaseHTTPRequestHandler):
         record: dict[str, Any] = {
             "time": started,
             "harness": self.headers.get("User-Agent", "unknown"),
-            "mode": "routed",
+            "mode": "routed-basic",
             "context_status": context_state,
             "context_used": context_used,
+            "glyph_encoding_status": "skipped",
+            "glyph_encoding_used": False,
             "route_target": "unknown",
             "reason_code": "unresolved",
             "success": False,
@@ -417,8 +744,34 @@ class GatewayHandler(BaseHTTPRequestHandler):
             stream = payload.get("stream") is True
             if not prompt.strip():
                 raise InvalidRequestError("messages must contain text content")
+            assembled_prompt, pipeline = prepare_gateway_pipeline(payload, prompt, model=model, stream=stream)
+            pipeline_request = pipeline.get("request")
+            if isinstance(pipeline_request, dict):
+                pipeline_request["harness_identity"] = record["harness"]
+            record.update({
+                "mode": pipeline.get("mode", "routed-basic"),
+                "context_status": pipeline.get("context_status", context_state),
+                "context_used": bool(pipeline.get("context_used")),
+                "context_source": pipeline.get("context_source", ""),
+                "context_error": pipeline.get("context_error", ""),
+                "context_latency_ms": pipeline.get("context_latency_ms", 0),
+                "glyph_encoding_status": pipeline.get("glyph_encoding_status", "skipped"),
+                "glyph_encoding_used": bool(pipeline.get("glyph_encoding_used")),
+                "raw_context_chars": pipeline.get("raw_context_chars", 0),
+                "encoded_context_chars": pipeline.get("encoded_context_chars", 0),
+                "estimated_token_delta": pipeline.get("estimated_token_delta", 0),
+                "encoding_ratio": pipeline.get("encoding_ratio", 1.0),
+                "glyph_encoding_error": pipeline.get("glyph_encoding_error", ""),
+                "assembly_status": pipeline.get("assembly_status", "raw_prompt"),
+                "assembled_prompt_chars": pipeline.get("assembled_prompt_chars", 0),
+                "context_block_chars": pipeline.get("context_block_chars", 0),
+                "request": pipeline_request if isinstance(pipeline_request, dict) else {},
+            })
             if stream:
-                routed, headers, chunks = route_prompt_stream(prompt, model, max_tokens, temperature)
+                routed, headers, chunks = route_prompt_stream(assembled_prompt, model, max_tokens, temperature)
+                headers["X-LMM-Route-Mode"] = str(pipeline.get("mode", "routed-basic"))
+                headers["X-LMM-Context-Status"] = str(pipeline.get("context_status", "unknown"))
+                headers["X-LMM-Glyph-Encoding"] = str(pipeline.get("glyph_encoding_status", "skipped"))
                 record.update({
                     "route_target": routed["target"],
                     "reason_code": routed["reason_code"],
@@ -439,7 +792,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     record["error"] = error_message
                 safe_record_gateway_request(record)
                 return
-            routed, headers = route_prompt(prompt, model, max_tokens, temperature)
+            routed, headers = route_prompt(assembled_prompt, model, max_tokens, temperature)
+            headers["X-LMM-Route-Mode"] = str(pipeline.get("mode", "routed-basic"))
+            headers["X-LMM-Context-Status"] = str(pipeline.get("context_status", "unknown"))
+            headers["X-LMM-Glyph-Encoding"] = str(pipeline.get("glyph_encoding_status", "skipped"))
             record.update({
                 "route_target": routed["target"],
                 "reason_code": routed["reason_code"],
@@ -450,8 +806,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 started=started,
                 model=model,
                 routed=routed,
-                context_state=context_state,
-                context_used=context_used,
+                pipeline=pipeline,
             )
             safe_record_gateway_request(record)
             json_response(self, 200, response_payload, headers=headers)

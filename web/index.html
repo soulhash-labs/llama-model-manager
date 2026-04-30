@@ -732,7 +732,7 @@
               </div>
             </article>
             <article id="context-glyphos-card" class="integration-card pipeline-card">
-              <span class="metric-label">Context + GlyphOS</span>
+              <span class="metric-label">Context + Glyph Encoding + GlyphOS</span>
               <div class="integration-chip-row">
                 <span id="context-glyphos-badge" class="integration-badge">Off</span>
               </div>
@@ -774,6 +774,38 @@
             </article>
           </div>
           <div id="observed-glyph-feed" class="telemetry-list observed-feed" aria-live="polite"></div>
+        </section>
+
+        <section class="panel observed-panel">
+          <div class="panel-head">
+            <div>
+              <span class="panel-tag">Gateway Trace</span>
+              <h2>Context + Glyph Encoding + GlyphOS</h2>
+              <p>Latest routed gateway request stages. This separates context enrichment, glyph compression, GlyphOS routing, and backend completion.</p>
+            </div>
+          </div>
+          <div class="observed-grid">
+            <article class="observed-card">
+              <span class="metric-label">Gateway Request</span>
+              <strong id="context-trace-status">Not observed</strong>
+              <span id="context-trace-latency" class="metric-note">No LMM gateway request observed yet.</span>
+            </article>
+            <article class="observed-card">
+              <span class="metric-label">Context MCP</span>
+              <strong id="context-trace-context">Skipped</strong>
+              <span id="context-trace-context-detail" class="metric-note">Context status appears after the next routed request.</span>
+            </article>
+            <article class="observed-card">
+              <span class="metric-label">Glyph Encoding</span>
+              <strong id="context-trace-encoding">Skipped</strong>
+              <span id="context-trace-encoding-detail" class="metric-note">Compression ratio appears when structured context is encoded.</span>
+            </article>
+            <article class="observed-card">
+              <span class="metric-label">Route + Backend</span>
+              <strong id="context-trace-route">Not routed</strong>
+              <span id="context-trace-route-detail" class="metric-note">GlyphOS target and backend result appear here.</span>
+            </article>
+          </div>
         </section>
 
         <section class="panel activity-panel is-collapsed">

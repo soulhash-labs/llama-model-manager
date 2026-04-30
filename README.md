@@ -287,7 +287,7 @@ These integrations are optional. The default product behavior remains the local 
 - `opencode` keeps its own local client config in `~/.config/opencode/opencode.json`, so it can keep pointing at a stale GGUF even after `llama-model switch`.
 - successful model switches auto-run the OpenCode sync by default with `LLAMA_MODEL_SYNC_OPENCODE=1`; set it to `0` for manual-only sync.
 - `llama-model sync-opencode` updates the `llamacpp` provider endpoint, default model, and local model-state wiring to match `llama-model current`. The default route mode is now `routed`, which points OpenAI-compatible harnesses at the LMM gateway on `http://127.0.0.1:4010/v1`.
-- Routed mode means `harness -> LMM gateway -> GlyphOS AI Compute -> local llama.cpp backend`. Use `llama-model sync-opencode --mode direct` or `llama-model sync-openclaw --mode direct` when you intentionally want to bypass Context + GlyphOS and call the backend `8081/v1` endpoint.
+- Routed mode means `harness -> LMM gateway -> Context MCP when available -> Glyph Encoding when useful -> GlyphOS AI Compute -> local llama.cpp backend`. Requests are labelled `routed-full` when context is actually supplied to the gateway pipeline and `routed-basic` when the gateway degrades to GlyphOS-only routing. Use `llama-model sync-opencode --mode direct` or `llama-model sync-openclaw --mode direct` when you intentionally want to bypass the gateway and call the backend `8081/v1` endpoint.
 - Manage the gateway with `llama-model gateway start|stop|restart|status|logs`. The backend llama.cpp endpoint remains available as an advanced bypass path.
 - Upgrades migrate legacy `LLAMA_MODEL_OPENCODE_GATEWAY_BASE_URL` defaults into `LLAMA_MODEL_HARNESS_MODE=routed` plus `LLAMA_MODEL_GATEWAY_HOST/PORT/LOG`, write a timestamped defaults backup, and attempt a non-fatal resync for existing opencode, OpenClaw, and GlyphOS configs when a saved/running model is resolvable.
 - `llama-model sync-opencode --preset long-run` also writes model-aware `compaction.reserved` headroom. For 128k-token local contexts it reserves `64000` tokens, which avoids the observed long-session `Preparing write...` stall pattern where opencode aborts a pending tool after a parent message timeout or compaction overflow.
@@ -303,7 +303,9 @@ These integrations are optional. The default product behavior remains the local 
 
 The optional Context Mode MCP package lives under `integrations/context-mode-mcp/`. It is intended for local development workflows that need indexed context, compact retrieval, lifecycle diagnostics, and MCP tool execution helpers.
 
-Current gateway requests report Context MCP availability, but the gateway does not yet invoke a stable Context retrieval API for every request. Treat Context status as readiness/diagnostic state, not proof that every routed inference was context-enriched.
+Gateway requests can invoke a bounded Context MCP bridge by setting `LMM_CONTEXT_MCP_COMMAND` to a command that reads a JSON request from stdin and returns retrieved context on stdout. OpenAI-compatible clients may also provide request-scoped context through `lmm_context`, `retrieved_context`, `context`, or `metadata.context`. If Context MCP is unavailable, times out, or returns no context, the gateway continues in `routed-basic` mode and records the degraded stage in telemetry.
+
+Glyph Encoding runs after context retrieval and before GlyphOS routing. It only compresses structured or repeated retrieved context, never the latest user instruction. If encoding is not smaller or fails, the gateway falls back to raw retrieved context and records the reason.
 
 Common commands:
 

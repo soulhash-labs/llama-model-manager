@@ -187,6 +187,9 @@ class Phase0ContractTests(unittest.TestCase):
         self.assertIn('id="glyphos-badge"', html)
         self.assertIn('id="glyphos-status"', html)
         self.assertIn('id="toggle-activity-panel"', html)
+        self.assertIn("Context + Glyph Encoding + GlyphOS", html)
+        self.assertIn('id="context-trace-status"', html)
+        self.assertIn('id="context-trace-encoding"', html)
         self.assertIn("Control-plane actions only", html)
 
     def test_unknown_post_field_is_rejected_with_error_code(self) -> None:
@@ -1806,6 +1809,178 @@ class Phase0ContractTests(unittest.TestCase):
             self.assertEqual(telemetry["counters"]["success:True"], 1)
             self.assertEqual(telemetry["recent_requests"][0]["route_target"], "llamacpp")
 
+    def test_gateway_context_payload_is_glyph_encoded_before_routing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "gateway-state.json"
+            captured: dict[str, object] = {}
+
+            def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+                captured["prompt"] = prompt
+                return {
+                    "text": "encoded ok",
+                    "target": "llamacpp",
+                    "reason_code": "default_local",
+                    "reason": "default - use local llama.cpp",
+                    "latency_ms": 9,
+                }, {"X-LMM-Route-Mode": "routed"}
+
+            context = {
+                "items": [
+                    {"path": "/repo/a.py", "content": "alpha beta gamma", "summary": "first file"},
+                    {"path": "/repo/b.py", "content": "alpha beta gamma", "summary": "second file"},
+                    {"path": "/repo/c.py", "content": "alpha beta gamma", "summary": "third file"},
+                ]
+            }
+            gateway = self.load_gateway_module()
+            with mock.patch.dict(os.environ, {
+                "LMM_GATEWAY_STATE_FILE": str(state_path),
+                "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
+            }, clear=False):
+                with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+                    server = self.start_gateway_server(gateway_module=gateway)
+                    body = self.post_json(
+                        f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                        {
+                            "model": "context-model",
+                            "messages": [{"role": "user", "content": "answer using the latest instruction"}],
+                            "lmm_context": context,
+                        },
+                    )
+
+            routed_prompt = str(captured["prompt"])
+            self.assertIn("[Glyph Encoding v1]", routed_prompt)
+            self.assertIn("[Conversation and latest user request]", routed_prompt)
+            self.assertIn("answer using the latest instruction", routed_prompt)
+            self.assertTrue(body["lmm"]["context_used"])
+            self.assertTrue(body["lmm"]["glyph_encoding_used"])
+            self.assertLess(body["lmm"]["encoding_ratio"], 1)
+            telemetry = json.loads(state_path.read_text(encoding="utf-8"))
+            recent = telemetry["recent_requests"][0]
+            self.assertEqual(recent["mode"], "routed-full")
+            self.assertTrue(recent["context_used"])
+            self.assertTrue(recent["glyph_encoding_used"])
+            self.assertGreater(recent["estimated_token_delta"], 0)
+
+    def test_gateway_context_timeout_degrades_without_blocking_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "gateway-state.json"
+            captured: dict[str, object] = {}
+
+            def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+                captured["prompt"] = prompt
+                return {
+                    "text": "timeout degraded ok",
+                    "target": "llamacpp",
+                    "reason_code": "default_local",
+                    "reason": "default - use local llama.cpp",
+                    "latency_ms": 10,
+                }, {"X-LMM-Route-Mode": "routed"}
+
+            gateway = self.load_gateway_module()
+            sleeper = f"{sys.executable} -c 'import time; time.sleep(1)'"
+            with mock.patch.dict(os.environ, {
+                "LMM_GATEWAY_STATE_FILE": str(state_path),
+                "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
+                "LMM_CONTEXT_MCP_COMMAND": sleeper,
+                "LMM_CONTEXT_MCP_TIMEOUT_MS": "10",
+            }, clear=False):
+                with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+                    server = self.start_gateway_server(gateway_module=gateway)
+                    body = self.post_json(
+                        f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                        {
+                            "model": "context-timeout-model",
+                            "messages": [{"role": "user", "content": "continue despite context timeout"}],
+                        },
+                    )
+
+            self.assertEqual(body["choices"][0]["message"]["content"], "timeout degraded ok")
+            self.assertFalse(body["lmm"]["context_used"])
+            telemetry = json.loads(state_path.read_text(encoding="utf-8"))
+            recent = telemetry["recent_requests"][0]
+            self.assertEqual(recent["context_status"], "timeout")
+            self.assertEqual(recent["mode"], "routed-basic")
+            self.assertIn("continue despite context timeout", str(captured["prompt"]))
+
+    def test_gateway_context_mcp_command_result_is_used(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+            captured["prompt"] = prompt
+            return {
+                "text": "mcp context ok",
+                "target": "llamacpp",
+                "reason_code": "default_local",
+                "reason": "default - use local llama.cpp",
+                "latency_ms": 12,
+            }, {"X-LMM-Route-Mode": "routed"}
+
+        completed = subprocess.CompletedProcess(
+            args=["ctx-bridge"],
+            returncode=0,
+            stdout=json.dumps({"context": {"path": "/repo/context.md", "content": "retrieved from mcp"}}),
+            stderr="",
+        )
+        gateway = self.load_gateway_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {
+                "LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json"),
+                "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
+                "LMM_CONTEXT_MCP_COMMAND": "ctx-bridge",
+                "LMM_CONTEXT_MCP_TIMEOUT_MS": "500",
+            }, clear=False):
+                with mock.patch.object(gateway.subprocess, "run", return_value=completed):
+                    with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+                        server = self.start_gateway_server(gateway_module=gateway)
+                        body = self.post_json(
+                            f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                            {
+                                "model": "context-command-model",
+                                "messages": [{"role": "user", "content": "use command context"}],
+                            },
+                        )
+
+        self.assertTrue(body["lmm"]["context_used"])
+        self.assertEqual(body["lmm"]["context_status"], "retrieved")
+        self.assertIn("retrieved from mcp", str(captured["prompt"]))
+
+    def test_gateway_glyph_encoding_failure_uses_raw_context_fallback(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+            captured["prompt"] = prompt
+            return {
+                "text": "raw fallback ok",
+                "target": "llamacpp",
+                "reason_code": "default_local",
+                "reason": "default - use local llama.cpp",
+                "latency_ms": 11,
+            }, {"X-LMM-Route-Mode": "routed"}
+
+        gateway = self.load_gateway_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {
+                "LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json"),
+                "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
+                "LMM_GLYPH_ENCODING_FORCE_ERROR": "1",
+            }, clear=False):
+                with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+                    server = self.start_gateway_server(gateway_module=gateway)
+                    body = self.post_json(
+                        f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                        {
+                            "model": "raw-fallback-model",
+                            "messages": [{"role": "user", "content": "use raw context"}],
+                            "lmm_context": {"path": "/repo/a.py", "content": "important context"},
+                        },
+                    )
+
+        self.assertTrue(body["lmm"]["context_used"])
+        self.assertFalse(body["lmm"]["glyph_encoding_used"])
+        self.assertEqual(body["lmm"]["glyph_encoding_status"], "error_raw_fallback")
+        self.assertIn("[Retrieved Context]", str(captured["prompt"]))
+        self.assertNotIn("[Glyph Encoding v1]", str(captured["prompt"]))
+
     def test_gateway_chat_completion_does_not_fail_when_telemetry_write_fails(self) -> None:
         def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
             return {
@@ -1888,6 +2063,55 @@ class Phase0ContractTests(unittest.TestCase):
         self.assertEqual(captured["model"], "stream-model")
         self.assertEqual(captured["max_tokens"], 42)
         self.assertEqual(captured["temperature"], 0.1)
+
+    def test_gateway_streaming_uses_same_context_enrichment_path(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_stream_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str], object]:
+            captured["prompt"] = prompt
+
+            def chunks() -> object:
+                yield "context stream"
+
+            return {
+                "target": "llamacpp",
+                "reason_code": "default_local",
+                "reason": "default - use local llama.cpp",
+            }, {"X-LMM-Route-Mode": "routed"}, chunks()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gateway = self.load_gateway_module()
+            with mock.patch.dict(os.environ, {
+                "LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json"),
+                "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
+            }, clear=False):
+                with mock.patch.object(gateway, "route_prompt_stream", side_effect=fake_stream_route):
+                    server = self.start_gateway_server(gateway_module=gateway)
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                        data=json.dumps({
+                            "model": "stream-context-model",
+                            "messages": [{"role": "user", "content": "stream with context"}],
+                            "stream": True,
+                            "lmm_context": {
+                                "items": [
+                                    {"path": "/repo/a.py", "content": "stream context alpha"},
+                                    {"path": "/repo/b.py", "content": "stream context beta"},
+                                ]
+                            },
+                        }).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        raw = response.read().decode("utf-8")
+
+            telemetry = json.loads((Path(tmpdir) / "gateway-state.json").read_text(encoding="utf-8"))
+
+        self.assertIn("data: [DONE]", raw)
+        self.assertIn("[Glyph Encoding v1]", str(captured["prompt"]))
+        self.assertEqual(telemetry["recent_requests"][0]["mode"], "routed-full")
+        self.assertTrue(telemetry["recent_requests"][0]["context_used"])
 
     def test_gateway_streaming_client_disconnect_is_recorded_without_raising(self) -> None:
         gateway = self.load_gateway_module()

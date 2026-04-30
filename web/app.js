@@ -456,6 +456,7 @@ function renderStatus(data) {
   renderOperationActivity(data.operation_activity || {}, data.meta || {});
   renderGlyphosTelemetry(data.glyphos_telemetry || {}, data);
   renderObservedGlyphRoutes(data.glyphos_telemetry || {}, data.meta?.dashboard_started_at || "");
+  renderContextPipelineTrace(data.gateway_requests || {});
   renderContextGlyphosPipeline(deriveContextGlyphosPipeline(data), deriveContextModeMcp(data), data.glyphos_telemetry || {});
 
   setText("#metric-model", current.alias || "stopped");
@@ -513,7 +514,7 @@ function renderStatus(data) {
   setText("#integration-endpoint-note", joinNotes([
     "Default routed harness endpoint.",
     data.gateway_backend_api_base ? `backend ${data.gateway_backend_api_base}` : "",
-    data.gateway_harness_mode_default ? `default ${data.gateway_harness_mode_default}` : "",
+    data.gateway_harness_mode_default ? `default ${routeModeLabel(data.gateway_harness_mode_default)}` : "",
   ]));
   const gateway = data.gateway || {};
   const gatewayRunning = gateway.running === "yes" || gateway.health === "yes";
@@ -529,7 +530,7 @@ function renderStatus(data) {
     displayPath(data.opencode_config_file || ""),
   ]) || "-");
   setText("#opencode-state", joinNotes([
-    data.opencode_route_mode ? `${data.opencode_route_mode} mode` : "",
+    data.opencode_route_mode ? `${routeModeLabel(data.opencode_route_mode)} mode` : "",
     data.opencode_api_base || "",
     data.opencode_preset ? `${data.opencode_preset} preset` : "not yet synced",
     data.opencode_timeout_ms ? `timeout ${Math.round(Number(data.opencode_timeout_ms) / 1000)}s` : "",
@@ -550,7 +551,7 @@ function renderStatus(data) {
     displayPath(data.openclaw_config_file || ""),
   ]) || "-");
   setText("#openclaw-state", joinNotes([
-    data.openclaw_route_mode ? `${data.openclaw_route_mode} mode` : "",
+    data.openclaw_route_mode ? `${routeModeLabel(data.openclaw_route_mode)} mode` : "",
     data.openclaw_api_base || "",
     data.openclaw_sync_note || "",
   ]) || "-");
@@ -581,6 +582,64 @@ function renderStatus(data) {
       ? "Restart the server in multi-client mode so multiple requests can run at once."
       : "Restart the server in single-client mode so one request runs at a time.",
   );
+}
+
+function routeModeLabel(mode) {
+  const normalized = String(mode || "").trim();
+  if (normalized === "routed-full") return "routed-full";
+  if (normalized === "routed-basic") return "routed-basic";
+  if (normalized === "routed") return "routed-full when context is available, routed-basic otherwise";
+  if (normalized === "direct") return "direct";
+  return normalized;
+}
+
+function latestGatewayRequest(gatewayRequests) {
+  const recent = gatewayRequests?.recent_requests;
+  return Array.isArray(recent) && recent.length && typeof recent[0] === "object" ? recent[0] : {};
+}
+
+function renderContextPipelineTrace(gatewayRequests) {
+  const trace = latestGatewayRequest(gatewayRequests);
+  if (!Object.keys(trace).length) {
+    setText("#context-trace-status", "Not observed");
+    setText("#context-trace-latency", "No LMM gateway request observed yet.");
+    setText("#context-trace-context", "Skipped");
+    setText("#context-trace-context-detail", "Context status appears after the next routed request.");
+    setText("#context-trace-encoding", "Skipped");
+    setText("#context-trace-encoding-detail", "Compression ratio appears when structured context is encoded.");
+    setText("#context-trace-route", "Not routed");
+    setText("#context-trace-route-detail", "GlyphOS target and backend result appear here.");
+    return;
+  }
+  const success = trace.success === true;
+  const contextLabel = trace.context_used ? "Context enriched" : `Context ${trace.context_status || "skipped"}`;
+  const encodingLabel = trace.glyph_encoding_used ? "Glyph encoded" : `Encoding ${trace.glyph_encoding_status || "skipped"}`;
+  const routeLabel = trace.route_target ? `Glyph-routed ${trace.route_target}` : "Not routed";
+  setText("#context-trace-status", success ? "Backend completed" : "Backend error");
+  setText("#context-trace-latency", joinNotes([
+    trace.mode || "",
+    trace.latency_ms ? `${trace.latency_ms}ms total` : "",
+    trace.harness || "",
+  ]) || "-");
+  setText("#context-trace-context", contextLabel);
+  setText("#context-trace-context-detail", joinNotes([
+    trace.context_source || "",
+    trace.context_latency_ms ? `${trace.context_latency_ms}ms` : "",
+    trace.context_error || "",
+  ]) || "-");
+  setText("#context-trace-encoding", encodingLabel);
+  setText("#context-trace-encoding-detail", joinNotes([
+    trace.raw_context_chars ? `${Number(trace.raw_context_chars).toLocaleString()} raw chars` : "",
+    trace.encoded_context_chars ? `${Number(trace.encoded_context_chars).toLocaleString()} encoded chars` : "",
+    trace.encoding_ratio ? `${Math.round(Number(trace.encoding_ratio) * 100)}% ratio` : "",
+    trace.estimated_token_delta ? `${Number(trace.estimated_token_delta).toLocaleString()} estimated tokens saved` : "",
+    trace.glyph_encoding_error || "",
+  ]) || "-");
+  setText("#context-trace-route", routeLabel);
+  setText("#context-trace-route-detail", joinNotes([
+    trace.reason_code || "",
+    success ? "Backend completed" : trace.error || "Backend error",
+  ]) || "-");
 }
 
 function isTruthySetting(value) {
@@ -689,12 +748,19 @@ function renderContextGlyphosPipeline(pipeline, contextModeMcp, glyphosTelemetry
     contextModeMcp.typecheck_script_exists ? "typecheck available" : "",
     contextModeMcp.root ? displayPath(contextModeMcp.root) : "",
   ]) || "-");
+  const trace = pipeline.latest_gateway_trace && typeof pipeline.latest_gateway_trace === "object" ? pipeline.latest_gateway_trace : {};
+  const traceSummary = pipeline.trace_summary || "";
+  const compression = trace.glyph_encoding_used && trace.encoding_ratio
+    ? `compression ${Math.round(Number(trace.encoding_ratio) * 100)}%`
+    : "";
   setText(
     "#context-glyphos-benefit",
     enabled
-      ? (observedAttempts > 0
-        ? `Feature is enabled. Glyph-routed traffic has been observed in this dashboard session (${observedAttempts} attempts).`
-        : "Feature is enabled, but no glyph-routed traffic has been observed in this dashboard session.")
+      ? (traceSummary
+        ? joinNotes([traceSummary, compression, trace.latency_ms ? `${trace.latency_ms}ms` : ""])
+        : observedAttempts > 0
+          ? `Glyph-routed traffic observed (${observedAttempts} attempts). Context and Glyph Encoding status appear after gateway requests.`
+          : "Feature is enabled. Gateway requests will show Context enriched, Glyph encoded, Glyph-routed, and Backend completed stages here.")
       : "Activate Feature enables the combined setting and syncs GlyphOS configuration. Observed traffic appears separately.",
   );
 

@@ -2576,6 +2576,7 @@ class Manager:
             current=current,
             context_mode_mcp=context_mode_mcp,
             glyphos_telemetry=glyphos_telemetry,
+            gateway_requests=gateway_requests if isinstance(gateway_requests, dict) else {},
         )
         return {
             "opencode_model": f"llamacpp/{current_model_name}" if current_model_name else "",
@@ -2638,6 +2639,7 @@ class Manager:
         current: dict[str, str],
         context_mode_mcp: dict[str, Any],
         glyphos_telemetry: dict[str, Any] | None = None,
+        gateway_requests: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         enabled = str(defaults.get("LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE", "")).strip().lower() in {"1", "true", "yes", "on"}
         glyphos_ready = self.glyphos_config_file.exists()
@@ -2653,13 +2655,25 @@ class Manager:
             blockers.append(str((glyphos_telemetry or {}).get("guidance") or "GlyphOS integration unavailable"))
         if not context_ready:
             blockers.append("Context Mode MCP package missing")
+        recent_gateway = (gateway_requests or {}).get("recent_requests")
+        latest_trace = recent_gateway[0] if isinstance(recent_gateway, list) and recent_gateway and isinstance(recent_gateway[0], dict) else {}
+        trace_summary = ""
+        if latest_trace:
+            trace_summary = " | ".join(part for part in [
+                "Context enriched" if latest_trace.get("context_used") else f"Context {latest_trace.get('context_status', 'skipped')}",
+                "Glyph encoded" if latest_trace.get("glyph_encoding_used") else f"Glyph Encoding {latest_trace.get('glyph_encoding_status', 'skipped')}",
+                f"Glyph-routed {latest_trace.get('route_target')}" if latest_trace.get("route_target") else "",
+                "Backend completed" if latest_trace.get("success") is True else "Backend error" if latest_trace.get("success") is False else "",
+            ] if part)
         return {
             "enabled": enabled,
             "ready": ready,
             "status": "ready" if ready else ("activation_pending" if enabled else "off"),
             "label": "Enabled" if ready else ("Blocked" if enabled else "Off"),
             "blockers": blockers,
-            "benefit": "Feature setting for Context MCP plus GlyphOS local routing.",
+            "benefit": "Feature setting for Context MCP, Glyph Encoding, and GlyphOS local routing.",
+            "latest_gateway_trace": latest_trace,
+            "trace_summary": trace_summary,
         }
 
     def glyphos_telemetry_snapshot(self, *, limit: int = 10) -> dict[str, Any]:

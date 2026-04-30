@@ -3842,6 +3842,21 @@ harness_api_base() {
     fi
 }
 
+harness_route_label() {
+    local mode
+    local context_pipeline
+    mode="$(normalize_harness_mode "${1:-}")"
+    context_pipeline="${LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE:-}"
+    context_pipeline="${context_pipeline,,}"
+    if [[ "$mode" == "direct" ]]; then
+        printf 'direct\n'
+    elif [[ "$context_pipeline" == "1" || "$context_pipeline" == "true" || "$context_pipeline" == "yes" || "$context_pipeline" == "on" ]]; then
+        printf 'routed-full\n'
+    else
+        printf 'routed-basic\n'
+    fi
+}
+
 api_current_model_id() {
     local api_base
 
@@ -4089,6 +4104,7 @@ sync_opencode() {
     printf 'model_path: %s\n' "$SYNC_TARGET_MODEL_PATH"
     printf 'opencode_model: llamacpp/%s\n' "$SYNC_TARGET_MODEL_NAME"
     printf 'route_mode: %s\n' "$mode"
+    printf 'route_label: %s\n' "$(harness_route_label "$mode")"
     printf 'api_base: %s\n' "$api_base"
     printf 'backend_api_base: %s\n' "$(upstream_api_base)"
     printf 'gateway_api_base: %s\n' "$(lmm_gateway_api_base)"
@@ -4166,6 +4182,7 @@ sync_openclaw() {
     printf 'model_path: %s\n' "$SYNC_TARGET_MODEL_PATH"
     printf 'openclaw_model: llamacpp/%s\n' "$SYNC_TARGET_MODEL_ID"
     printf 'route_mode: %s\n' "$mode"
+    printf 'route_label: %s\n' "$(harness_route_label "$mode")"
     printf 'api_base: %s\n' "$api_base"
     printf 'backend_api_base: %s\n' "$(upstream_api_base)"
     printf 'gateway_api_base: %s\n' "$(lmm_gateway_api_base)"
