@@ -32,12 +32,22 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
     temp_path.replace(path)
 
 
+def int_or_zero(value: Any) -> int:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
+
+
 def sync_opencode(args: argparse.Namespace) -> None:
     config_path = Path(args.config_file).expanduser()
     state_path = Path(args.state_file).expanduser()
     model_name = args.model_name
     api_base = args.api_base
     provider_model = f"llamacpp/{model_name}"
+    compaction_reserved = int(args.compaction_reserved)
+    if compaction_reserved < 1024:
+        raise SystemExit("opencode compaction reserve must be at least 1024")
 
     config = load_json(config_path)
     providers = config.get("provider")
@@ -68,6 +78,13 @@ def sync_opencode(args: argparse.Namespace) -> None:
     config["provider"] = providers
     config["model"] = provider_model
     config["small_model"] = provider_model
+    compaction = config.get("compaction")
+    if not isinstance(compaction, dict):
+        compaction = {}
+    compaction["auto"] = True
+    compaction["prune"] = True
+    compaction["reserved"] = compaction_reserved
+    config["compaction"] = compaction
     write_json(config_path, config)
 
     state = load_json(state_path)
@@ -94,6 +111,25 @@ def sync_opencode(args: argparse.Namespace) -> None:
     state["modelID"] = model_name
     state["id"] = provider_model
     state["provider"] = "llamacpp"
+    diagnostics = state.get("llamaModelManager")
+    if not isinstance(diagnostics, dict):
+        diagnostics = {}
+    diagnostics["opencodeSync"] = {
+        "preset": args.preset,
+        "providerTimeoutMs": int(args.timeout_ms),
+        "chunkTimeoutMs": int(args.chunk_timeout_ms),
+        "compactionReserved": compaction_reserved,
+        "contextWindow": int_or_zero(args.context_window),
+        "sessionTimeoutObservedMs": 1800000,
+        "timeoutSource": (
+            "Observed opencode message/session timeout around 1800s is distinct from provider timeout; "
+            "LMM sets provider timeout and compaction headroom, but opencode must preserve parent abort causes in its own runtime."
+        ),
+        "pendingToolAbortGuidance": (
+            "If a pending write shows empty input/raw and Tool execution aborted, inspect the parent message error first."
+        ),
+    }
+    state["llamaModelManager"] = diagnostics
     variant = state.get("variant")
     if not isinstance(variant, dict):
         variant = {}
@@ -202,6 +238,9 @@ def main() -> int:
     op.add_argument("--api-base", required=True)
     op.add_argument("--timeout-ms", required=True, type=int)
     op.add_argument("--chunk-timeout-ms", required=True, type=int)
+    op.add_argument("--compaction-reserved", default=16384, type=int)
+    op.add_argument("--context-window", default=0, type=int)
+    op.add_argument("--preset", default="balanced")
     op.set_defaults(func=sync_opencode)
 
     oc = sub.add_parser("openclaw")

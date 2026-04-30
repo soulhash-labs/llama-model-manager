@@ -287,6 +287,8 @@ These integrations are optional. The default product behavior remains the local 
 - `opencode` keeps its own local client config in `~/.config/opencode/opencode.json`, so it can keep pointing at a stale GGUF even after `llama-model switch`.
 - successful model switches auto-run the OpenCode sync by default with `LLAMA_MODEL_SYNC_OPENCODE=1`; set it to `0` for manual-only sync.
 - `llama-model sync-opencode` updates the `llamacpp` provider endpoint, default model, and local model-state wiring to match `llama-model current`.
+- `llama-model sync-opencode --preset long-run` also writes model-aware `compaction.reserved` headroom. For 128k-token local contexts it reserves `64000` tokens, which avoids the observed long-session `Preparing write...` stall pattern where opencode aborts a pending tool after a parent message timeout or compaction overflow.
+- `OPENCODE_COMPACTION_RESERVED=N` overrides the generated reserve. LMM records provider timeout, chunk timeout, compaction reserve, and the observed 1800s message-timeout caveat in `~/.local/state/opencode/model.json` under `llamaModelManager.opencodeSync`.
 - `llama-model sync-openclaw` updates `~/.openclaw/openclaw.json` or `~/.openclaw-<profile>/openclaw.json` so OpenClaw points directly at the live local endpoint.
 - `llama-model sync-claude` writes `~/.claude/settings.json` for Claude Code, and `llama-model claude-gateway` runs a local Anthropic-compatible bridge in front of the current llama.cpp server.
 - `llama-model sync-glyphos` writes `~/.glyphos/config.yaml` so the bundled public GlyphOS AI Compute package can target the active local `llama.cpp` endpoint directly.

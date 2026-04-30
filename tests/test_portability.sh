@@ -182,11 +182,14 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$readme" "backend-, platform-, and architecture-specific"
     assert_contains "$readme" "shows the install commands it plans to run"
     assert_contains "$readme" "llama-model sync-opencode --preset long-run"
+    assert_contains "$readme" "compaction.reserved"
+    assert_contains "$readme" "OPENCODE_COMPACTION_RESERVED"
     assert_contains "$readme" "llama-model sync-openclaw"
     assert_contains "$readme" "llama-model sync-claude"
     assert_contains "$readme" "llama-model sync-glyphos"
     assert_contains "$help" "llama-model build-runtime --backend auto"
     assert_contains "$help" "llama-model sync-opencode --preset balanced|long-run"
+    assert_contains "$help" "compaction.reserved"
     assert_contains "$help" "llama-model sync-openclaw"
     assert_contains "$help" "llama-model sync-claude"
     assert_contains "$help" "llama-model claude-gateway start"
@@ -1042,6 +1045,9 @@ EOF
     assert_contains "$output" "opencode_model: llamacpp/Qwen3.5-9B-Q8_0.gguf"
     assert_contains "$output" "timeout_ms: 1800000"
     assert_contains "$output" "chunk_timeout_ms: 60000"
+    assert_contains "$output" "compaction_reserved: 16384"
+    assert_contains "$output" "context_window: 65536"
+    assert_contains "$output" "timeout_source_note: provider timeout is configured here"
 
     config="$(cat "$tmp/config/opencode/opencode.json")"
     state_json="$(cat "$tmp/state/opencode/model.json")"
@@ -1049,11 +1055,17 @@ EOF
     assert_contains "$config" '"baseURL": "http://127.0.0.1:19081/v1"'
     assert_contains "$config" '"timeout": 1800000'
     assert_contains "$config" '"chunkTimeout": 60000'
+    assert_contains "$config" '"auto": true'
+    assert_contains "$config" '"prune": true'
+    assert_contains "$config" '"reserved": 16384'
     assert_contains "$config" '"other"'
     assert_contains "$state_json" '"providerID": "llamacpp"'
     assert_contains "$state_json" '"modelID": "Qwen3.5-9B-Q8_0.gguf"'
     assert_contains "$state_json" '"id": "llamacpp/Qwen3.5-9B-Q8_0.gguf"'
     assert_contains "$state_json" '"llamacpp/Qwen3.5-9B-Q8_0.gguf"'
+    assert_contains "$state_json" '"compactionReserved": 16384'
+    assert_contains "$state_json" '"sessionTimeoutObservedMs": 1800000'
+    assert_contains "$state_json" '"pendingToolAbortGuidance"'
     assert_contains "$state_json" '"favorite"'
 }
 
@@ -1075,11 +1087,34 @@ EOF
     assert_contains "$output" "preset: long-run"
     assert_contains "$output" "timeout_ms: 7200000"
     assert_contains "$output" "chunk_timeout_ms: 300000"
+    assert_contains "$output" "compaction_reserved: 32768"
     assert_contains "$output" "runtime_note: single-client recommended for long local reasoning sessions"
 
     config="$(cat "$tmp/config/opencode/opencode.json")"
     assert_contains "$config" '"timeout": 7200000'
     assert_contains "$config" '"chunkTimeout": 300000'
+    assert_contains "$config" '"reserved": 32768'
+}
+
+test_sync_opencode_compaction_override() {
+    local tmp
+    local output
+    local config
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    mkdir -p "$tmp/models" "$tmp/config/opencode" "$tmp/state/opencode"
+    : >"$tmp/models/Qwen3.5-9B-Q8_0.gguf"
+    cat >"$tmp/config/llama-server/models.tsv" <<EOF
+# alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes
+qwen35-9b-q8	$tmp/models/Qwen3.5-9B-Q8_0.gguf		32768
+EOF
+
+    output="$(OPENCODE_COMPACTION_RESERVED=24576 run_cli "$tmp" sync-opencode --preset long-run qwen35-9b-q8)"
+    assert_contains "$output" "compaction_reserved: 24576"
+
+    config="$(cat "$tmp/config/opencode/opencode.json")"
+    assert_contains "$config" '"reserved": 24576'
 }
 
 test_switch_auto_syncs_opencode_by_default() {
@@ -1594,6 +1629,7 @@ main() {
     test_integration_sync_cli_glyphos_entrypoint
     test_sync_opencode_updates_config_and_state
     test_sync_opencode_long_run_preset
+    test_sync_opencode_compaction_override
     test_switch_auto_syncs_opencode_by_default
     test_switch_skips_opencode_when_auto_sync_disabled
     test_switch_opencode_sync_failure_is_non_fatal

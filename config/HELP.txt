@@ -111,6 +111,7 @@ Client integrations:
   opencode keeps its own config under ~/.config/opencode/opencode.json and state under ~/.local/state/opencode/model.json.
   Successful model switches sync OpenCode by default via LLAMA_MODEL_SYNC_OPENCODE=1. Set it to 0 for manual-only sync.
   Run `llama-model sync-opencode --preset balanced|long-run` to align it with the active llama.cpp runtime.
+  The long-run preset also writes top-level compaction headroom (`compaction.reserved`) so large tool-heavy sessions compact before write/edit calls run out of context. Override with OPENCODE_COMPACTION_RESERVED=N if needed.
 
   OpenClaw keeps its provider config under ~/.openclaw/openclaw.json or ~/.openclaw-<profile>/openclaw.json.
   Run `llama-model sync-openclaw` to point it at the live local endpoint. Set LLAMA_MODEL_SYNC_OPENCLAW=1 to also update it after successful switches.

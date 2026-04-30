@@ -3857,6 +3857,46 @@ opencode_preset_values() {
     esac
 }
 
+opencode_compaction_reserved() {
+    local preset="$1"
+    local context_window="${2:-0}"
+    local override="${OPENCODE_COMPACTION_RESERVED:-}"
+
+    if [[ -n "$override" ]]; then
+        [[ "$override" =~ ^[0-9]+$ ]] || die "OPENCODE_COMPACTION_RESERVED must be a positive integer"
+        (( override >= 1024 )) || die "OPENCODE_COMPACTION_RESERVED must be at least 1024"
+        printf '%s\n' "$override"
+        return 0
+    fi
+
+    [[ "$context_window" =~ ^[0-9]+$ ]] || context_window=0
+    if [[ "$preset" == "long-run" || "$preset" == "longrun" ]]; then
+        if (( context_window >= 128000 )); then
+            printf '64000\n'
+        elif (( context_window >= 65536 )); then
+            printf '32768\n'
+        elif (( context_window >= 32768 )); then
+            printf '16384\n'
+        elif (( context_window > 0 )); then
+            printf '%s\n' "$(( context_window / 4 > 4096 ? context_window / 4 : 4096 ))"
+        else
+            printf '64000\n'
+        fi
+    else
+        if (( context_window >= 128000 )); then
+            printf '32768\n'
+        elif (( context_window >= 65536 )); then
+            printf '16384\n'
+        elif (( context_window >= 32768 )); then
+            printf '8192\n'
+        elif (( context_window > 0 )); then
+            printf '%s\n' "$(( context_window / 8 > 4096 ? context_window / 8 : 4096 ))"
+        else
+            printf '16384\n'
+        fi
+    fi
+}
+
 sync_opencode() {
     local preset="balanced"
     local spec=""
@@ -3865,6 +3905,8 @@ sync_opencode() {
     local api_base
     local timeout_ms
     local chunk_timeout_ms
+    local compaction_reserved
+    local context_window
     local runtime_note=""
 
     while (($#)); do
@@ -3886,6 +3928,10 @@ sync_opencode() {
 
     resolve_sync_target "$spec"
     api_base="$(upstream_api_base)"
+    context_window="${SYNC_TARGET_CONTEXT:-$LLAMA_SERVER_CONTEXT}"
+    [[ "$context_window" =~ ^[0-9]+$ ]] || context_window="$LLAMA_SERVER_CONTEXT"
+    [[ "$context_window" =~ ^[0-9]+$ ]] || context_window=0
+    compaction_reserved="$(opencode_compaction_reserved "$preset" "$context_window")"
     [[ -f "$OPENCODE_CONFIG_FILE" ]] && config_exists_before="yes"
     [[ -f "$OPENCODE_MODEL_STATE_FILE" ]] && state_exists_before="yes"
     if [[ "$preset" == "long-run" && "$(configured_mode_name)" != "single-client" ]]; then
@@ -3899,7 +3945,10 @@ sync_opencode() {
         --display-name "$SYNC_TARGET_MODEL_NAME" \
         --api-base "$api_base" \
         --timeout-ms "$timeout_ms" \
-        --chunk-timeout-ms "$chunk_timeout_ms" || return $?
+        --chunk-timeout-ms "$chunk_timeout_ms" \
+        --compaction-reserved "$compaction_reserved" \
+        --context-window "$context_window" \
+        --preset "$preset" || return $?
 
     printf 'status: synced\n'
     printf 'preset: %s\n' "$preset"
@@ -3910,6 +3959,9 @@ sync_opencode() {
     printf 'api_base: %s\n' "$api_base"
     printf 'timeout_ms: %s\n' "$timeout_ms"
     printf 'chunk_timeout_ms: %s\n' "$chunk_timeout_ms"
+    printf 'compaction_reserved: %s\n' "$compaction_reserved"
+    printf 'context_window: %s\n' "$context_window"
+    printf 'timeout_source_note: provider timeout is configured here; observed 1800s message/session timeout must be surfaced by opencode runtime\n'
     printf 'runtime_note: %s\n' "$runtime_note"
     printf 'config_file: %s\n' "$OPENCODE_CONFIG_FILE"
     printf 'config_exists_before: %s\n' "$config_exists_before"

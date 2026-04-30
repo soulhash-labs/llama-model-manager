@@ -520,8 +520,10 @@ function renderStatus(data) {
     data.opencode_preset ? `${data.opencode_preset} preset` : "not yet synced",
     data.opencode_timeout_ms ? `timeout ${Math.round(Number(data.opencode_timeout_ms) / 1000)}s` : "",
     data.opencode_chunk_timeout_ms ? `chunk ${Math.round(Number(data.opencode_chunk_timeout_ms) / 1000)}s` : "",
+    data.opencode_compaction_reserved ? `reserve ${Number(data.opencode_compaction_reserved).toLocaleString()} tokens` : "",
     data.opencode_note || "",
   ]) || "-");
+  setTitle("#opencode-state", data.opencode_timeout_source_note || "");
   const opencodeBadge = $("#opencode-preset-badge");
   if (opencodeBadge) {
     opencodeBadge.classList.toggle("hidden", data.opencode_preset !== "long-run");

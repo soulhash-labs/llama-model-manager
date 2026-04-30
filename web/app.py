@@ -2506,6 +2506,10 @@ class Manager:
         opencode_options = opencode_provider.get("options", {}) if isinstance(opencode_provider.get("options"), dict) else {}
         opencode_timeout = str(opencode_options.get("timeout", "")) if opencode_options.get("timeout") is not None else ""
         opencode_chunk_timeout = str(opencode_options.get("chunkTimeout", "")) if opencode_options.get("chunkTimeout") is not None else ""
+        opencode_compaction = opencode_config.get("compaction", {}) if isinstance(opencode_config.get("compaction"), dict) else {}
+        opencode_compaction_reserved = str(opencode_compaction.get("reserved", "")) if opencode_compaction.get("reserved") is not None else ""
+        opencode_lmm_state = self.load_json_file(self.opencode_model_state_file).get("llamaModelManager", {})
+        opencode_sync_state = opencode_lmm_state.get("opencodeSync", {}) if isinstance(opencode_lmm_state, dict) else {}
         if opencode_timeout == "7200000" and opencode_chunk_timeout == "300000":
             opencode_preset = "long-run"
         elif opencode_timeout == "1800000" and opencode_chunk_timeout == "60000":
@@ -2520,7 +2524,7 @@ class Manager:
             if configured_mode != "single-client":
                 opencode_note = "single-client recommended for long local reasoning sessions"
             else:
-                opencode_note = "long-run preset active"
+                opencode_note = "long-run preset active with extra compaction headroom"
         openclaw_profile = defaults.get("OPENCLAW_PROFILE", "").strip() or "main"
         if openclaw_profile == "main":
             openclaw_config_file = self.home / ".openclaw" / "openclaw.json"
@@ -2550,6 +2554,8 @@ class Manager:
             "opencode_state_exists": self.opencode_model_state_file.exists(),
             "opencode_timeout_ms": opencode_timeout,
             "opencode_chunk_timeout_ms": opencode_chunk_timeout,
+            "opencode_compaction_reserved": opencode_compaction_reserved,
+            "opencode_timeout_source_note": str(opencode_sync_state.get("timeoutSource", "")) if isinstance(opencode_sync_state, dict) else "",
             "opencode_preset": opencode_preset,
             "opencode_note": opencode_note,
             "openclaw_model": f"llamacpp/{current_alias}" if current_alias else "",
