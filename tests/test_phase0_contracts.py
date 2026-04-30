@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import io
-import hashlib
 import json
 import os
 import subprocess
 import sys
-import threading
 import tempfile
+import threading
+import time
 import types
 import unittest
-import time
 import urllib.request
+from collections.abc import Iterator
 from http import HTTPStatus
-from urllib import error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 from unittest import mock
-
+from urllib import error
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 APP_PATH = ROOT_DIR / "web" / "app.py"
@@ -35,6 +36,7 @@ LMM_ERRORS_PATH = ROOT_DIR / "scripts" / "lmm_errors.py"
 LMM_STORAGE_PATH = ROOT_DIR / "scripts" / "lmm_storage.py"
 LMM_TYPES_PATH = ROOT_DIR / "scripts" / "lmm_types.py"
 LMM_HEALTH_PATH = ROOT_DIR / "scripts" / "lmm_health.py"
+LMM_PROVIDERS_PATH = ROOT_DIR / "scripts" / "lmm_providers.py"
 
 
 class Phase0ContractTests(unittest.TestCase):
@@ -74,19 +76,26 @@ class Phase0ContractTests(unittest.TestCase):
         bridge_spec.loader.exec_module(bridge)
         return bridge
 
+    def load_providers_module(self) -> object:
+        return self.load_script_module("llama_model_manager_providers", LMM_PROVIDERS_PATH)
+
     def test_lmm_config_validates_gateway_environment(self) -> None:
         config_module = self.load_script_module("llama_model_manager_config", LMM_CONFIG_PATH)
         with tempfile.TemporaryDirectory() as tmpdir:
             state_file = Path(tmpdir) / "gateway-state.json"
-            with mock.patch.dict(os.environ, {
-                "LLAMA_MODEL_GATEWAY_HOST": "127.0.0.9",
-                "LLAMA_MODEL_GATEWAY_PORT": "4510",
-                "LLAMA_MODEL_BACKEND_BASE_URL": "http://127.0.0.1:8089/v1",
-                "LMM_GATEWAY_STATE_FILE": str(state_file),
-                "LMM_GATEWAY_SSE_HEARTBEAT_SECONDS": "2.5",
-                "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
-                "LMM_CONTEXT_MCP_TIMEOUT_MS": "2500",
-            }, clear=False):
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LLAMA_MODEL_GATEWAY_HOST": "127.0.0.9",
+                    "LLAMA_MODEL_GATEWAY_PORT": "4510",
+                    "LLAMA_MODEL_BACKEND_BASE_URL": "http://127.0.0.1:8089/v1",
+                    "LMM_GATEWAY_STATE_FILE": str(state_file),
+                    "LMM_GATEWAY_SSE_HEARTBEAT_SECONDS": "2.5",
+                    "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
+                    "LMM_CONTEXT_MCP_TIMEOUT_MS": "2500",
+                },
+                clear=False,
+            ):
                 config = config_module.load_lmm_config_from_env()
 
         self.assertEqual(config.gateway.host, "127.0.0.9")
@@ -99,10 +108,14 @@ class Phase0ContractTests(unittest.TestCase):
 
     def test_lmm_config_rejects_invalid_gateway_values(self) -> None:
         config_module = self.load_script_module("llama_model_manager_config_invalid", LMM_CONFIG_PATH)
-        with mock.patch.dict(os.environ, {
-            "LLAMA_MODEL_GATEWAY_PORT": "70000",
-            "LLAMA_MODEL_BACKEND_BASE_URL": "not-a-url",
-        }, clear=False):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "LLAMA_MODEL_GATEWAY_PORT": "70000",
+                "LLAMA_MODEL_BACKEND_BASE_URL": "not-a-url",
+            },
+            clear=False,
+        ):
             with self.assertRaises(Exception) as raised:
                 config_module.load_lmm_config_from_env()
         self.assertIn("configuration", raised.exception.__class__.__name__.lower())
@@ -120,9 +133,27 @@ class Phase0ContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "gateway-state.json"
             store = storage_module.JsonGatewayTelemetryStore(path, recent_limit=2)
-            store.append_event({"mode": "routed-basic", "route_target": "llamacpp", "context_status": "empty", "success": True, "n": 1})
-            store.append_event({"mode": "routed-full", "route_target": "llamacpp", "context_status": "retrieved", "success": True, "n": 2})
-            state = store.append_event({"mode": "routed-basic", "route_target": "fallback", "context_status": "timeout", "success": False, "n": 3})
+            store.append_event(
+                {"mode": "routed-basic", "route_target": "llamacpp", "context_status": "empty", "success": True, "n": 1}
+            )
+            store.append_event(
+                {
+                    "mode": "routed-full",
+                    "route_target": "llamacpp",
+                    "context_status": "retrieved",
+                    "success": True,
+                    "n": 2,
+                }
+            )
+            state = store.append_event(
+                {
+                    "mode": "routed-basic",
+                    "route_target": "fallback",
+                    "context_status": "timeout",
+                    "success": False,
+                    "n": 3,
+                }
+            )
 
         self.assertEqual([item["n"] for item in state["recent_requests"]], [3, 2])
         self.assertEqual(state["counters"]["mode:routed-basic"], 2)
@@ -205,11 +236,13 @@ class Phase0ContractTests(unittest.TestCase):
             path = Path(tmpdir) / "run-records.json"
             store = storage_module.JsonRunRecordStore(path, recent_limit=3)
             for index in range(5):
-                store.append_record({
-                    "id": f"record-{index}",
-                    "status": "completed",
-                    "model": "model.gguf",
-                })
+                store.append_record(
+                    {
+                        "id": f"record-{index}",
+                        "status": "completed",
+                        "model": "model.gguf",
+                    }
+                )
 
             self.assertEqual(len(store.list_recent(limit=10)), 3)
             recent = store.list_recent()
@@ -251,7 +284,8 @@ class Phase0ContractTests(unittest.TestCase):
     def test_lmm_config_imports_without_scripts_on_sys_path(self) -> None:
         """Verify lmm_config.py is self-contained when loaded directly."""
         config_spec = importlib.util.spec_from_file_location(
-            "lmm_config_isolated_test", LMM_CONFIG_PATH,
+            "lmm_config_isolated_test",
+            LMM_CONFIG_PATH,
         )
         assert config_spec and config_spec.loader
         config_module = importlib.util.module_from_spec(config_spec)
@@ -362,7 +396,9 @@ class Phase0ContractTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         return WEB_APP.Manager(ROOT_DIR / "web")
 
-    def wait_for_download_terminal_status(self, manager: object, job_id: str, *, timeout: float = 5.0) -> dict[str, object]:
+    def wait_for_download_terminal_status(
+        self, manager: object, job_id: str, *, timeout: float = 5.0
+    ) -> dict[str, object]:
         deadline = time.time() + timeout
         while time.time() < deadline:
             store = manager.read_download_jobs_store()
@@ -426,10 +462,14 @@ class Phase0ContractTests(unittest.TestCase):
         status: int = 200,
         payload: dict[str, object] | None = None,
     ) -> ThreadingHTTPServer:
-        response_body = payload if payload is not None else {
-            "object": "list",
-            "data": [{"id": "mock-model", "object": "model"}],
-        }
+        response_body = (
+            payload
+            if payload is not None
+            else {
+                "object": "list",
+                "data": [{"id": "mock-model", "object": "model"}],
+            }
+        )
 
         class BackendHandler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
@@ -835,13 +875,23 @@ class Phase0ContractTests(unittest.TestCase):
         api_base = f"http://127.0.0.1:{app_server.server_port}"
         cases = [
             ("/api/remote/search", {"query": "qwen"}, "search_remote_models", "remote_models"),
-            ("/api/downloads/start", {"repo_id": "author/model", "artifact_name": "model.gguf"}, "start_remote_download", "job"),
+            (
+                "/api/downloads/start",
+                {"repo_id": "author/model", "artifact_name": "model.gguf"},
+                "start_remote_download",
+                "job",
+            ),
             ("/api/downloads/cancel", {"id": "job-cancel"}, "cancel_download_job", "job"),
             ("/api/downloads/retry", {"id": "job-retry"}, "retry_download_job", "job"),
             ("/api/downloads/resume", {"id": "job-resume"}, "resume_download_job", "job"),
             ("/api/downloads/cleanup", {"max_age_seconds": 123}, "cleanup_stale_partial_downloads", "removed"),
             ("/api/downloads/cleanup-duplicates", {}, "cleanup_duplicate_completed_job_records", "removed"),
-            ("/api/downloads/delete-orphans", {"paths": ["/tmp/orphan.part"]}, "delete_orphaned_download_artifacts", "deleted"),
+            (
+                "/api/downloads/delete-orphans",
+                {"paths": ["/tmp/orphan.part"]},
+                "delete_orphaned_download_artifacts",
+                "deleted",
+            ),
             ("/api/downloads/recover", {}, "recover_stale_download_jobs", "recovered"),
             ("/api/downloads/pause-queue", {}, "pause_download_queue", "download_policy"),
             ("/api/downloads/resume-queue", {}, "resume_download_queue", "download_policy"),
@@ -1040,16 +1090,15 @@ class Phase0ContractTests(unittest.TestCase):
             stale_package.__path__ = [str(fake_package)]  # type: ignore[attr-defined]
             stale_compute = types.ModuleType("glyphos_ai.ai_compute")
             stale_compute.__path__ = [str(fake_compute)]  # type: ignore[attr-defined]
-            old_modules = {
-                name: sys.modules.get(name)
-                for name in ("glyphos_ai", "glyphos_ai.ai_compute")
-            }
+            old_modules = {name: sys.modules.get(name) for name in ("glyphos_ai", "glyphos_ai.ai_compute")}
             sys.modules["glyphos_ai"] = stale_package
             sys.modules["glyphos_ai.ai_compute"] = stale_compute
-            self.addCleanup(lambda: [
-                sys.modules.pop(name, None) if module is None else sys.modules.__setitem__(name, module)
-                for name, module in old_modules.items()
-            ])
+            self.addCleanup(
+                lambda: [
+                    sys.modules.pop(name, None) if module is None else sys.modules.__setitem__(name, module)
+                    for name, module in old_modules.items()
+                ]
+            )
 
             telemetry = manager.glyphos_telemetry_snapshot()
 
@@ -1285,10 +1334,20 @@ class Phase0ContractTests(unittest.TestCase):
                     "schema_version": 1,
                     "updated_at": "2026-04-21T00:00:00+00:00",
                     "items": [
-                        {"id": "running-a", "status": "running", "repo_id": "author/model", "artifact_name": "running.gguf"},
+                        {
+                            "id": "running-a",
+                            "status": "running",
+                            "repo_id": "author/model",
+                            "artifact_name": "running.gguf",
+                        },
                         {"id": "queued-a", "status": "queued", "repo_id": "author/model", "artifact_name": "a.gguf"},
                         {"id": "queued-b", "status": "queued", "repo_id": "author/model", "artifact_name": "b.gguf"},
-                        {"id": "failed-a", "status": "failed", "repo_id": "author/model", "artifact_name": "failed.gguf"},
+                        {
+                            "id": "failed-a",
+                            "status": "failed",
+                            "repo_id": "author/model",
+                            "artifact_name": "failed.gguf",
+                        },
                     ],
                 },
             )
@@ -1422,7 +1481,7 @@ class Phase0ContractTests(unittest.TestCase):
                 self.end_headers()
                 for offset in range(0, len(payload), 16_384):
                     try:
-                        self.wfile.write(payload[offset:offset + 16_384])
+                        self.wfile.write(payload[offset : offset + 16_384])
                         self.wfile.flush()
                     except (BrokenPipeError, ConnectionResetError):
                         return
@@ -1465,8 +1524,12 @@ class Phase0ContractTests(unittest.TestCase):
                 "source_url": "https://huggingface.co/author/queued",
                 "sha256": "",
                 "destination_root": str(Path(tmpdir) / "downloads"),
-                "destination_path": str(Path(tmpdir) / "downloads" / "huggingface" / "author" / "queued" / "queued.gguf"),
-                "partial_path": str(Path(tmpdir) / "downloads" / "huggingface" / "author" / "queued" / "queued.gguf.queued-b.part"),
+                "destination_path": str(
+                    Path(tmpdir) / "downloads" / "huggingface" / "author" / "queued" / "queued.gguf"
+                ),
+                "partial_path": str(
+                    Path(tmpdir) / "downloads" / "huggingface" / "author" / "queued" / "queued.gguf.queued-b.part"
+                ),
                 "bytes_downloaded": 0,
                 "bytes_total": len(payload),
                 "progress": 0.0,
@@ -1527,8 +1590,17 @@ class Phase0ContractTests(unittest.TestCase):
                     "alias": "model",
                     "download_url": f"http://127.0.0.1:{server.server_port}/model.gguf",
                     "destination_root": str(Path(tmpdir) / "downloads"),
-                    "destination_path": str(Path(tmpdir) / "downloads" / "huggingface" / "author" / "model" / "model.gguf"),
-                    "partial_path": str(Path(tmpdir) / "downloads" / "huggingface" / "author" / "model" / "model.gguf.queued-paused.part"),
+                    "destination_path": str(
+                        Path(tmpdir) / "downloads" / "huggingface" / "author" / "model" / "model.gguf"
+                    ),
+                    "partial_path": str(
+                        Path(tmpdir)
+                        / "downloads"
+                        / "huggingface"
+                        / "author"
+                        / "model"
+                        / "model.gguf.queued-paused.part"
+                    ),
                     "bytes_total": len(payload),
                     "bytes_downloaded": 0,
                     "progress": 0.0,
@@ -1699,10 +1771,20 @@ class Phase0ContractTests(unittest.TestCase):
                     "schema_version": 1,
                     "updated_at": "2026-04-21T00:00:00+00:00",
                     "items": [
-                        {"id": "running-keep", "status": "running", "repo_id": "author/model", "artifact_name": "running.gguf"},
+                        {
+                            "id": "running-keep",
+                            "status": "running",
+                            "repo_id": "author/model",
+                            "artifact_name": "running.gguf",
+                        },
                         {"id": "queued-a", "status": "queued", "repo_id": "author/model", "artifact_name": "a.gguf"},
                         {"id": "queued-b", "status": "queued", "repo_id": "author/model", "artifact_name": "b.gguf"},
-                        {"id": "completed-keep", "status": "completed", "repo_id": "author/model", "artifact_name": "done.gguf"},
+                        {
+                            "id": "completed-keep",
+                            "status": "completed",
+                            "repo_id": "author/model",
+                            "artifact_name": "done.gguf",
+                        },
                     ],
                 },
             )
@@ -1724,7 +1806,12 @@ class Phase0ContractTests(unittest.TestCase):
                     "schema_version": 1,
                     "updated_at": "2026-04-21T00:00:00+00:00",
                     "items": [
-                        {"id": "running-keep", "status": "running", "repo_id": "author/model", "artifact_name": "running.gguf"},
+                        {
+                            "id": "running-keep",
+                            "status": "running",
+                            "repo_id": "author/model",
+                            "artifact_name": "running.gguf",
+                        },
                         {"id": "queued-a", "status": "queued", "repo_id": "author/model", "artifact_name": "a.gguf"},
                     ],
                 },
@@ -1746,7 +1833,12 @@ class Phase0ContractTests(unittest.TestCase):
                     "schema_version": 1,
                     "updated_at": "2026-04-21T00:00:00+00:00",
                     "items": [
-                        {"id": "running-keep", "status": "running", "repo_id": "author/model", "artifact_name": "running.gguf"},
+                        {
+                            "id": "running-keep",
+                            "status": "running",
+                            "repo_id": "author/model",
+                            "artifact_name": "running.gguf",
+                        },
                         {"id": "queued-a", "status": "queued", "repo_id": "author/model", "artifact_name": "a.gguf"},
                         {"id": "queued-b", "status": "queued", "repo_id": "author/model", "artifact_name": "b.gguf"},
                     ],
@@ -1795,7 +1887,12 @@ class Phase0ContractTests(unittest.TestCase):
                     "schema_version": 1,
                     "updated_at": "2026-04-21T00:00:00+00:00",
                     "items": [
-                        {"id": "running-keep", "status": "running", "repo_id": "author/model", "artifact_name": "running.gguf"},
+                        {
+                            "id": "running-keep",
+                            "status": "running",
+                            "repo_id": "author/model",
+                            "artifact_name": "running.gguf",
+                        },
                         {"id": "queued-a", "status": "queued", "repo_id": "author/model", "artifact_name": "a.gguf"},
                         {"id": "queued-b", "status": "queued", "repo_id": "author/model", "artifact_name": "b.gguf"},
                         {"id": "queued-c", "status": "queued", "repo_id": "author/model", "artifact_name": "c.gguf"},
@@ -1807,11 +1904,15 @@ class Phase0ContractTests(unittest.TestCase):
 
             self.assertEqual(deprioritized["id"], "queued-a")
             store = manager.read_download_jobs_store()
-            self.assertEqual([item["id"] for item in store["items"]], ["running-keep", "queued-b", "queued-a", "queued-c"])
+            self.assertEqual(
+                [item["id"] for item in store["items"]], ["running-keep", "queued-b", "queued-a", "queued-c"]
+            )
 
             manager.deprioritize_queued_download_job("queued-c")
             store_after_last = manager.read_download_jobs_store()
-            self.assertEqual([item["id"] for item in store_after_last["items"]], ["running-keep", "queued-b", "queued-a", "queued-c"])
+            self.assertEqual(
+                [item["id"] for item in store_after_last["items"]], ["running-keep", "queued-b", "queued-a", "queued-c"]
+            )
 
             with self.assertRaisesRegex(ValueError, "Only queued download jobs can be deprioritized"):
                 manager.deprioritize_queued_download_job("running-keep")
@@ -1941,7 +2042,9 @@ class Phase0ContractTests(unittest.TestCase):
                 },
             )
 
-            result = manager.delete_orphaned_download_artifacts([str(orphan_path.resolve()), str(referenced_path.resolve())])
+            result = manager.delete_orphaned_download_artifacts(
+                [str(orphan_path.resolve()), str(referenced_path.resolve())]
+            )
 
             self.assertEqual(result["removed"], [str(orphan_path.resolve())])
             self.assertEqual(result["skipped"], [str(referenced_path.resolve())])
@@ -2112,7 +2215,9 @@ class Phase0ContractTests(unittest.TestCase):
             model_path.write_text("", encoding="utf-8")
 
             manager.save_model({"alias": "ready", "path": str(model_path)})
-            (Path(tmpdir) / "state" / "llama-server" / "validation-results.json").parent.mkdir(parents=True, exist_ok=True)
+            (Path(tmpdir) / "state" / "llama-server" / "validation-results.json").parent.mkdir(
+                parents=True, exist_ok=True
+            )
             (Path(tmpdir) / "state" / "llama-server" / "validation-results.json").write_text(
                 json.dumps(
                     {
@@ -2152,13 +2257,17 @@ class Phase0ContractTests(unittest.TestCase):
             state_path = Path(tmpdir) / "gateway-state.json"
             captured: dict[str, object] = {}
 
-            def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
-                captured.update({
-                    "prompt": prompt,
-                    "model": model,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                })
+            def fake_route(
+                prompt: str, model: str, max_tokens: int, temperature: float
+            ) -> tuple[dict[str, object], dict[str, str]]:
+                captured.update(
+                    {
+                        "prompt": prompt,
+                        "model": model,
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                    }
+                )
                 return {
                     "text": "routed ok",
                     "target": "llamacpp",
@@ -2206,7 +2315,9 @@ class Phase0ContractTests(unittest.TestCase):
             state_path = Path(tmpdir) / "gateway-state.json"
             captured: dict[str, object] = {}
 
-            def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+            def fake_route(
+                prompt: str, model: str, max_tokens: int, temperature: float
+            ) -> tuple[dict[str, object], dict[str, str]]:
                 captured["prompt"] = prompt
                 return {
                     "text": "encoded ok",
@@ -2224,10 +2335,14 @@ class Phase0ContractTests(unittest.TestCase):
                 ]
             }
             gateway = self.load_gateway_module()
-            with mock.patch.dict(os.environ, {
-                "LMM_GATEWAY_STATE_FILE": str(state_path),
-                "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
-            }, clear=False):
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LMM_GATEWAY_STATE_FILE": str(state_path),
+                    "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
+                },
+                clear=False,
+            ):
                 with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
                     server = self.start_gateway_server(gateway_module=gateway)
                     body = self.post_json(
@@ -2258,7 +2373,9 @@ class Phase0ContractTests(unittest.TestCase):
             state_path = Path(tmpdir) / "gateway-state.json"
             captured: dict[str, object] = {}
 
-            def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+            def fake_route(
+                prompt: str, model: str, max_tokens: int, temperature: float
+            ) -> tuple[dict[str, object], dict[str, str]]:
                 captured["prompt"] = prompt
                 return {
                     "text": "timeout degraded ok",
@@ -2270,12 +2387,16 @@ class Phase0ContractTests(unittest.TestCase):
 
             gateway = self.load_gateway_module()
             sleeper = f"{sys.executable} -c 'import time; time.sleep(1)'"
-            with mock.patch.dict(os.environ, {
-                "LMM_GATEWAY_STATE_FILE": str(state_path),
-                "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
-                "LMM_CONTEXT_MCP_COMMAND": sleeper,
-                "LMM_CONTEXT_MCP_TIMEOUT_MS": "10",
-            }, clear=False):
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LMM_GATEWAY_STATE_FILE": str(state_path),
+                    "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
+                    "LMM_CONTEXT_MCP_COMMAND": sleeper,
+                    "LMM_CONTEXT_MCP_TIMEOUT_MS": "10",
+                },
+                clear=False,
+            ):
                 with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
                     server = self.start_gateway_server(gateway_module=gateway)
                     body = self.post_json(
@@ -2330,7 +2451,9 @@ class Phase0ContractTests(unittest.TestCase):
     def test_gateway_context_mcp_command_result_is_used(self) -> None:
         captured: dict[str, object] = {}
 
-        def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+        def fake_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str]]:
             captured["prompt"] = prompt
             return {
                 "text": "mcp context ok",
@@ -2348,12 +2471,16 @@ class Phase0ContractTests(unittest.TestCase):
         )
         gateway = self.load_gateway_module()
         with tempfile.TemporaryDirectory() as tmpdir:
-            with mock.patch.dict(os.environ, {
-                "LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json"),
-                "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
-                "LMM_CONTEXT_MCP_COMMAND": "ctx-bridge",
-                "LMM_CONTEXT_MCP_TIMEOUT_MS": "500",
-            }, clear=False):
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json"),
+                    "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
+                    "LMM_CONTEXT_MCP_COMMAND": "ctx-bridge",
+                    "LMM_CONTEXT_MCP_TIMEOUT_MS": "500",
+                },
+                clear=False,
+            ):
                 with mock.patch.object(gateway, "run_context_command", return_value=completed):
                     with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
                         server = self.start_gateway_server(gateway_module=gateway)
@@ -2372,7 +2499,9 @@ class Phase0ContractTests(unittest.TestCase):
     def test_gateway_empty_context_command_output_is_not_used(self) -> None:
         captured: dict[str, object] = {}
 
-        def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+        def fake_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str]]:
             captured["prompt"] = prompt
             return {
                 "text": "empty context ok",
@@ -2387,11 +2516,15 @@ class Phase0ContractTests(unittest.TestCase):
             with self.subTest(stdout=stdout):
                 completed = subprocess.CompletedProcess(args=["ctx-bridge"], returncode=0, stdout=stdout, stderr="")
                 with tempfile.TemporaryDirectory() as tmpdir:
-                    with mock.patch.dict(os.environ, {
-                        "LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json"),
-                        "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
-                        "LMM_CONTEXT_MCP_COMMAND": "ctx-bridge",
-                    }, clear=False):
+                    with mock.patch.dict(
+                        os.environ,
+                        {
+                            "LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json"),
+                            "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
+                            "LMM_CONTEXT_MCP_COMMAND": "ctx-bridge",
+                        },
+                        clear=False,
+                    ):
                         with mock.patch.object(gateway, "run_context_command", return_value=completed):
                             with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
                                 server = self.start_gateway_server(gateway_module=gateway)
@@ -2472,7 +2605,9 @@ while True:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = Path(tmpdir) / "gateway-state.json"
 
-            def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+            def fake_route(
+                prompt: str, model: str, max_tokens: int, temperature: float
+            ) -> tuple[dict[str, object], dict[str, str]]:
                 return {
                     "text": "redacted ok",
                     "target": "llamacpp",
@@ -2509,7 +2644,9 @@ while True:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = Path(tmpdir) / "gateway-state.json"
 
-            def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+            def fake_route(
+                prompt: str, model: str, max_tokens: int, temperature: float
+            ) -> tuple[dict[str, object], dict[str, str]]:
                 return {
                     "text": "sanitized context failure ok",
                     "target": "llamacpp",
@@ -2525,11 +2662,15 @@ while True:
                 stderr="SECRET_CONTEXT_COMMAND_STDERR",
             )
             gateway = self.load_gateway_module()
-            with mock.patch.dict(os.environ, {
-                "LMM_GATEWAY_STATE_FILE": str(state_path),
-                "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
-                "LMM_CONTEXT_MCP_COMMAND": "ctx-bridge",
-            }, clear=False):
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LMM_GATEWAY_STATE_FILE": str(state_path),
+                    "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
+                    "LMM_CONTEXT_MCP_COMMAND": "ctx-bridge",
+                },
+                clear=False,
+            ):
                 with mock.patch.object(gateway, "run_context_command", return_value=failed):
                     with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
                         server = self.start_gateway_server(gateway_module=gateway)
@@ -2550,7 +2691,9 @@ while True:
     def test_gateway_glyph_encoding_failure_uses_raw_context_fallback(self) -> None:
         captured: dict[str, object] = {}
 
-        def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+        def fake_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str]]:
             captured["prompt"] = prompt
             return {
                 "text": "raw fallback ok",
@@ -2562,11 +2705,15 @@ while True:
 
         gateway = self.load_gateway_module()
         with tempfile.TemporaryDirectory() as tmpdir:
-            with mock.patch.dict(os.environ, {
-                "LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json"),
-                "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
-                "LMM_GLYPH_ENCODING_FORCE_ERROR": "1",
-            }, clear=False):
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json"),
+                    "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
+                    "LMM_GLYPH_ENCODING_FORCE_ERROR": "1",
+                },
+                clear=False,
+            ):
                 with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
                     server = self.start_gateway_server(gateway_module=gateway)
                     body = self.post_json(
@@ -2585,7 +2732,9 @@ while True:
         self.assertNotIn("[Glyph Encoding v1]", str(captured["prompt"]))
 
     def test_gateway_chat_completion_does_not_fail_when_telemetry_write_fails(self) -> None:
-        def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+        def fake_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str]]:
             return {
                 "text": "routed despite telemetry",
                 "target": "llamacpp",
@@ -2618,26 +2767,37 @@ while True:
     def test_gateway_chat_completion_supports_openai_sse_streaming(self) -> None:
         captured: dict[str, object] = {}
 
-        def fake_stream_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str], object]:
-            captured.update({
-                "prompt": prompt,
-                "model": model,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-            })
+        def fake_stream_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str], object]:
+            captured.update(
+                {
+                    "prompt": prompt,
+                    "model": model,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                }
+            )
+
             def chunks() -> object:
                 yield "streamed "
                 yield "ok"
 
-            return {
-                "target": "llamacpp",
-                "reason_code": "default_local",
-                "reason": "default - use local llama.cpp",
-            }, {"X-LMM-Route-Mode": "routed"}, chunks()
+            return (
+                {
+                    "target": "llamacpp",
+                    "reason_code": "default_local",
+                    "reason": "default - use local llama.cpp",
+                },
+                {"X-LMM-Route-Mode": "routed"},
+                chunks(),
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             gateway = self.load_gateway_module()
-            with mock.patch.dict(os.environ, {"LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json")}, clear=False):
+            with mock.patch.dict(
+                os.environ, {"LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json")}, clear=False
+            ):
                 with mock.patch.object(gateway, "route_prompt_stream", side_effect=fake_stream_route):
                     server = self.start_gateway_server(gateway_module=gateway)
                     payload = {
@@ -2757,39 +2917,51 @@ while True:
     def test_gateway_streaming_uses_same_context_enrichment_path(self) -> None:
         captured: dict[str, object] = {}
 
-        def fake_stream_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str], object]:
+        def fake_stream_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str], object]:
             captured["prompt"] = prompt
 
             def chunks() -> object:
                 yield "context stream"
 
-            return {
-                "target": "llamacpp",
-                "reason_code": "default_local",
-                "reason": "default - use local llama.cpp",
-            }, {"X-LMM-Route-Mode": "routed"}, chunks()
+            return (
+                {
+                    "target": "llamacpp",
+                    "reason_code": "default_local",
+                    "reason": "default - use local llama.cpp",
+                },
+                {"X-LMM-Route-Mode": "routed"},
+                chunks(),
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             gateway = self.load_gateway_module()
-            with mock.patch.dict(os.environ, {
-                "LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json"),
-                "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
-            }, clear=False):
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json"),
+                    "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
+                },
+                clear=False,
+            ):
                 with mock.patch.object(gateway, "route_prompt_stream", side_effect=fake_stream_route):
                     server = self.start_gateway_server(gateway_module=gateway)
                     request = urllib.request.Request(
                         f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
-                        data=json.dumps({
-                            "model": "stream-context-model",
-                            "messages": [{"role": "user", "content": "stream with context"}],
-                            "stream": True,
-                            "lmm_context": {
-                                "items": [
-                                    {"path": "/repo/a.py", "content": "stream context alpha"},
-                                    {"path": "/repo/b.py", "content": "stream context beta"},
-                                ]
-                            },
-                        }).encode("utf-8"),
+                        data=json.dumps(
+                            {
+                                "model": "stream-context-model",
+                                "messages": [{"role": "user", "content": "stream with context"}],
+                                "stream": True,
+                                "lmm_context": {
+                                    "items": [
+                                        {"path": "/repo/a.py", "content": "stream context alpha"},
+                                        {"path": "/repo/b.py", "content": "stream context beta"},
+                                    ]
+                                },
+                            }
+                        ).encode("utf-8"),
                         headers={"Content-Type": "application/json"},
                         method="POST",
                     )
@@ -2840,12 +3012,16 @@ while True:
         self.assertGreaterEqual(latency_ms, 0)
 
     def test_gateway_chat_completion_returns_503_when_backend_route_fails(self) -> None:
-        def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+        def fake_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str]]:
             raise RuntimeError("llama.cpp backend is offline")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             gateway = self.load_gateway_module()
-            with mock.patch.dict(os.environ, {"LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json")}, clear=False):
+            with mock.patch.dict(
+                os.environ, {"LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json")}, clear=False
+            ):
                 with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
                     server = self.start_gateway_server(gateway_module=gateway)
                     payload = {
@@ -3043,7 +3219,9 @@ while True:
             sys.path[:] = original_path
 
     def test_gateway_backend_failure_still_returns_503_when_telemetry_write_fails(self) -> None:
-        def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+        def fake_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str]]:
             raise RuntimeError("llama.cpp backend is offline")
 
         gateway = self.load_gateway_module()
@@ -3071,12 +3249,16 @@ while True:
         self.assertFalse(body["lmm"]["success"])
 
     def test_gateway_streaming_request_returns_503_before_sse_when_backend_route_fails(self) -> None:
-        def fake_stream_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str], object]:
+        def fake_stream_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str], object]:
             raise RuntimeError("llama.cpp backend is offline")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             gateway = self.load_gateway_module()
-            with mock.patch.dict(os.environ, {"LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json")}, clear=False):
+            with mock.patch.dict(
+                os.environ, {"LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json")}, clear=False
+            ):
                 with mock.patch.object(gateway, "route_prompt_stream", side_effect=fake_stream_route):
                     server = self.start_gateway_server(gateway_module=gateway)
                     payload = {
@@ -3122,7 +3304,9 @@ while True:
             manager.run_cli = fake_run_cli  # type: ignore[method-assign]
             server = self.start_app_server(manager)
 
-            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/api/gateway/logs?lines=12", timeout=5) as response:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/api/gateway/logs?lines=12", timeout=5
+            ) as response:
                 body = json.loads(response.read().decode("utf-8"))
 
         self.assertEqual(calls, [("gateway", "logs", "12")])
@@ -3176,7 +3360,9 @@ while True:
         health_module = self.load_script_module("llama_model_manager_health_ready", LMM_HEALTH_PATH)
         config_module = self.load_script_module("llama_model_manager_config_health_ready", LMM_CONFIG_PATH)
         with tempfile.TemporaryDirectory() as tmpdir:
-            with mock.patch.dict(os.environ, {"LMM_RUN_RECORDS_FILE": str(Path(tmpdir) / "run-records.json")}, clear=False):
+            with mock.patch.dict(
+                os.environ, {"LMM_RUN_RECORDS_FILE": str(Path(tmpdir) / "run-records.json")}, clear=False
+            ):
                 config = config_module.load_lmm_config_from_env()
             checker = health_module.HealthChecker(backend_url="http://127.0.0.1:9/v1", config=config)
             with mock.patch.object(
@@ -3237,7 +3423,9 @@ while True:
         self.assertIn("components", body)
 
     def test_gateway_emits_run_record_on_success(self) -> None:
-        def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+        def fake_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str]]:
             return {
                 "text": "response text",
                 "target": "llamacpp",
@@ -3259,7 +3447,10 @@ while True:
             ):
                 with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
                     server = self.start_gateway_server(gateway_module=gateway)
-                    _ = self.post_json(f"http://127.0.0.1:{server.server_port}/v1/chat/completions", {"model": "run-record-model", "messages": [{"role": "user", "content": "hello"}]})
+                    _ = self.post_json(
+                        f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                        {"model": "run-record-model", "messages": [{"role": "user", "content": "hello"}]},
+                    )
 
             state = json.loads(run_records.read_text(encoding="utf-8"))
             records = state.get("records", [])
@@ -3269,7 +3460,9 @@ while True:
             self.assertIsInstance(records[0]["duration_ms"], int)
 
     def test_gateway_emits_run_record_on_failure(self) -> None:
-        def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+        def fake_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str]]:
             raise RuntimeError("provider unavailable")
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3285,7 +3478,10 @@ while True:
             ):
                 with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
                     server = self.start_gateway_server(gateway_module=gateway)
-                    status, body = self.post_json_raw(f"http://127.0.0.1:{server.server_port}/v1/chat/completions", {"model": "run-record-model", "messages": [{"role": "user", "content": "hello"}]})
+                    status, body = self.post_json_raw(
+                        f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                        {"model": "run-record-model", "messages": [{"role": "user", "content": "hello"}]},
+                    )
                     self.assertEqual(status, HTTPStatus.SERVICE_UNAVAILABLE)
                     self.assertEqual(body["error"]["type"], "lmm_gateway_error")
 
@@ -3298,12 +3494,16 @@ while True:
         def fake_route(
             prompt: str, model: str, max_tokens: int, temperature: float
         ) -> tuple[dict[str, object], dict[str, str], object]:
-            return {
-                "target": "llamacpp",
-                "reason_code": "default_local",
-                "reason": "default route",
-                "latency_ms": 7,
-            }, {"X-LMM-Route-Mode": "routed-basic"}, iter(["partial-token"])
+            return (
+                {
+                    "target": "llamacpp",
+                    "reason_code": "default_local",
+                    "reason": "default route",
+                    "latency_ms": 7,
+                },
+                {"X-LMM-Route-Mode": "routed-basic"},
+                iter(["partial-token"]),
+            )
 
         def fake_stream_completion(
             handler: Any,
@@ -3340,11 +3540,13 @@ while True:
                         server = self.start_gateway_server(gateway_module=gateway)
                         request = urllib.request.Request(
                             f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
-                            data=json.dumps({
-                                "model": "run-record-model",
-                                "stream": True,
-                                "messages": [{"role": "user", "content": "hello"}],
-                            }).encode("utf-8"),
+                            data=json.dumps(
+                                {
+                                    "model": "run-record-model",
+                                    "stream": True,
+                                    "messages": [{"role": "user", "content": "hello"}],
+                                }
+                            ).encode("utf-8"),
                             headers={"Content-Type": "application/json"},
                             method="POST",
                         )
@@ -3403,7 +3605,11 @@ while True:
             ]
             for process in processes:
                 stdout, stderr = process.communicate(timeout=10)
-                self.assertEqual(process.returncode, 0, stderr.decode("utf-8", errors="replace") + stdout.decode("utf-8", errors="replace"))
+                self.assertEqual(
+                    process.returncode,
+                    0,
+                    stderr.decode("utf-8", errors="replace") + stdout.decode("utf-8", errors="replace"),
+                )
 
             telemetry = json.loads(telemetry_path.read_text(encoding="utf-8"))
 
@@ -3548,11 +3754,11 @@ while True:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = self.make_manager(tmpdir)
             estimate = manager.compatibility_estimate(
-                size_bytes=4 * 1024 ** 3,
+                size_bytes=4 * 1024**3,
                 host_capability={
                     "host_backends": ["cpu", "cuda"],
                     "preferred_backend": "cuda",
-                    "memory_bytes": 32 * 1024 ** 3,
+                    "memory_bytes": 32 * 1024**3,
                     "memory_human": "32.0 GiB",
                 },
                 context="32768",
@@ -3565,11 +3771,11 @@ while True:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = self.make_manager(tmpdir)
             estimate = manager.compatibility_estimate(
-                size_bytes=2 * 1024 ** 3,
+                size_bytes=2 * 1024**3,
                 host_capability={
                     "host_backends": ["cpu"],
                     "preferred_backend": "cpu",
-                    "memory_bytes": 16 * 1024 ** 3,
+                    "memory_bytes": 16 * 1024**3,
                     "memory_human": "16.0 GiB",
                 },
                 device="cuda0",
@@ -3598,7 +3804,7 @@ while True:
                 ],
             }
 
-            normalized = manager.normalize_remote_model_entry(raw, size_bytes_override=912 * 1024 ** 2)
+            normalized = manager.normalize_remote_model_entry(raw, size_bytes_override=912 * 1024**2)
 
             assert normalized is not None
             self.assertEqual(normalized["repo_id"], "bartowski/Llama-3.2-1B-Instruct-GGUF")
@@ -3606,7 +3812,7 @@ while True:
             self.assertEqual(normalized["quant"], "Q4_K_M")
             self.assertEqual(normalized["architecture"], "llama")
             self.assertEqual(normalized["context"], "131072")
-            self.assertEqual(normalized["size_bytes"], 912 * 1024 ** 2)
+            self.assertEqual(normalized["size_bytes"], 912 * 1024**2)
             self.assertEqual(normalized["gated"], "no")
             self.assertEqual(normalized["mmproj_artifact_name"], "mmproj-model-f16.gguf")
 
@@ -3617,7 +3823,7 @@ while True:
                 {
                     "repo_id": "example/model",
                     "artifact_name": "example-Q4_K_M.gguf",
-                    "size_bytes": 2 * 1024 ** 3,
+                    "size_bytes": 2 * 1024**3,
                     "context": "32768",
                 }
             ]
@@ -3627,7 +3833,7 @@ while True:
                 {
                     "host_backends": ["cpu", "cuda"],
                     "preferred_backend": "cuda",
-                    "memory_bytes": 24 * 1024 ** 3,
+                    "memory_bytes": 24 * 1024**3,
                     "memory_human": "24.0 GiB",
                 },
             )
@@ -3829,7 +4035,7 @@ while True:
                 self.end_headers()
                 for offset in range(0, len(payload), 16_384):
                     try:
-                        self.wfile.write(payload[offset:offset + 16_384])
+                        self.wfile.write(payload[offset : offset + 16_384])
                         self.wfile.flush()
                     except BrokenPipeError:
                         return
@@ -3874,7 +4080,9 @@ while True:
 
             for _ in range(200):
                 time.sleep(0.01)
-                active = next((item for item in manager.read_download_jobs_store()["items"] if item["id"] == job["id"]), None)
+                active = next(
+                    (item for item in manager.read_download_jobs_store()["items"] if item["id"] == job["id"]), None
+                )
                 if active and active.get("status") == "running":
                     break
 
@@ -3906,7 +4114,7 @@ while True:
                 self.end_headers()
                 for offset in range(0, len(payload), 16_384):
                     try:
-                        self.wfile.write(payload[offset:offset + 16_384])
+                        self.wfile.write(payload[offset : offset + 16_384])
                         self.wfile.flush()
                     except BrokenPipeError:
                         return
@@ -3953,7 +4161,9 @@ while True:
 
             for _ in range(200):
                 time.sleep(0.01)
-                active = next((item for item in manager.read_download_jobs_store()["items"] if item["id"] == job["id"]), None)
+                active = next(
+                    (item for item in manager.read_download_jobs_store()["items"] if item["id"] == job["id"]), None
+                )
                 if active and active.get("status") == "running":
                     break
 
@@ -4029,7 +4239,7 @@ while True:
                 self.end_headers()
                 for offset in range(0, len(payload), 16_384):
                     try:
-                        self.wfile.write(payload[offset:offset + 16_384])
+                        self.wfile.write(payload[offset : offset + 16_384])
                         self.wfile.flush()
                     except BrokenPipeError:
                         return
@@ -4112,7 +4322,7 @@ while True:
                 self.end_headers()
                 for offset in range(0, len(payload), 16_384):
                     try:
-                        self.wfile.write(payload[offset:offset + 16_384])
+                        self.wfile.write(payload[offset : offset + 16_384])
                         self.wfile.flush()
                     except BrokenPipeError:
                         return
@@ -4159,7 +4369,9 @@ while True:
 
             for _ in range(300):
                 time.sleep(0.01)
-                active = next((item for item in manager.read_download_jobs_store()["items"] if item["id"] == job["id"]), None)
+                active = next(
+                    (item for item in manager.read_download_jobs_store()["items"] if item["id"] == job["id"]), None
+                )
                 if active is not None and active.get("status") == "running":
                     break
             self.assertIsNotNone(active)
@@ -4277,7 +4489,7 @@ while True:
                 self.end_headers()
                 for offset in range(0, len(payload), 16_384):
                     try:
-                        self.wfile.write(payload[offset:offset + 16_384])
+                        self.wfile.write(payload[offset : offset + 16_384])
                         self.wfile.flush()
                     except BrokenPipeError:
                         return
@@ -4328,7 +4540,9 @@ while True:
 
             for _ in range(200):
                 time.sleep(0.01)
-                active = next((item for item in manager.read_download_jobs_store()["items"] if item["id"] == job_id), None)
+                active = next(
+                    (item for item in manager.read_download_jobs_store()["items"] if item["id"] == job_id), None
+                )
                 if active and active.get("status") == "running":
                     break
 
@@ -4351,7 +4565,7 @@ while True:
                 self.end_headers()
                 for offset in range(0, len(payload), 16_384):
                     try:
-                        self.wfile.write(payload[offset:offset + 16_384])
+                        self.wfile.write(payload[offset : offset + 16_384])
                         self.wfile.flush()
                     except BrokenPipeError:
                         return
@@ -4404,7 +4618,9 @@ while True:
 
             for _ in range(200):
                 time.sleep(0.01)
-                active = next((item for item in manager.read_download_jobs_store()["items"] if item["id"] == original_id), None)
+                active = next(
+                    (item for item in manager.read_download_jobs_store()["items"] if item["id"] == original_id), None
+                )
                 if active and active.get("status") == "running" and int(active.get("bytes_downloaded") or 0) > 0:
                     break
 
@@ -4450,7 +4666,7 @@ while True:
                 self.end_headers()
                 for offset in range(0, len(body), 16_384):
                     try:
-                        self.wfile.write(body[offset:offset + 16_384])
+                        self.wfile.write(body[offset : offset + 16_384])
                         self.wfile.flush()
                     except (BrokenPipeError, ConnectionResetError):
                         return
@@ -4504,7 +4720,9 @@ while True:
             active = None
             for _ in range(300):
                 time.sleep(0.02)
-                active = next((item for item in manager.read_download_jobs_store()["items"] if item["id"] == original_id), None)
+                active = next(
+                    (item for item in manager.read_download_jobs_store()["items"] if item["id"] == original_id), None
+                )
                 if active and int(active.get("bytes_downloaded") or 0) > 0:
                     break
             self.assertIsNotNone(active)
@@ -4809,7 +5027,7 @@ while True:
                 self.end_headers()
                 for offset in range(0, len(payload), 16_384):
                     try:
-                        self.wfile.write(payload[offset:offset + 16_384])
+                        self.wfile.write(payload[offset : offset + 16_384])
                         self.wfile.flush()
                     except BrokenPipeError:
                         return
@@ -4860,7 +5078,9 @@ while True:
 
             for _ in range(200):
                 time.sleep(0.01)
-                active = next((item for item in manager.read_download_jobs_store()["items"] if item["id"] == job_id), None)
+                active = next(
+                    (item for item in manager.read_download_jobs_store()["items"] if item["id"] == job_id), None
+                )
                 if active and active.get("status") == "running":
                     break
 
@@ -4901,6 +5121,110 @@ while True:
 
             self.assertNotIn(job_id, manager.download_threads)
             self.assertNotIn(job_id, manager.download_cancel_events)
+
+    def test_llamacpp_provider_implements_protocol(self) -> None:
+        providers_module = self.load_providers_module()
+        provider = providers_module.LlamaCppProvider(base_url="http://127.0.0.1:9999/v1")
+        self.assertIsInstance(provider.name, str)
+        self.assertTrue(provider.supports_streaming)
+        self.assertIsInstance(provider.health_check(timeout=0.5), bool)
+        self.assertIsInstance(provider.metadata(), dict)
+
+    def test_llamacpp_provider_health_check_unreachable(self) -> None:
+        providers_module = self.load_providers_module()
+        provider = providers_module.LlamaCppProvider(base_url="http://127.0.0.1:0/v1")
+        self.assertFalse(provider.health_check(timeout=0.25))
+
+    def test_provider_registry_registers_and_lists_providers(self) -> None:
+        providers_module = self.load_providers_module()
+        reg = providers_module.ProviderRegistry()
+        p1 = providers_module.LlamaCppProvider(base_url="http://a:8081/v1", timeout=0.1)
+        p2 = providers_module.LlamaCppProvider(base_url="http://b:8081/v1", timeout=0.1)
+
+        reg.register(p1, priority=10)
+        reg.register(p2, priority=5)
+
+        providers = reg.list_all()
+        self.assertEqual(len(providers), 2)
+        self.assertEqual(providers[0].name, "llamacpp")
+        self.assertIs(providers[0], p1)
+
+    def test_provider_registry_select_by_streaming(self) -> None:
+        providers_module = self.load_providers_module()
+
+        non_stream = mock.Mock(spec=providers_module.Provider)
+        non_stream.name = "fallback"
+        non_stream.supports_streaming = False
+        non_stream.health_check.return_value = True
+        non_stream.metadata.return_value = {"name": "fallback"}
+        non_stream.generate.return_value = "fallback"
+        non_stream.generate_stream.return_value = iter(())
+
+        streaming = mock.Mock(spec=providers_module.Provider)
+        streaming.name = "llamacpp"
+        streaming.supports_streaming = True
+        streaming.health_check.return_value = True
+        streaming.metadata.return_value = {"name": "llamacpp"}
+        streaming.generate.return_value = "streaming"
+        streaming.generate_stream.return_value = iter(("a", "b"))
+
+        registry = providers_module.ProviderRegistry()
+        registry.register(non_stream, priority=10)
+        registry.register(streaming, priority=5)
+
+        selected = registry.select(streaming=True)
+        self.assertIs(selected, streaming)
+
+    def test_provider_registry_select_preferred(self) -> None:
+        providers_module = self.load_providers_module()
+
+        fallback = mock.Mock(spec=providers_module.Provider)
+        fallback.name = "fallback"
+        fallback.supports_streaming = False
+        fallback.health_check.return_value = True
+        fallback.metadata.return_value = {"name": "fallback"}
+        fallback.generate.return_value = "fallback"
+        fallback.generate_stream.return_value = iter(())
+
+        preferred = mock.Mock(spec=providers_module.Provider)
+        preferred.name = "llamacpp"
+        preferred.supports_streaming = True
+        preferred.health_check.return_value = True
+        preferred.metadata.return_value = {"name": "llamacpp"}
+        preferred.generate.return_value = "preferred"
+        preferred.generate_stream.return_value = iter(("x",))
+
+        registry = providers_module.ProviderRegistry()
+        registry.register(fallback, priority=10)
+        registry.register(preferred, priority=0)
+
+        selected = registry.select(preferred="llamacpp")
+        self.assertIs(selected, preferred)
+
+    def test_provider_registry_freeze_prevents_registration(self) -> None:
+        providers_module = self.load_providers_module()
+        registry = providers_module.ProviderRegistry()
+        provider = providers_module.LlamaCppProvider(base_url="http://127.0.0.1:8081/v1")
+        registry.freeze()
+
+        with self.assertRaises(RuntimeError):
+            registry.register(provider, priority=1)
+
+    def test_create_default_registry_has_llamacpp(self) -> None:
+        providers_module = self.load_providers_module()
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "LLAMA_MODEL_BACKEND_BASE_URL": "http://127.0.0.1:8099/v1",
+                "LMM_GATEWAY_TIMEOUT_SECONDS": "12.5",
+            },
+            clear=False,
+        ):
+            registry = providers_module.create_default_registry()
+
+        self.assertIsNotNone(registry.get("llamacpp"))
+        self.assertIsInstance(registry.get("llamacpp"), providers_module.LlamaCppProvider)
 
 
 if __name__ == "__main__":
