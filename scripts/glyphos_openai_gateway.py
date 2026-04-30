@@ -196,6 +196,8 @@ def route_prompt(prompt: str, model: str, max_tokens: int, temperature: float) -
     router = create_router()
     result = router.route(packet, prompt=prompt, model=model, max_tokens=max_tokens, temperature=temperature)
     latency_ms = round((time.perf_counter() - start) * 1000)
+    if result.target.value == "fallback" or str(result.routing_reason_code).endswith(".error"):
+        raise RuntimeError(f"{result.target.value} route failed: {result.response}")
     headers = {
         "X-LMM-Route-Mode": "routed",
         "X-LMM-GlyphOS-Target": result.target.value,

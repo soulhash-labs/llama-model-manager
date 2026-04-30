@@ -192,7 +192,7 @@ class LlamaCppClient(BaseChatClient):
 
     def generate(self, prompt: str, **kwargs) -> str:
         if not self._available:
-            return f"[llama.cpp offline] Processing: {prompt[:50]}..."
+            raise RuntimeError("llama.cpp backend is offline")
         try:
             response = _http_json(
                 "POST",
@@ -209,7 +209,7 @@ class LlamaCppClient(BaseChatClient):
             payload = response.json()
             return payload["choices"][0]["message"]["content"]
         except Exception as exc:
-            return f"llama.cpp error: {exc}"
+            raise RuntimeError(f"llama.cpp request failed: {exc}") from exc
 
 
 class OpenAIClient(BaseChatClient):

@@ -231,8 +231,9 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$install_script" "LLAMA_MODEL_OPENCODE_GATEWAY_BASE_URL"
     assert_contains "$install_script" "migrated routed gateway defaults"
     assert_contains "$install_script" "post-install synced opencode to routed gateway"
-    assert_contains "$install_script" "harness endpoint: http://127.0.0.1:4010/v1"
-    assert_contains "$install_script" "backend endpoint: http://127.0.0.1:8081/v1"
+    assert_contains "$install_script" "post-install synced OpenClaw profile"
+    assert_contains "$install_script" "harness endpoint: http://%s:%s/v1"
+    assert_contains "$install_script" "backend endpoint: http://%s:%s/v1"
     assert_contains "$install_script" "require_source_tree"
     assert_contains "$install_script" "installer payload is missing integrations/public-glyphos-ai-compute/glyphos_ai"
     assert_contains "$install_script" "refreshed bundled integrations"
@@ -617,9 +618,10 @@ test_install_resyncs_existing_clients_when_saved_model_is_resolvable() {
     local opencode_config
     local openclaw_config
     local glyphos_config
+    local openclaw_profile_config
 
     tmp="$(mktemp -d)"
-    mkdir -p "$tmp/home/Desktop" "$tmp/config/llama-server" "$tmp/config/opencode" "$tmp/state/llama-server" "$tmp/state/opencode" "$tmp/data" "$tmp/models" "$tmp/home/.openclaw" "$tmp/home/.glyphos"
+    mkdir -p "$tmp/home/Desktop" "$tmp/config/llama-server" "$tmp/config/opencode" "$tmp/state/llama-server" "$tmp/state/opencode" "$tmp/data" "$tmp/models" "$tmp/home/.openclaw" "$tmp/home/.openclaw-lmm-eval" "$tmp/home/.glyphos"
     model="$tmp/models/Qwen3.5-9B-Q8_0.gguf"
     : >"$model"
     cat >"$tmp/config/llama-server/defaults.env" <<'EOF'
@@ -644,6 +646,7 @@ EOF
 }
 EOF
     printf '{}\n' >"$tmp/home/.openclaw/openclaw.json"
+    printf '{}\n' >"$tmp/home/.openclaw-lmm-eval/openclaw.json"
     printf 'ai_compute: {}\n' >"$tmp/home/.glyphos/config.yaml"
 
     output="$(env \
@@ -654,15 +657,44 @@ EOF
         bash "$ROOT_DIR/install.sh")"
     opencode_config="$(cat "$tmp/config/opencode/opencode.json")"
     openclaw_config="$(cat "$tmp/home/.openclaw/openclaw.json")"
+    openclaw_profile_config="$(cat "$tmp/home/.openclaw-lmm-eval/openclaw.json")"
     glyphos_config="$(cat "$tmp/home/.glyphos/config.yaml")"
 
     assert_contains "$output" "post-install synced opencode to routed gateway"
     assert_contains "$output" "post-install synced OpenClaw to routed gateway"
+    assert_contains "$output" "post-install synced OpenClaw profile lmm-eval to routed gateway"
     assert_contains "$output" "post-install synced GlyphOS to the backend endpoint"
     assert_contains "$opencode_config" '"baseURL": "http://127.0.0.1:4010/v1"'
     assert_not_contains "$opencode_config" '127.0.0.1:8080'
     assert_contains "$openclaw_config" '"baseUrl": "http://127.0.0.1:4010/v1"'
+    assert_contains "$openclaw_profile_config" '"baseUrl": "http://127.0.0.1:4010/v1"'
     assert_contains "$glyphos_config" 'url: http://127.0.0.1:19081/v1'
+}
+
+test_install_does_not_execute_saved_state_when_checking_post_install_sync() {
+    local tmp
+    local output
+
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/home/Desktop" "$tmp/config/llama-server" "$tmp/config/opencode" "$tmp/state/llama-server" "$tmp/data"
+    cat >"$tmp/config/llama-server/defaults.env" <<'EOF'
+LLAMA_SERVER_HOST=127.0.0.1
+LLAMA_SERVER_PORT=19081
+EOF
+    cat >"$tmp/state/llama-server/current.env" <<EOF
+CURRENT_MODEL=\$(touch "$tmp/pwned")
+EOF
+    printf '{}\n' >"$tmp/config/opencode/opencode.json"
+
+    output="$(env \
+        HOME="$tmp/home" \
+        XDG_CONFIG_HOME="$tmp/config" \
+        XDG_STATE_HOME="$tmp/state" \
+        XDG_DATA_HOME="$tmp/data" \
+        bash "$ROOT_DIR/install.sh")"
+
+    assert_contains "$output" "post-install sync skipped: no saved current model is resolvable yet"
+    [[ ! -e "$tmp/pwned" ]] || fail "installer executed content from current.env"
 }
 
 
@@ -677,6 +709,9 @@ test_install_reports_unified_memory_upgrade_note_for_existing_defaults() {
 LLAMA_SERVER_CONTEXT=128000
 LLAMA_SERVER_PARALLEL=1
 LLAMA_SERVER_THREADS=12
+LLAMA_SERVER_PORT=19082
+LLAMA_MODEL_GATEWAY_HOST=127.0.0.2
+LLAMA_MODEL_GATEWAY_PORT=4510
 LLAMA_MODEL_OPENCODE_GATEWAY_BASE_URL=http://127.0.0.1:4010/v1
 EOF
 
@@ -695,11 +730,14 @@ EOF
     assert_contains "$defaults_after" "LLAMA_SERVER_CONTEXT=128000"
     assert_contains "$defaults_after" "LLAMA_SERVER_PARALLEL=1"
     assert_contains "$defaults_after" "LLAMA_SERVER_THREADS=12"
+    assert_contains "$defaults_after" "LLAMA_SERVER_PORT=19082"
     assert_contains "$defaults_after" "LLAMA_MODEL_HARNESS_MODE=routed"
-    assert_contains "$defaults_after" "LLAMA_MODEL_GATEWAY_HOST=127.0.0.1"
-    assert_contains "$defaults_after" "LLAMA_MODEL_GATEWAY_PORT=4010"
+    assert_contains "$defaults_after" "LLAMA_MODEL_GATEWAY_HOST=127.0.0.2"
+    assert_contains "$defaults_after" "LLAMA_MODEL_GATEWAY_PORT=4510"
     assert_contains "$defaults_after" 'LLAMA_MODEL_GATEWAY_LOG=$HOME/models/lmm-gateway.log'
     assert_not_contains "$defaults_after" "LLAMA_MODEL_OPENCODE_GATEWAY_BASE_URL"
+    assert_contains "$output" "harness endpoint: http://127.0.0.2:4510/v1"
+    assert_contains "$output" "backend endpoint: http://127.0.0.1:19082/v1"
     compgen -G "$tmp/config/llama-server/defaults.env.bak.*" >/dev/null || fail "expected defaults.env backup"
 }
 
@@ -1223,9 +1261,14 @@ EOF
         "baseURL": "http://127.0.0.1:4010/v1"
       }
     },
-    "llama-server-gpu": {
+    "llamacpp-8080": {
       "options": {
         "baseURL": "http://127.0.0.1:8080/v1"
+      }
+    },
+    "llama-server-gpu": {
+      "options": {
+        "baseURL": "http://127.0.0.1:4011/v1"
       }
     },
     "remote": {
@@ -1242,7 +1285,9 @@ EOF
 
     assert_contains "$config" '"llamacpp"'
     assert_contains "$config" '"remote"'
-    assert_not_contains "$config" '"llama-server-gpu"'
+    assert_contains "$config" '"llama-server-gpu"'
+    assert_contains "$config" '127.0.0.1:4011'
+    assert_not_contains "$config" '"llamacpp-8080"'
     assert_not_contains "$config" '127.0.0.1:8080'
     assert_contains "$config" '"baseURL": "http://127.0.0.1:4010/v1"'
 }
@@ -1817,6 +1862,7 @@ main() {
     test_add_blocks_obvious_mmproj_family_mismatch
     test_install_next_steps_sanitize_home_paths
     test_install_resyncs_existing_clients_when_saved_model_is_resolvable
+    test_install_does_not_execute_saved_state_when_checking_post_install_sync
     test_install_reports_unified_memory_upgrade_note_for_existing_defaults
     test_system_memory_influences_fit_posture
     test_cuda_unified_memory_preserves_requested_context_and_exports_env

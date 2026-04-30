@@ -1842,6 +1842,65 @@ class Phase0ContractTests(unittest.TestCase):
         self.assertIn("streamed ok", raw)
         self.assertIn("data: [DONE]", raw)
 
+    def test_gateway_chat_completion_returns_503_when_backend_route_fails(self) -> None:
+        def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+            raise RuntimeError("llama.cpp backend is offline")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gateway = self.load_gateway_module()
+            with mock.patch.dict(os.environ, {"LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json")}, clear=False):
+                with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+                    server = self.start_gateway_server(gateway_module=gateway)
+                    payload = {
+                        "model": "offline-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    }
+                    req = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+
+                    with self.assertRaises(error.HTTPError) as raised:
+                        urllib.request.urlopen(req, timeout=5)
+                    body = json.loads(raised.exception.read().decode("utf-8"))
+
+        self.assertEqual(raised.exception.code, 503)
+        self.assertEqual(body["error"]["type"], "lmm_gateway_error")
+        self.assertIn("offline", body["error"]["message"])
+        self.assertFalse(body["lmm"]["success"])
+
+    def test_gateway_streaming_request_returns_503_before_sse_when_backend_route_fails(self) -> None:
+        def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+            raise RuntimeError("llama.cpp backend is offline")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gateway = self.load_gateway_module()
+            with mock.patch.dict(os.environ, {"LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json")}, clear=False):
+                with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+                    server = self.start_gateway_server(gateway_module=gateway)
+                    payload = {
+                        "model": "offline-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "stream": True,
+                    }
+                    req = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+
+                    with self.assertRaises(error.HTTPError) as raised:
+                        urllib.request.urlopen(req, timeout=5)
+                    raw = raised.exception.read().decode("utf-8")
+                    body = json.loads(raw)
+
+        self.assertEqual(raised.exception.code, 503)
+        self.assertNotIn("text/event-stream", raised.exception.headers.get("Content-Type", ""))
+        self.assertEqual(body["error"]["type"], "lmm_gateway_error")
+
     def test_gateway_models_fallback_keeps_openai_model_shape_when_backend_is_unavailable(self) -> None:
         server = self.start_gateway_server(model_id="fallback-model", backend_base_url="http://127.0.0.1:9/v1")
 

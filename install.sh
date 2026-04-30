@@ -50,6 +50,52 @@ defaults_has_key() {
     grep -Eq "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file"
 }
 
+default_value() {
+    local key="$1"
+    local fallback="$2"
+    local file="$CONFIG_DIR/defaults.env"
+    local line=""
+    local value=""
+
+    if [[ -f "$file" ]]; then
+        line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" | tail -n 1 || true)"
+    fi
+    if [[ -z "$line" ]]; then
+        printf '%s\n' "$fallback"
+        return 0
+    fi
+    value="${line#*=}"
+    value="${value#\"}"
+    value="${value%\"}"
+    value="${value#\'}"
+    value="${value%\'}"
+    printf '%s\n' "${value:-$fallback}"
+}
+
+read_saved_current_model() {
+    local state_file="$1"
+    [[ -f "$state_file" ]] || return 1
+    python3 - "$state_file" <<'PY'
+import shlex
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    stripped = line.strip()
+    if not stripped.startswith("CURRENT_MODEL="):
+        continue
+    try:
+        parts = shlex.split(stripped, posix=True)
+    except ValueError:
+        raise SystemExit(1)
+    if len(parts) == 1 and parts[0].startswith("CURRENT_MODEL="):
+        print(parts[0].split("=", 1)[1])
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
 migrate_routed_gateway_defaults() {
     local file="$CONFIG_DIR/defaults.env"
     local changed="no"
@@ -97,9 +143,11 @@ post_install_sync_clients() {
     local glyphos_config="$HOME/.glyphos/config.yaml"
     local state_file="${XDG_STATE_HOME:-$HOME/.local/state}/llama-server/current.env"
     local saved_model=""
+    local profile_dir=""
+    local profile_name=""
 
     if [[ -f "$state_file" ]]; then
-        saved_model="$(CURRENT_MODEL=""; source "$state_file" 2>/dev/null || true; printf '%s\n' "${CURRENT_MODEL:-}")"
+        saved_model="$(read_saved_current_model "$state_file" 2>/dev/null || true)"
     fi
     if [[ -z "$saved_model" || ! -f "$saved_model" ]]; then
         printf 'post-install sync skipped: no saved current model is resolvable yet\n'
@@ -122,6 +170,19 @@ post_install_sync_clients() {
             printf 'post-install warning: OpenClaw sync failed; run llama-model sync-openclaw after resolving the current model\n' >&2
         fi
     fi
+    shopt -s nullglob
+    for profile_dir in "$HOME"/.openclaw-*; do
+        [[ -f "$profile_dir/openclaw.json" ]] || continue
+        profile_name="${profile_dir##*/.openclaw-}"
+        [[ -n "$profile_name" ]] || continue
+        if "$BIN_DIR/llama-model" sync-openclaw --profile "$profile_name" >/dev/null 2>&1; then
+            printf 'post-install synced OpenClaw profile %s to routed gateway\n' "$profile_name"
+            synced="yes"
+        else
+            printf 'post-install warning: OpenClaw profile %s sync failed; run llama-model sync-openclaw --profile %s after resolving the current model\n' "$profile_name" "$profile_name" >&2
+        fi
+    done
+    shopt -u nullglob
     if [[ -f "$glyphos_config" ]]; then
         if "$BIN_DIR/llama-model" sync-glyphos >/dev/null 2>&1; then
             printf 'post-install synced GlyphOS to the backend endpoint\n'
@@ -254,9 +315,9 @@ printf ' 11. Bundled public GlyphOS AI Compute package: %s/integrations/public-g
 printf ' 12. Experimental CUDA unified-memory fallback: set GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 in %s/defaults.env to try larger context/KV/compute allocations through system RAM\n' "$(compact_home_path "$CONFIG_DIR")"
 printf '     on discrete GPUs this can be much slower; usually pair it with LLAMA_SERVER_PARALLEL=1\n'
 printf 'Routing endpoints:\n'
-printf '  harness endpoint: http://127.0.0.1:4010/v1\n'
-printf '  backend endpoint: http://127.0.0.1:8081/v1\n'
-printf '  default route mode: LLAMA_MODEL_HARNESS_MODE=routed\n'
+printf '  harness endpoint: http://%s:%s/v1\n' "$(default_value LLAMA_MODEL_GATEWAY_HOST 127.0.0.1)" "$(default_value LLAMA_MODEL_GATEWAY_PORT 4010)"
+printf '  backend endpoint: http://%s:%s/v1\n' "$(default_value LLAMA_SERVER_HOST 127.0.0.1)" "$(default_value LLAMA_SERVER_PORT 8081)"
+printf '  default route mode: LLAMA_MODEL_HARNESS_MODE=%s\n' "$(default_value LLAMA_MODEL_HARNESS_MODE routed)"
 
 if [[ -t 0 && -t 1 ]]; then
     printf '\nWould you like to check/install build dependencies and compile a local llama.cpp runtime now? [Y/n] '

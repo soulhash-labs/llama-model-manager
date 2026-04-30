@@ -53,7 +53,7 @@ def is_stale_local_opencode_provider(name: str, provider: Any, *, active_provide
     host = (parsed.hostname or "").lower()
     if host not in {"127.0.0.1", "localhost", "::1"}:
         return False
-    return parsed.port == 8080 or name.lower() in {"llama-server-gpu", "llamacpp-8080", "llama-cpp-8080"}
+    return parsed.port == 8080
 
 
 def sync_opencode(args: argparse.Namespace) -> None:

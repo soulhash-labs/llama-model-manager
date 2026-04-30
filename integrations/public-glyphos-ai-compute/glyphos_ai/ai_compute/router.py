@@ -310,7 +310,7 @@ class AdaptiveRouter:
                 target=ComputeTarget.LOCAL_LLAMACPP,
                 response=f"llama.cpp error: {exc}",
                 routing_reason=f"{reason} - error",
-                routing_reason_code=reason_code,
+                routing_reason_code=f"{reason_code}.error",
             )
 
     def _route_openai(self, prompt: str, reason: str, reason_code: str, **generation_kwargs: Any) -> RoutingResult:
@@ -336,7 +336,7 @@ class AdaptiveRouter:
                 target=ComputeTarget.EXTERNAL_OPENAI,
                 response=f"OpenAI error: {exc}",
                 routing_reason=f"{reason} - error",
-                routing_reason_code=reason_code,
+                routing_reason_code=f"{reason_code}.error",
             )
 
     def _route_anthropic(self, prompt: str, reason: str, reason_code: str, **generation_kwargs: Any) -> RoutingResult:
@@ -362,7 +362,7 @@ class AdaptiveRouter:
                 target=ComputeTarget.EXTERNAL_ANTHROPIC,
                 response=f"Anthropic error: {exc}",
                 routing_reason=f"{reason} - error",
-                routing_reason_code=reason_code,
+                routing_reason_code=f"{reason_code}.error",
             )
 
     def _route_xai(self, prompt: str, reason: str, reason_code: str, **generation_kwargs: Any) -> RoutingResult:
@@ -388,7 +388,7 @@ class AdaptiveRouter:
                 target=ComputeTarget.EXTERNAL_XAI,
                 response=f"xAI error: {exc}",
                 routing_reason=f"{reason} - error",
-                routing_reason_code=reason_code,
+                routing_reason_code=f"{reason_code}.error",
             )
 
     @staticmethod
