@@ -2362,6 +2362,49 @@ while True:
         self.assertTrue(success)
         self.assertEqual(error_message, "")
 
+    def test_gateway_streaming_sends_keepalive_while_backend_is_quiet(self) -> None:
+        gateway = self.load_gateway_module()
+        events: list[str] = []
+
+        class RecordingWriter:
+            def write(self, data: bytes) -> int:
+                events.append(data.decode("utf-8"))
+                return len(data)
+
+            def flush(self) -> None:
+                events.append("flush")
+
+        class FakeHandler:
+            def __init__(self) -> None:
+                self.wfile = RecordingWriter()
+
+            def send_response(self, status: int) -> None:
+                events.append(f"status:{status}")
+
+            def send_header(self, key: str, value: str) -> None:
+                events.append(f"header:{key}")
+
+            def end_headers(self) -> None:
+                events.append("end_headers")
+
+        def delayed_chunks() -> object:
+            time.sleep(0.04)
+            yield "eventual content"
+
+        text, success, error_message, _latency_ms = gateway.stream_completion(
+            FakeHandler(),
+            started=time.time(),
+            model="heartbeat-model",
+            chunks=delayed_chunks(),
+            headers={},
+            heartbeat_seconds=0.01,
+        )
+
+        self.assertTrue(any(item.startswith(": lmm-keepalive") for item in events))
+        self.assertEqual(text, "eventual content")
+        self.assertTrue(success)
+        self.assertEqual(error_message, "")
+
     def test_gateway_streaming_uses_same_context_enrichment_path(self) -> None:
         captured: dict[str, object] = {}
 

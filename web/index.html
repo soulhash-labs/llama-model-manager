@@ -13,6 +13,7 @@
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
+    <a class="skip-link" href="#dashboard-main">Skip to dashboard</a>
     <div class="page-shell">
       <header class="hero">
         <div class="hero-rail">
@@ -81,7 +82,7 @@
 
         <section id="top-notice" class="notice-banner hidden" aria-live="polite"></section>
 
-      <details class="help-strip" open>
+      <details class="help-strip">
         <summary>
           <span class="help-badge">?</span>
           <span class="help-summary-copy">
@@ -124,8 +125,26 @@
         </div>
       </details>
 
-      <main class="layout">
-        <section class="panel status-panel">
+      <div class="operator-workspace">
+        <nav class="side-nav" aria-label="Dashboard sections">
+          <div class="side-nav-head">
+            <span class="panel-tag">Operator Map</span>
+            <strong>Control Surface</strong>
+            <span>Jump between dense work zones without scanning every card.</span>
+          </div>
+          <a href="#runtime-live">Overview</a>
+          <a href="#dashboard-service-panel">Service</a>
+          <a href="#transfers-remote">Transfers</a>
+          <a href="#transfers-downloads">Downloads</a>
+          <a href="#models-registry">Models</a>
+          <a href="#settings-defaults">Settings</a>
+          <a href="#integrations-panel">Integrations</a>
+          <a href="#gateway-trace-panel">Gateway Trace</a>
+          <a href="#audit-panel">Audit</a>
+        </nav>
+
+      <main id="dashboard-main" class="layout operator-main">
+        <section id="runtime-live" class="panel status-panel">
           <div class="panel-head panel-head-anchored">
             <div>
               <span class="panel-tag">Engine Room</span>
@@ -191,7 +210,7 @@
           <pre id="logs-output" class="log-box hidden"></pre>
         </section>
 
-        <section class="panel">
+        <section id="dashboard-service-panel" class="panel">
           <div class="panel-head panel-head-anchored">
             <div>
               <span class="panel-tag">Optional</span>
@@ -235,7 +254,7 @@
           <pre id="service-logs-output" class="log-box hidden"></pre>
         </section>
 
-        <section class="panel">
+        <section id="transfers-remote" class="panel">
           <div class="panel-head panel-head-anchored">
             <div>
               <span class="panel-tag">Transfers</span>
@@ -286,7 +305,7 @@
           </div>
         </section>
 
-        <section class="panel">
+        <section id="transfers-downloads" class="panel">
           <div class="panel-head panel-head-anchored">
             <div>
               <span class="panel-tag">Transfers</span>
@@ -370,7 +389,7 @@
           </div>
         </section>
 
-        <section class="panel">
+        <section id="models-registry" class="panel">
           <div class="panel-head">
             <div>
               <span class="panel-tag">Registry</span>
@@ -393,7 +412,7 @@
           </div>
         </section>
 
-        <section class="panel">
+        <section id="models-editor" class="panel">
           <div class="panel-head">
             <div>
               <span class="panel-tag">Tune Bay</span>
@@ -468,7 +487,7 @@
           </form>
         </section>
 
-        <section class="panel">
+        <section id="models-discovery" class="panel">
           <div class="panel-head">
             <div>
               <span class="panel-tag">Intake</span>
@@ -504,7 +523,7 @@
           </div>
         </section>
 
-        <section class="panel">
+        <section id="settings-defaults" class="panel">
           <div class="panel-head">
             <div>
               <span class="panel-tag">Baseline</span>
@@ -649,7 +668,7 @@
           </form>
         </section>
 
-        <section class="panel">
+        <section id="integrations-panel" class="panel">
           <div class="panel-head">
             <div>
               <span class="panel-tag">Wiring</span>
@@ -748,7 +767,7 @@
           <pre id="claude-gateway-logs-output" class="log-box hidden"></pre>
         </section>
 
-        <section class="panel observed-panel">
+        <section id="glyph-routes-panel" class="panel observed-panel">
           <div class="panel-head">
             <div>
               <span class="panel-tag">Observed Traffic</span>
@@ -776,7 +795,7 @@
           <div id="observed-glyph-feed" class="telemetry-list observed-feed" aria-live="polite"></div>
         </section>
 
-        <section class="panel observed-panel">
+        <section id="gateway-trace-panel" class="panel observed-panel">
           <div class="panel-head">
             <div>
               <span class="panel-tag">Gateway Trace</span>
@@ -808,7 +827,7 @@
           </div>
         </section>
 
-        <section class="panel activity-panel is-collapsed">
+        <section id="audit-panel" class="panel activity-panel is-collapsed">
           <div class="panel-head panel-head-anchored">
             <div>
               <span class="panel-tag">Audit</span>
@@ -825,6 +844,7 @@
           </div>
         </section>
       </main>
+      </div>
 
       <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
     </div>

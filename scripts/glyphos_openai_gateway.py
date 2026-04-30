@@ -9,10 +9,12 @@ import json
 import math
 import os
 from pathlib import Path
+import queue
 import shlex
 import signal
 import sys
 import subprocess
+import threading
 import time
 from typing import Any, Iterator
 from urllib import request as urlrequest
@@ -717,6 +719,11 @@ def sse_event(payload: dict[str, Any] | str) -> bytes:
     return f"data: {data}\n\n".encode("utf-8")
 
 
+def sse_comment(comment: str) -> bytes:
+    safe = comment.replace("\n", " ").replace("\r", " ").strip() or "keepalive"
+    return f": {safe}\n\n".encode("utf-8")
+
+
 def stream_completion(
     handler: BaseHTTPRequestHandler,
     *,
@@ -724,15 +731,36 @@ def stream_completion(
     model: str,
     chunks: Iterator[str],
     headers: dict[str, str],
+    heartbeat_seconds: float | None = None,
 ) -> tuple[str, bool, str, int]:
     collected: list[str] = []
     iterator = iter(chunks)
+    events: queue.Queue[tuple[str, Any]] = queue.Queue()
+    stop_event = threading.Event()
     base = {
         "id": f"chatcmpl-lmm-{int(started * 1000)}",
         "object": "chat.completion.chunk",
         "created": int(started),
         "model": model,
     }
+
+    if heartbeat_seconds is None:
+        try:
+            heartbeat_seconds = float(os.environ.get("LMM_GATEWAY_SSE_HEARTBEAT_SECONDS", "5"))
+        except ValueError:
+            heartbeat_seconds = 5.0
+    heartbeat_seconds = max(0.01, heartbeat_seconds)
+
+    def pump_chunks() -> None:
+        try:
+            for item in iterator:
+                if stop_event.is_set():
+                    break
+                events.put(("chunk", item))
+            events.put(("done", None))
+        except Exception as exc:
+            events.put(("error", exc))
+
     try:
         handler.send_response(200)
         handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -743,19 +771,39 @@ def stream_completion(
         handler.end_headers()
         handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]}))
         handler.wfile.flush()
-        for chunk in iterator:
+
+        worker = threading.Thread(target=pump_chunks, name="lmm-gateway-stream-pump", daemon=True)
+        worker.start()
+
+        while True:
+            try:
+                event_type, value = events.get(timeout=heartbeat_seconds)
+            except queue.Empty:
+                handler.wfile.write(sse_comment("lmm-keepalive"))
+                handler.wfile.flush()
+                continue
+
+            if event_type == "done":
+                break
+            if event_type == "error":
+                raise RuntimeError(str(value))
+
+            chunk = value
             if not chunk:
                 continue
             collected.append(str(chunk))
             handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {"content": str(chunk)}, "finish_reason": None}]}))
             handler.wfile.flush()
+
         handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}))
         handler.wfile.write(sse_event("[DONE]"))
         handler.wfile.flush()
         return "".join(collected), True, "", round((now() - started) * 1000)
     except (BrokenPipeError, ConnectionResetError) as exc:
+        stop_event.set()
         return "".join(collected), False, f"client disconnected: {exc}", round((now() - started) * 1000)
     except Exception as exc:
+        stop_event.set()
         error_message = str(exc)
         try:
             handler.wfile.write(sse_event({"error": {"message": error_message, "type": "lmm_gateway_error"}}))
