@@ -2,6 +2,17 @@
 
 This roadmap tracks product-level follow-up that is not yet part of the shipped baseline.
 
+## Run Records & Health Checks
+
+Status: planned
+
+Plans: 3 plans in 2 waves
+
+Plans:
+- [ ] 02-run-records-01-PLAN.md — Run record types and bounded JSON storage
+- [ ] 02-run-records-02-PLAN.md — Gateway emits RunRecords, standardized health endpoints
+- [ ] 02-run-records-03-PLAN.md — Dashboard consumes real run history, demo state externalized
+
 ## Long-Run Session Handoff
 
 Status: planned
