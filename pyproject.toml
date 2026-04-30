@@ -1,0 +1,25 @@
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "C4",
+    "UP",
+]
+ignore = [
+    "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+"web/app.py" = ["E501"]
+"bin/**" = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["lmm_config", "lmm_errors", "lmm_storage", "lmm_types", "lmm_health", "lmm_receipts", "lmm_notifications", "lmm_providers"]
