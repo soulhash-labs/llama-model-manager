@@ -51,6 +51,40 @@ class Phase0ContractTests(unittest.TestCase):
         bridge_spec.loader.exec_module(bridge)
         return bridge
 
+    def test_gateway_context_status_reports_bridge_readiness(self) -> None:
+        gateway = self.load_gateway_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app_root = Path(tmpdir)
+            mcp_root = app_root / "integrations" / "context-mode-mcp"
+            bridge_path = app_root / "scripts" / "context_mcp_bridge.py"
+
+            with mock.patch.object(gateway, "APP_ROOT", app_root):
+                with mock.patch.dict(os.environ, {"LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1"}, clear=True):
+                    self.assertEqual(gateway.context_status(), ("missing", False))
+
+                    mcp_root.mkdir(parents=True)
+                    (mcp_root / "package.json").write_text("{}", encoding="utf-8")
+                    self.assertEqual(gateway.context_status(), ("missing_bridge", False))
+                    self.assertEqual(
+                        gateway.retrieve_context({}, "hello", model="status-model", stream=False)["status"],
+                        "missing_bridge",
+                    )
+
+                    bridge_path.parent.mkdir(parents=True)
+                    bridge_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+                    self.assertEqual(gateway.context_status(), ("missing_dist", False))
+                    self.assertEqual(
+                        gateway.retrieve_context({}, "hello", model="status-model", stream=False)["status"],
+                        "missing_dist",
+                    )
+
+                    (mcp_root / "dist").mkdir()
+                    (mcp_root / "dist" / "index.js").write_text("// built\n", encoding="utf-8")
+                    self.assertEqual(gateway.context_status(), ("bridge_ready", False))
+
+                    with mock.patch.dict(os.environ, {"LMM_CONTEXT_MCP_COMMAND": "custom-ctx"}, clear=False):
+                        self.assertEqual(gateway.context_status(), ("command_configured", False))
+
     def make_manager(self, tmpdir: str) -> object:
         env = {
             "HOME": str(Path(tmpdir) / "home"),

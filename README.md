@@ -303,7 +303,7 @@ These integrations are optional. The default product behavior remains the local 
 
 The optional Context Mode MCP package lives under `integrations/context-mode-mcp/`. It is intended for local development workflows that need indexed context, compact retrieval, lifecycle diagnostics, and MCP tool execution helpers.
 
-Gateway requests can invoke a bounded Context MCP bridge by setting `LMM_CONTEXT_MCP_COMMAND` to a command that reads a JSON request from stdin and returns retrieved context on stdout. OpenAI-compatible clients may also provide request-scoped context through `lmm_context`, `retrieved_context`, `context`, or `metadata.context`. If Context MCP is unavailable, times out, or returns no context, the gateway continues in `routed-basic` mode and records the degraded stage in telemetry.
+Gateway requests use the bundled `scripts/context_mcp_bridge.py` by default when the Context Mode MCP package and built `dist/index.js` are present. Set `LMM_CONTEXT_MCP_COMMAND` only when you want to override that bridge with another command that reads a JSON request from stdin and returns retrieved context on stdout. OpenAI-compatible clients may also provide request-scoped context through `lmm_context`, `retrieved_context`, `context`, or `metadata.context`. If Context MCP is unavailable, times out, or returns no context, the gateway continues in `routed-basic` mode and records the degraded stage in telemetry.
 
 Glyph Encoding runs after context retrieval and before GlyphOS routing. It only compresses structured or repeated retrieved context, never the latest user instruction. If encoding is not smaller or fails, the gateway falls back to raw retrieved context and records the reason.
 

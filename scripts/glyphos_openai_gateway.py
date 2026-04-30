@@ -232,6 +232,10 @@ def context_mcp_root() -> Path:
     return APP_ROOT / "integrations" / "context-mode-mcp"
 
 
+def context_mcp_bridge_path() -> Path:
+    return APP_ROOT / "scripts" / "context_mcp_bridge.py"
+
+
 def context_status() -> tuple[str, bool]:
     enabled = context_pipeline_enabled()
     if not enabled:
@@ -239,7 +243,13 @@ def context_status() -> tuple[str, bool]:
     root = context_mcp_root()
     if not (root / "package.json").is_file():
         return "missing", False
-    return "available_no_context", False
+    if os.environ.get("LMM_CONTEXT_MCP_COMMAND", "").strip():
+        return "command_configured", False
+    if not context_mcp_bridge_path().is_file():
+        return "missing_bridge", False
+    if not (root / "dist" / "index.js").is_file():
+        return "missing_dist", False
+    return "bridge_ready", False
 
 
 def compact_json(value: Any) -> str:
@@ -369,9 +379,22 @@ def retrieve_context(payload: dict[str, Any], prompt: str, *, model: str, stream
 
     command = os.environ.get("LMM_CONTEXT_MCP_COMMAND", "").strip()
     if not command:
-        bridge = APP_ROOT / "scripts" / "context_mcp_bridge.py"
-        if bridge.is_file():
-            command = f"{sys.executable} {bridge}"
+        bridge = context_mcp_bridge_path()
+        if not bridge.is_file():
+            result.update({
+                "status": "missing_bridge",
+                "source": "context-mode-mcp",
+                "latency_ms": round((time.perf_counter() - started) * 1000),
+            })
+            return result
+        if not (root / "dist" / "index.js").is_file():
+            result.update({
+                "status": "missing_dist",
+                "source": "context-mode-mcp",
+                "latency_ms": round((time.perf_counter() - started) * 1000),
+            })
+            return result
+        command = f"{sys.executable} {bridge}"
     if not command:
         result.update({
             "status": "available_no_context",
