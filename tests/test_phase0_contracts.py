@@ -34,6 +34,7 @@ LMM_CONFIG_PATH = ROOT_DIR / "scripts" / "lmm_config.py"
 LMM_ERRORS_PATH = ROOT_DIR / "scripts" / "lmm_errors.py"
 LMM_STORAGE_PATH = ROOT_DIR / "scripts" / "lmm_storage.py"
 LMM_TYPES_PATH = ROOT_DIR / "scripts" / "lmm_types.py"
+LMM_HEALTH_PATH = ROOT_DIR / "scripts" / "lmm_health.py"
 
 
 class Phase0ContractTests(unittest.TestCase):
@@ -412,6 +413,41 @@ class Phase0ContractTests(unittest.TestCase):
         server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         server.backend_base_url = backend_base_url  # type: ignore[attr-defined]
         server.model_id = model_id  # type: ignore[attr-defined]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        self.addCleanup(thread.join, 1)
+        return server
+
+    def start_backend_status_server(
+        self,
+        *,
+        status: int = 200,
+        payload: dict[str, object] | None = None,
+    ) -> ThreadingHTTPServer:
+        response_body = payload if payload is not None else {
+            "object": "list",
+            "data": [{"id": "mock-model", "object": "model"}],
+        }
+
+        class BackendHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                if self.path.split("?", 1)[0] == "/v1/models":
+                    body = json.dumps(response_body).encode("utf-8")
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A003
+                return None
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), BackendHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(server.shutdown)
@@ -3034,6 +3070,260 @@ while True:
         self.assertEqual(calls, [("gateway", "logs", "12")])
         self.assertEqual(body["lines"], 12)
         self.assertEqual(body["content"], "gateway line\n")
+
+    def test_health_checker_checks_backend_availability(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            backend_server = self.start_backend_status_server(payload={"object": "list", "data": []})
+            health_module = self.load_script_module("llama_model_manager_health", LMM_HEALTH_PATH)
+            config_module = self.load_script_module("llama_model_manager_config_health", LMM_CONFIG_PATH)
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LMM_RUN_RECORDS_FILE": str(Path(tmpdir) / "run-records.json"),
+                },
+                clear=False,
+            ):
+                config = config_module.load_lmm_config_from_env()
+            checker = health_module.HealthChecker(
+                backend_url=f"http://127.0.0.1:{backend_server.server_port}/v1",
+                config=config,
+            )
+
+            checks = checker.check_all()
+
+        self.assertEqual(checks["backend"].status, "healthy")
+        self.assertEqual(checks["storage"].status, "healthy")
+        self.assertIn(checks["context"].status, {"healthy", "degraded"})
+
+    def test_health_checker_checks_backend_unreachable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            health_module = self.load_script_module("llama_model_manager_health_down", LMM_HEALTH_PATH)
+            config_module = self.load_script_module("llama_model_manager_config_health_down", LMM_CONFIG_PATH)
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LMM_RUN_RECORDS_FILE": str(Path(tmpdir) / "run-records.json"),
+                },
+                clear=False,
+            ):
+                config = config_module.load_lmm_config_from_env()
+            checker = health_module.HealthChecker(backend_url="http://127.0.0.1:9/v1", config=config)
+
+            checks = checker.check_all()
+
+        self.assertEqual(checks["backend"].status, "unhealthy")
+        self.assertEqual(checks["storage"].status, "healthy")
+
+    def test_health_checker_readyz_requires_all_healthy(self) -> None:
+        health_module = self.load_script_module("llama_model_manager_health_ready", LMM_HEALTH_PATH)
+        config_module = self.load_script_module("llama_model_manager_config_health_ready", LMM_CONFIG_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"LMM_RUN_RECORDS_FILE": str(Path(tmpdir) / "run-records.json")}, clear=False):
+                config = config_module.load_lmm_config_from_env()
+            checker = health_module.HealthChecker(backend_url="http://127.0.0.1:9/v1", config=config)
+            with mock.patch.object(
+                health_module.HealthChecker,
+                "_check_context",
+                return_value=health_module.ComponentHealth("context", "degraded", "mocked context unhealthy"),
+            ):
+                with mock.patch.object(
+                    health_module.HealthChecker,
+                    "_check_backend",
+                    return_value=health_module.ComponentHealth("backend", "healthy", "mocked backend healthy"),
+                ):
+                    with mock.patch.object(
+                        health_module.HealthChecker,
+                        "_check_storage",
+                        return_value=health_module.ComponentHealth("storage", "healthy", "mocked storage healthy"),
+                    ):
+                        self.assertFalse(checker.is_ready())
+                        self.assertTrue(checker.is_healthy())
+
+    def test_gateway_readiness_endpoint_returns_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            backend_server = self.start_backend_status_server()
+            gateway = self.load_gateway_module()
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LMM_RUN_RECORDS_FILE": str(Path(tmpdir) / "run-records.json"),
+                    "LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json"),
+                },
+                clear=False,
+            ):
+                server = self.start_gateway_server(
+                    gateway_module=gateway,
+                    backend_base_url=f"http://127.0.0.1:{backend_server.server_port}/v1",
+                )
+                status, body = self.get_json_raw(f"http://127.0.0.1:{server.server_port}/readyz")
+
+        self.assertEqual(status, HTTPStatus.OK)
+        self.assertEqual(body["status"], "ready")
+
+    def test_gateway_readiness_endpoint_returns_not_ready(self) -> None:
+        gateway = self.load_gateway_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LMM_RUN_RECORDS_FILE": str(Path(tmpdir) / "run-records.json"),
+                    "LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json"),
+                },
+                clear=False,
+            ):
+                server = self.start_gateway_server(gateway_module=gateway, backend_base_url="http://127.0.0.1:9/v1")
+                status, body = self.get_json_raw(f"http://127.0.0.1:{server.server_port}/readyz")
+
+        self.assertEqual(status, HTTPStatus.SERVICE_UNAVAILABLE)
+        self.assertEqual(body["status"], "not_ready")
+        self.assertIn("components", body)
+
+    def test_gateway_emits_run_record_on_success(self) -> None:
+        def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+            return {
+                "text": "response text",
+                "target": "llamacpp",
+                "reason_code": "default_local",
+                "reason": "default route",
+                "latency_ms": 9,
+            }, {"X-LMM-Route-Mode": "routed"}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gateway = self.load_gateway_module()
+            run_records = Path(tmpdir) / "run-records.json"
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LMM_RUN_RECORDS_FILE": str(run_records),
+                    "LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json"),
+                },
+                clear=False,
+            ):
+                with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+                    server = self.start_gateway_server(gateway_module=gateway)
+                    _ = self.post_json(f"http://127.0.0.1:{server.server_port}/v1/chat/completions", {"model": "run-record-model", "messages": [{"role": "user", "content": "hello"}]})
+
+            state = json.loads(run_records.read_text(encoding="utf-8"))
+            records = state.get("records", [])
+            self.assertEqual(records[0]["status"], "completed")
+            self.assertEqual(records[0]["exit_result"], "success")
+            self.assertEqual(records[0]["provider"], "llamacpp")
+            self.assertIsInstance(records[0]["duration_ms"], int)
+
+    def test_gateway_emits_run_record_on_failure(self) -> None:
+        def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+            raise RuntimeError("provider unavailable")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gateway = self.load_gateway_module()
+            run_records = Path(tmpdir) / "run-records.json"
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LMM_RUN_RECORDS_FILE": str(run_records),
+                    "LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json"),
+                },
+                clear=False,
+            ):
+                with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+                    server = self.start_gateway_server(gateway_module=gateway)
+                    status, body = self.post_json_raw(f"http://127.0.0.1:{server.server_port}/v1/chat/completions", {"model": "run-record-model", "messages": [{"role": "user", "content": "hello"}]})
+                    self.assertEqual(status, HTTPStatus.SERVICE_UNAVAILABLE)
+                    self.assertEqual(body["error"]["type"], "lmm_gateway_error")
+
+            state = json.loads(run_records.read_text(encoding="utf-8"))
+            records = state.get("records", [])
+            self.assertEqual(records[0]["status"], "failed")
+            self.assertEqual(records[0]["exit_result"], "provider_error")
+
+    def test_gateway_emits_run_record_on_client_disconnect(self) -> None:
+        def fake_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str], object]:
+            return {
+                "target": "llamacpp",
+                "reason_code": "default_local",
+                "reason": "default route",
+                "latency_ms": 7,
+            }, {"X-LMM-Route-Mode": "routed-basic"}, iter(["partial-token"])
+
+        def fake_stream_completion(
+            handler: Any,
+            *,
+            started: float,
+            model: str,
+            chunks: Iterator[str],
+            headers: dict[str, str],
+        ) -> tuple[str, bool, str, int]:
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            handler.send_header("Cache-Control", "no-cache")
+            handler.send_header("Connection", "close")
+            for key, value in headers.items():
+                handler.send_header(key, value)
+            handler.end_headers()
+            handler.wfile.write(b"data: partial\\n\\n")
+            handler.wfile.flush()
+            return "partial-token", False, "client disconnected", 12
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gateway = self.load_gateway_module()
+            run_records = Path(tmpdir) / "run-records.json"
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LMM_RUN_RECORDS_FILE": str(run_records),
+                    "LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json"),
+                },
+                clear=False,
+            ):
+                with mock.patch.object(gateway, "route_prompt_stream", side_effect=fake_route):
+                    with mock.patch.object(gateway, "stream_completion", side_effect=fake_stream_completion):
+                        server = self.start_gateway_server(gateway_module=gateway)
+                        request = urllib.request.Request(
+                            f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                            data=json.dumps({
+                                "model": "run-record-model",
+                                "stream": True,
+                                "messages": [{"role": "user", "content": "hello"}],
+                            }).encode("utf-8"),
+                            headers={"Content-Type": "application/json"},
+                            method="POST",
+                        )
+                        with urllib.request.urlopen(request, timeout=10) as response:
+                            self.assertEqual(response.status, HTTPStatus.OK)
+                            response.read()
+
+            state = json.loads(run_records.read_text(encoding="utf-8"))
+            records = state.get("records", [])
+            self.assertEqual(records[0]["status"], "cancelled")
+            self.assertEqual(records[0]["exit_result"], "user_cancelled")
+
+    def test_gateway_runtime_report_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            backend_server = self.start_backend_status_server()
+            gateway = self.load_gateway_module()
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LMM_RUN_RECORDS_FILE": str(Path(tmpdir) / "run-records.json"),
+                    "LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json"),
+                },
+                clear=False,
+            ):
+                server = self.start_gateway_server(
+                    gateway_module=gateway,
+                    backend_base_url=f"http://127.0.0.1:{backend_server.server_port}/v1",
+                )
+                status, body = self.get_json_raw(f"http://127.0.0.1:{server.server_port}/-/runtime/report")
+
+        self.assertEqual(status, HTTPStatus.OK)
+        self.assertIsInstance(body["uptime_seconds"], (int, float))
+        self.assertGreaterEqual(body["uptime_seconds"], 0)
+        self.assertIn("components", body)
+        self.assertIn("backend", body["components"])
+        self.assertIn("storage", body["components"])
+        self.assertIn("context", body["components"])
 
     def test_glyphos_shared_telemetry_preserves_concurrent_process_updates(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
