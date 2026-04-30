@@ -54,22 +54,39 @@ default_value() {
     local key="$1"
     local fallback="$2"
     local file="$CONFIG_DIR/defaults.env"
-    local line=""
-    local value=""
 
-    if [[ -f "$file" ]]; then
-        line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" | tail -n 1 || true)"
-    fi
-    if [[ -z "$line" ]]; then
+    if [[ ! -f "$file" ]]; then
         printf '%s\n' "$fallback"
         return 0
     fi
-    value="${line#*=}"
-    value="${value#\"}"
-    value="${value%\"}"
-    value="${value#\'}"
-    value="${value%\'}"
-    printf '%s\n' "${value:-$fallback}"
+    python3 - "$file" "$key" "$fallback" <<'PY'
+import shlex
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+key = sys.argv[2]
+fallback = sys.argv[3]
+value = ""
+
+for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    try:
+        parts = shlex.split(stripped, comments=True, posix=True)
+    except ValueError:
+        continue
+    if not parts:
+        continue
+    if parts[0] == "export":
+        parts = parts[1:]
+    for part in parts:
+        if part.startswith(f"{key}="):
+            value = part.split("=", 1)[1]
+
+print(value or fallback)
+PY
 }
 
 read_saved_current_model() {
@@ -170,6 +187,10 @@ post_install_sync_clients() {
             printf 'post-install warning: OpenClaw sync failed; run llama-model sync-openclaw after resolving the current model\n' >&2
         fi
     fi
+    local nullglob_was_set="no"
+    if shopt -q nullglob; then
+        nullglob_was_set="yes"
+    fi
     shopt -s nullglob
     for profile_dir in "$HOME"/.openclaw-*; do
         [[ -f "$profile_dir/openclaw.json" ]] || continue
@@ -182,7 +203,11 @@ post_install_sync_clients() {
             printf 'post-install warning: OpenClaw profile %s sync failed; run llama-model sync-openclaw --profile %s after resolving the current model\n' "$profile_name" "$profile_name" >&2
         fi
     done
-    shopt -u nullglob
+    if [[ "$nullglob_was_set" == "yes" ]]; then
+        shopt -s nullglob
+    else
+        shopt -u nullglob
+    fi
     if [[ -f "$glyphos_config" ]]; then
         if "$BIN_DIR/llama-model" sync-glyphos >/dev/null 2>&1; then
             printf 'post-install synced GlyphOS to the backend endpoint\n'

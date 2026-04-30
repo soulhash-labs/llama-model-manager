@@ -1806,25 +1806,68 @@ class Phase0ContractTests(unittest.TestCase):
             self.assertEqual(telemetry["counters"]["success:True"], 1)
             self.assertEqual(telemetry["recent_requests"][0]["route_target"], "llamacpp")
 
-    def test_gateway_chat_completion_supports_openai_sse_streaming(self) -> None:
+    def test_gateway_chat_completion_does_not_fail_when_telemetry_write_fails(self) -> None:
         def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
             return {
-                "text": "streamed ok",
+                "text": "routed despite telemetry",
                 "target": "llamacpp",
                 "reason_code": "default_local",
                 "reason": "default - use local llama.cpp",
-                "latency_ms": 5,
+                "latency_ms": 8,
             }, {"X-LMM-Route-Mode": "routed"}
+
+        gateway = self.load_gateway_module()
+        with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+            with mock.patch.object(gateway, "record_gateway_request", side_effect=OSError("telemetry unwritable")):
+                server = self.start_gateway_server(gateway_module=gateway)
+                payload = {
+                    "model": "telemetry-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                }
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(body["choices"][0]["message"]["content"], "routed despite telemetry")
+        self.assertEqual(body["lmm"]["glyphos_target"], "llamacpp")
+
+    def test_gateway_chat_completion_supports_openai_sse_streaming(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_stream_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str], object]:
+            captured.update({
+                "prompt": prompt,
+                "model": model,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            })
+            def chunks() -> object:
+                yield "streamed "
+                yield "ok"
+
+            return {
+                "target": "llamacpp",
+                "reason_code": "default_local",
+                "reason": "default - use local llama.cpp",
+            }, {"X-LMM-Route-Mode": "routed"}, chunks()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             gateway = self.load_gateway_module()
             with mock.patch.dict(os.environ, {"LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json")}, clear=False):
-                with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+                with mock.patch.object(gateway, "route_prompt_stream", side_effect=fake_stream_route):
                     server = self.start_gateway_server(gateway_module=gateway)
                     payload = {
                         "model": "stream-model",
                         "messages": [{"role": "user", "content": "stream please"}],
                         "stream": True,
+                        "max_tokens": 42,
+                        "temperature": 0.1,
                     }
                     req = urllib.request.Request(
                         f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
@@ -1839,8 +1882,12 @@ class Phase0ContractTests(unittest.TestCase):
 
         self.assertIn("text/event-stream", content_type)
         self.assertIn("chat.completion.chunk", raw)
-        self.assertIn("streamed ok", raw)
+        self.assertIn('"content": "streamed "', raw)
+        self.assertIn('"content": "ok"', raw)
         self.assertIn("data: [DONE]", raw)
+        self.assertEqual(captured["model"], "stream-model")
+        self.assertEqual(captured["max_tokens"], 42)
+        self.assertEqual(captured["temperature"], 0.1)
 
     def test_gateway_chat_completion_returns_503_when_backend_route_fails(self) -> None:
         def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
@@ -1871,14 +1918,116 @@ class Phase0ContractTests(unittest.TestCase):
         self.assertIn("offline", body["error"]["message"])
         self.assertFalse(body["lmm"]["success"])
 
-    def test_gateway_streaming_request_returns_503_before_sse_when_backend_route_fails(self) -> None:
+    def test_gateway_chat_completion_returns_400_for_invalid_request_payload(self) -> None:
+        gateway = self.load_gateway_module()
+        server = self.start_gateway_server(gateway_module=gateway)
+        payload = {
+            "model": "invalid-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": "not-a-number",
+        }
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        with self.assertRaises(error.HTTPError) as raised:
+            urllib.request.urlopen(req, timeout=5)
+        body = json.loads(raised.exception.read().decode("utf-8"))
+
+        self.assertEqual(raised.exception.code, 400)
+        self.assertEqual(body["error"]["type"], "invalid_request_error")
+        self.assertIn("max_tokens", body["error"]["message"])
+
+    def test_gateway_chat_completion_returns_400_for_non_finite_temperature(self) -> None:
+        gateway = self.load_gateway_module()
+        server = self.start_gateway_server(gateway_module=gateway)
+        payload = {
+            "model": "invalid-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "temperature": "NaN",
+        }
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        with self.assertRaises(error.HTTPError) as raised:
+            urllib.request.urlopen(req, timeout=5)
+        body = json.loads(raised.exception.read().decode("utf-8"))
+
+        self.assertEqual(raised.exception.code, 400)
+        self.assertEqual(body["error"]["type"], "invalid_request_error")
+        self.assertIn("temperature", body["error"]["message"])
+
+    def test_glyphos_route_stream_complex_action_falls_back_to_local_llamacpp(self) -> None:
+        integration_root = str(ROOT_DIR / "integrations" / "public-glyphos-ai-compute")
+        original_path = list(sys.path)
+        try:
+            if integration_root not in sys.path:
+                sys.path.insert(0, integration_root)
+            from glyphos_ai.ai_compute.router import AdaptiveRouter  # type: ignore
+
+            class Packet:
+                psi_coherence = 0.2
+                action = "ANALYZE"
+
+            class FakeLlamaCpp:
+                def stream_generate(self, prompt: str, **kwargs: object) -> object:
+                    yield "local stream"
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                telemetry_path = str(Path(tmpdir) / "glyphos-routing.json")
+                with mock.patch.dict(os.environ, {"LLAMA_MODEL_GLYPHOS_TELEMETRY_FILE": telemetry_path}, clear=False):
+                    router = AdaptiveRouter(llamacpp_client=FakeLlamaCpp())
+                    routed, chunks = router.route_stream(Packet(), prompt="complex prompt")
+
+                    self.assertEqual(routed["target"], "llamacpp")
+                    self.assertEqual(routed["reason_code"], "complex_action_local_stream")
+                    self.assertEqual(list(chunks), ["local stream"])
+        finally:
+            sys.path[:] = original_path
+
+    def test_gateway_backend_failure_still_returns_503_when_telemetry_write_fails(self) -> None:
         def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+            raise RuntimeError("llama.cpp backend is offline")
+
+        gateway = self.load_gateway_module()
+        with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+            with mock.patch.object(gateway, "record_gateway_request", side_effect=OSError("telemetry unwritable")):
+                server = self.start_gateway_server(gateway_module=gateway)
+                payload = {
+                    "model": "offline-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                }
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+
+                with self.assertRaises(error.HTTPError) as raised:
+                    urllib.request.urlopen(req, timeout=5)
+                body = json.loads(raised.exception.read().decode("utf-8"))
+
+        self.assertEqual(raised.exception.code, 503)
+        self.assertEqual(body["error"]["type"], "lmm_gateway_error")
+        self.assertIn("offline", body["error"]["message"])
+        self.assertFalse(body["lmm"]["success"])
+
+    def test_gateway_streaming_request_returns_503_before_sse_when_backend_route_fails(self) -> None:
+        def fake_stream_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str], object]:
             raise RuntimeError("llama.cpp backend is offline")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             gateway = self.load_gateway_module()
             with mock.patch.dict(os.environ, {"LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json")}, clear=False):
-                with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+                with mock.patch.object(gateway, "route_prompt_stream", side_effect=fake_stream_route):
                     server = self.start_gateway_server(gateway_module=gateway)
                     payload = {
                         "model": "offline-model",

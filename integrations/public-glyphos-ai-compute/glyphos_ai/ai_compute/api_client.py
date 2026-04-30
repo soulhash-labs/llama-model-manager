@@ -8,7 +8,7 @@ import os
 import json
 import warnings
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 from urllib import request as urlrequest
 from urllib.error import URLError, HTTPError
 
@@ -190,6 +190,14 @@ class LlamaCppClient(BaseChatClient):
             pass
         return "local-llama"
 
+    def _chat_payload(self, prompt: str, **kwargs) -> dict[str, Any]:
+        return {
+            "model": kwargs.get("model", self._resolve_model()),
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": kwargs.get("temperature", 0.7),
+            "max_tokens": kwargs.get("max_tokens", self.max_tokens),
+        }
+
     def generate(self, prompt: str, **kwargs) -> str:
         if not self._available:
             raise RuntimeError("llama.cpp backend is offline")
@@ -197,12 +205,7 @@ class LlamaCppClient(BaseChatClient):
             response = _http_json(
                 "POST",
                 self._chat_url(),
-                payload={
-                    "model": kwargs.get("model", self._resolve_model()),
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": kwargs.get("temperature", 0.7),
-                    "max_tokens": kwargs.get("max_tokens", self.max_tokens),
-                },
+                payload=self._chat_payload(prompt, **kwargs),
                 timeout=self.timeout,
             )
             response.raise_for_status()
@@ -210,6 +213,46 @@ class LlamaCppClient(BaseChatClient):
             return payload["choices"][0]["message"]["content"]
         except Exception as exc:
             raise RuntimeError(f"llama.cpp request failed: {exc}") from exc
+
+    def stream_generate(self, prompt: str, **kwargs) -> Iterator[str]:
+        if not self._available:
+            raise RuntimeError("llama.cpp backend is offline")
+        payload = self._chat_payload(prompt, **kwargs)
+        payload["stream"] = True
+        req = urlrequest.Request(
+            self._chat_url(),
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlrequest.urlopen(req, timeout=self.timeout) as response:
+                yield ""
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line.split(":", 1)[1].strip()
+                    if not data or data == "[DONE]":
+                        break
+                    try:
+                        event = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = event.get("choices") if isinstance(event, dict) else None
+                    if not isinstance(choices, list) or not choices:
+                        continue
+                    choice = choices[0]
+                    if not isinstance(choice, dict):
+                        continue
+                    delta = choice.get("delta")
+                    if isinstance(delta, dict) and delta.get("content"):
+                        yield str(delta["content"])
+                    message = choice.get("message")
+                    if isinstance(message, dict) and message.get("content"):
+                        yield str(message["content"])
+        except Exception as exc:
+            raise RuntimeError(f"llama.cpp streaming request failed: {exc}") from exc
 
 
 class OpenAIClient(BaseChatClient):

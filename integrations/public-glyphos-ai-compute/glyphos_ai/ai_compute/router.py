@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 from .api_client import create_configured_clients
 from .glyph_to_prompt import glyph_to_prompt
@@ -286,6 +286,54 @@ class AdaptiveRouter:
             routing_reason="no backends configured",
             routing_reason_code="no_backends_configured",
         )
+
+    def route_stream(self, glyph_packet, prompt: Optional[str] = None, **generation_kwargs: Any) -> tuple[dict[str, Any], Iterator[str]]:
+        if prompt is None:
+            prompt = glyph_to_prompt(glyph_packet)
+        psi = self._packet_value(glyph_packet, "psi_coherence", "psiCoherence", 0.5)
+        action = glyph_packet.action
+
+        if psi >= self.config.high_coherence_threshold and self.llamacpp:
+            return self._route_llamacpp_stream(prompt, "high coherence - prefer local llama.cpp", "high_coherence_local", **generation_kwargs)
+
+        if action in self.config.complex_actions:
+            if self.llamacpp:
+                return self._route_llamacpp_stream(prompt, "complex action - local streaming fallback", "complex_action_local_stream", **generation_kwargs)
+            raise RuntimeError("streaming through external GlyphOS backends is not available")
+
+        if self.llamacpp:
+            return self._route_llamacpp_stream(prompt, "default - use local llama.cpp", "default_local", **generation_kwargs)
+        raise RuntimeError("no streaming-capable local llama.cpp backend is configured")
+
+    def _route_llamacpp_stream(self, prompt: str, reason: str, reason_code: str, **generation_kwargs: Any) -> tuple[dict[str, Any], Iterator[str]]:
+        if not hasattr(self.llamacpp, "stream_generate"):
+            raise RuntimeError("local llama.cpp client does not support streaming")
+        start = time.perf_counter()
+
+        def chunks() -> Iterator[str]:
+            try:
+                for chunk in self.llamacpp.stream_generate(prompt, **generation_kwargs):
+                    yield chunk
+                self._track_route(
+                    ComputeTarget.LOCAL_LLAMACPP,
+                    reason_code,
+                    latency_ms=round((time.perf_counter() - start) * 1000),
+                )
+            except Exception as exc:
+                self._track_route(
+                    ComputeTarget.LOCAL_LLAMACPP,
+                    reason_code,
+                    is_error=True,
+                    latency_ms=round((time.perf_counter() - start) * 1000),
+                    error_message=str(exc),
+                )
+                raise RuntimeError(f"llama.cpp streaming error: {exc}") from exc
+
+        return {
+            "target": ComputeTarget.LOCAL_LLAMACPP.value,
+            "reason_code": reason_code,
+            "reason": reason,
+        }, chunks()
 
     def _route_llamacpp(self, prompt: str, reason: str, reason_code: str, **generation_kwargs: Any) -> RoutingResult:
         start = time.perf_counter()

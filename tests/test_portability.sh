@@ -709,9 +709,9 @@ test_install_reports_unified_memory_upgrade_note_for_existing_defaults() {
 LLAMA_SERVER_CONTEXT=128000
 LLAMA_SERVER_PARALLEL=1
 LLAMA_SERVER_THREADS=12
-LLAMA_SERVER_PORT=19082
-LLAMA_MODEL_GATEWAY_HOST=127.0.0.2
-LLAMA_MODEL_GATEWAY_PORT=4510
+export LLAMA_SERVER_PORT="19082" # custom backend port
+LLAMA_MODEL_GATEWAY_HOST='127.0.0.2'
+export LLAMA_MODEL_GATEWAY_PORT="4510" # custom gateway port
 LLAMA_MODEL_OPENCODE_GATEWAY_BASE_URL=http://127.0.0.1:4010/v1
 EOF
 
@@ -730,10 +730,10 @@ EOF
     assert_contains "$defaults_after" "LLAMA_SERVER_CONTEXT=128000"
     assert_contains "$defaults_after" "LLAMA_SERVER_PARALLEL=1"
     assert_contains "$defaults_after" "LLAMA_SERVER_THREADS=12"
-    assert_contains "$defaults_after" "LLAMA_SERVER_PORT=19082"
+    assert_contains "$defaults_after" 'LLAMA_SERVER_PORT="19082"'
     assert_contains "$defaults_after" "LLAMA_MODEL_HARNESS_MODE=routed"
-    assert_contains "$defaults_after" "LLAMA_MODEL_GATEWAY_HOST=127.0.0.2"
-    assert_contains "$defaults_after" "LLAMA_MODEL_GATEWAY_PORT=4510"
+    assert_contains "$defaults_after" "LLAMA_MODEL_GATEWAY_HOST='127.0.0.2'"
+    assert_contains "$defaults_after" 'LLAMA_MODEL_GATEWAY_PORT="4510"'
     assert_contains "$defaults_after" 'LLAMA_MODEL_GATEWAY_LOG=$HOME/models/lmm-gateway.log'
     assert_not_contains "$defaults_after" "LLAMA_MODEL_OPENCODE_GATEWAY_BASE_URL"
     assert_contains "$output" "harness endpoint: http://127.0.0.2:4510/v1"

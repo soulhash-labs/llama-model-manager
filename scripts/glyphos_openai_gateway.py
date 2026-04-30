@@ -6,11 +6,12 @@ from contextlib import contextmanager
 import fcntl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import math
 import os
 from pathlib import Path
 import sys
 import time
-from typing import Any
+from typing import Any, Iterator
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
@@ -36,22 +37,48 @@ def json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[st
     handler.wfile.write(raw)
 
 
+class InvalidRequestError(ValueError):
+    pass
+
+
 def read_json(handler: BaseHTTPRequestHandler, *, max_bytes: int = 2_000_000) -> dict[str, Any]:
     length_text = handler.headers.get("Content-Length", "0")
     try:
         length = int(length_text)
     except ValueError as exc:
-        raise ValueError("invalid Content-Length") from exc
+        raise InvalidRequestError("invalid Content-Length") from exc
     if length < 0 or length > max_bytes:
-        raise ValueError("request body too large")
+        raise InvalidRequestError("request body too large")
     raw = handler.rfile.read(length)
     try:
         payload = json.loads(raw.decode("utf-8")) if raw else {}
     except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid JSON: {exc.msg}") from exc
+        raise InvalidRequestError(f"invalid JSON: {exc.msg}") from exc
     if not isinstance(payload, dict):
-        raise ValueError("request JSON must be an object")
+        raise InvalidRequestError("request JSON must be an object")
     return payload
+
+
+def request_int(payload: dict[str, Any], key: str, default: int, *, minimum: int = 1) -> int:
+    raw = payload.get(key, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise InvalidRequestError(f"{key} must be an integer") from exc
+    if value < minimum:
+        raise InvalidRequestError(f"{key} must be at least {minimum}")
+    return value
+
+
+def request_float(payload: dict[str, Any], key: str, default: float) -> float:
+    raw = payload.get(key, default)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise InvalidRequestError(f"{key} must be a number") from exc
+    if not math.isfinite(value):
+        raise InvalidRequestError(f"{key} must be finite")
+    return value
 
 
 def http_json(method: str, url: str, *, payload: dict[str, Any] | None = None, timeout: int = 5) -> tuple[int, dict[str, Any]]:
@@ -134,6 +161,13 @@ def record_gateway_request(record: dict[str, Any]) -> None:
         save_gateway_state(state)
 
 
+def safe_record_gateway_request(record: dict[str, Any]) -> None:
+    try:
+        record_gateway_request(record)
+    except Exception as exc:
+        sys.stderr.write(f"warning: failed to persist LMM gateway telemetry: {exc}\n")
+
+
 def messages_to_prompt(messages: Any) -> str:
     if not isinstance(messages, list):
         return ""
@@ -165,7 +199,7 @@ def context_status() -> tuple[str, bool]:
     root = APP_ROOT / "integrations" / "context-mode-mcp"
     if not (root / "package.json").is_file():
         return "missing", False
-    return "available_not_invoked", False
+    return "available_not_enriching", False
 
 
 def create_router():
@@ -212,6 +246,27 @@ def route_prompt(prompt: str, model: str, max_tokens: int, temperature: float) -
     }, headers
 
 
+def route_prompt_stream(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, Any], dict[str, str], Iterator[str]]:
+    from glyphos_ai.glyph.types import GlyphPacket  # type: ignore
+
+    packet = GlyphPacket(
+        instance_id="lmm-gateway",
+        psi_coherence=0.9,
+        action="QUERY",
+        header="H",
+        time_slot="T00",
+        destination=model or "local-llama",
+    )
+    router = create_router()
+    routed, chunks = router.route_stream(packet, prompt=prompt, model=model, max_tokens=max_tokens, temperature=temperature)
+    headers = {
+        "X-LMM-Route-Mode": "routed",
+        "X-LMM-GlyphOS-Target": str(routed["target"]),
+        "X-LMM-GlyphOS-Reason": str(routed["reason_code"]),
+    }
+    return routed, headers, chunks
+
+
 def completion_payload(
     *,
     started: float,
@@ -250,14 +305,27 @@ def sse_event(payload: dict[str, Any] | str) -> bytes:
     return f"data: {data}\n\n".encode("utf-8")
 
 
-def stream_completion(handler: BaseHTTPRequestHandler, payload: dict[str, Any], headers: dict[str, str]) -> None:
-    choice = payload["choices"][0]
-    text = str(choice["message"]["content"])
+def stream_completion(
+    handler: BaseHTTPRequestHandler,
+    *,
+    started: float,
+    model: str,
+    chunks: Iterator[str],
+    headers: dict[str, str],
+) -> tuple[str, bool, str, int]:
+    collected: list[str] = []
+    iterator = iter(chunks)
+    try:
+        first_chunk = next(iterator)
+    except StopIteration:
+        first_chunk = ""
+    except Exception as exc:
+        raise RuntimeError(str(exc)) from exc
     base = {
-        "id": payload["id"],
+        "id": f"chatcmpl-lmm-{int(started * 1000)}",
         "object": "chat.completion.chunk",
-        "created": payload["created"],
-        "model": payload["model"],
+        "created": int(started),
+        "model": model,
     }
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -267,10 +335,30 @@ def stream_completion(handler: BaseHTTPRequestHandler, payload: dict[str, Any], 
         handler.send_header(key, value)
     handler.end_headers()
     handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]}))
-    if text:
-        handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}]}))
-    handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}))
-    handler.wfile.write(sse_event("[DONE]"))
+    try:
+        for chunk in ([first_chunk] if first_chunk else []):
+            collected.append(str(chunk))
+            handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {"content": str(chunk)}, "finish_reason": None}]}))
+            handler.wfile.flush()
+        for chunk in iterator:
+            if not chunk:
+                continue
+            collected.append(str(chunk))
+            handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {"content": str(chunk)}, "finish_reason": None}]}))
+            handler.wfile.flush()
+        handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}))
+        handler.wfile.write(sse_event("[DONE]"))
+        handler.wfile.flush()
+        return "".join(collected), True, "", round((now() - started) * 1000)
+    except Exception as exc:
+        error_message = str(exc)
+        try:
+            handler.wfile.write(sse_event({"error": {"message": error_message, "type": "lmm_gateway_error"}}))
+            handler.wfile.write(sse_event("[DONE]"))
+            handler.wfile.flush()
+        except Exception:
+            pass
+        return "".join(collected), False, error_message, round((now() - started) * 1000)
 
 
 class GatewayHandler(BaseHTTPRequestHandler):
@@ -317,11 +405,33 @@ class GatewayHandler(BaseHTTPRequestHandler):
             payload = read_json(self)
             prompt = messages_to_prompt(payload.get("messages"))
             model = str(payload.get("model") or self.server.model_id or "local-llama")  # type: ignore[attr-defined]
-            max_tokens = int(payload.get("max_tokens") or 1000)
-            temperature = float(payload.get("temperature") or 0.7)
+            max_tokens = request_int(payload, "max_tokens", 1000)
+            temperature = request_float(payload, "temperature", 0.7)
             stream = payload.get("stream") is True
             if not prompt.strip():
-                raise ValueError("messages must contain text content")
+                raise InvalidRequestError("messages must contain text content")
+            if stream:
+                routed, headers, chunks = route_prompt_stream(prompt, model, max_tokens, temperature)
+                record.update({
+                    "route_target": routed["target"],
+                    "reason_code": routed["reason_code"],
+                })
+                text, success, error_message, latency_ms = stream_completion(
+                    self,
+                    started=started,
+                    model=model,
+                    chunks=chunks,
+                    headers=headers,
+                )
+                record.update({
+                    "success": success,
+                    "latency_ms": latency_ms,
+                    "completion_chars": len(text),
+                })
+                if error_message:
+                    record["error"] = error_message
+                safe_record_gateway_request(record)
+                return
             routed, headers = route_prompt(prompt, model, max_tokens, temperature)
             record.update({
                 "route_target": routed["target"],
@@ -336,15 +446,21 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 context_state=context_state,
                 context_used=context_used,
             )
-            record_gateway_request(record)
-            if stream:
-                stream_completion(self, response_payload, headers)
-            else:
-                json_response(self, 200, response_payload, headers=headers)
+            safe_record_gateway_request(record)
+            json_response(self, 200, response_payload, headers=headers)
+        except InvalidRequestError as exc:
+            record["error"] = str(exc)
+            record["latency_ms"] = round((now() - started) * 1000)
+            safe_record_gateway_request(record)
+            json_response(
+                self,
+                400,
+                {"error": {"message": str(exc), "type": "invalid_request_error"}, "lmm": record},
+            )
         except Exception as exc:
             record["error"] = str(exc)
             record["latency_ms"] = round((now() - started) * 1000)
-            record_gateway_request(record)
+            safe_record_gateway_request(record)
             json_response(self, 503, {"error": {"message": str(exc), "type": "lmm_gateway_error"}, "lmm": record})
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
