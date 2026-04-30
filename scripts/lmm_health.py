@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import os
-import time
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
-
 
 from lmm_config import GatewayConfig  # noqa: E402
 

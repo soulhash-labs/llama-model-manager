@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from contextlib import contextmanager
 import fcntl
 import json
 import os
-from pathlib import Path
 import time
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Protocol
 
 

@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
 
-class RunStatus(str, Enum):
+class RunStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -16,7 +16,7 @@ class RunStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
-class ExitResult(str, Enum):
+class ExitResult(StrEnum):
     SUCCESS = "success"
     ERROR = "error"
     USER_CANCELLED = "user_cancelled"
@@ -25,7 +25,7 @@ class ExitResult(str, Enum):
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _parse_iso8601_timestamp(value: str | None) -> datetime | None:
@@ -41,7 +41,7 @@ def _parse_iso8601_timestamp(value: str | None) -> datetime | None:
         return None
     if parsed.tzinfo is None:
         return parsed
-    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed.astimezone(UTC).replace(tzinfo=None)
 
 
 @dataclass
@@ -107,7 +107,7 @@ class RunRecord:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "RunRecord":
+    def from_dict(cls, data: dict[str, Any]) -> RunRecord:
         status_value = data.get("status", RunStatus.PENDING.value)
         if isinstance(status_value, RunStatus):
             status = status_value
