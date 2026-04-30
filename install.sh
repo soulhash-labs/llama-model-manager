@@ -160,14 +160,16 @@ post_install_sync_clients() {
     local glyphos_config="$HOME/.glyphos/config.yaml"
     local state_file="${XDG_STATE_HOME:-$HOME/.local/state}/llama-server/current.env"
     local saved_model=""
+    local backend_health_url=""
     local profile_dir=""
     local profile_name=""
 
     if [[ -f "$state_file" ]]; then
         saved_model="$(read_saved_current_model "$state_file" 2>/dev/null || true)"
     fi
-    if [[ -z "$saved_model" || ! -f "$saved_model" ]]; then
-        printf 'post-install sync skipped: no saved current model is resolvable yet\n'
+    backend_health_url="http://$(default_value LLAMA_SERVER_HOST 127.0.0.1):$(default_value LLAMA_SERVER_PORT 8081)/health"
+    if ! curl -fsS --max-time 1 "$backend_health_url" >/dev/null 2>&1 && { [[ -z "$saved_model" ]] || [[ ! -f "$saved_model" ]]; }; then
+        printf 'post-install sync skipped: no running backend or saved current model is resolvable yet\n'
         return 0
     fi
 
@@ -176,7 +178,7 @@ post_install_sync_clients() {
             printf 'post-install synced opencode to routed gateway\n'
             synced="yes"
         else
-            printf 'post-install warning: opencode sync failed; run llama-model sync-opencode after resolving the current model\n' >&2
+            printf 'post-install warning: opencode sync failed; start or switch a model, then run llama-model sync-opencode\n' >&2
         fi
     fi
     if [[ -f "$openclaw_config" ]]; then
@@ -184,7 +186,7 @@ post_install_sync_clients() {
             printf 'post-install synced OpenClaw to routed gateway\n'
             synced="yes"
         else
-            printf 'post-install warning: OpenClaw sync failed; run llama-model sync-openclaw after resolving the current model\n' >&2
+            printf 'post-install warning: OpenClaw sync failed; start or switch a model, then run llama-model sync-openclaw\n' >&2
         fi
     fi
     local nullglob_was_set="no"
@@ -200,7 +202,7 @@ post_install_sync_clients() {
             printf 'post-install synced OpenClaw profile %s to routed gateway\n' "$profile_name"
             synced="yes"
         else
-            printf 'post-install warning: OpenClaw profile %s sync failed; run llama-model sync-openclaw --profile %s after resolving the current model\n' "$profile_name" "$profile_name" >&2
+            printf 'post-install warning: OpenClaw profile %s sync failed; start or switch a model, then run llama-model sync-openclaw --profile %s\n' "$profile_name" "$profile_name" >&2
         fi
     done
     if [[ "$nullglob_was_set" == "yes" ]]; then
@@ -213,7 +215,7 @@ post_install_sync_clients() {
             printf 'post-install synced GlyphOS to the backend endpoint\n'
             synced="yes"
         else
-            printf 'post-install warning: GlyphOS sync failed; run llama-model sync-glyphos after resolving the current model\n' >&2
+            printf 'post-install warning: GlyphOS sync failed; start or switch a model, then run llama-model sync-glyphos\n' >&2
         fi
     fi
     [[ "$synced" == "yes" ]] || printf 'post-install sync skipped: no existing opencode, OpenClaw, or GlyphOS configs found\n'

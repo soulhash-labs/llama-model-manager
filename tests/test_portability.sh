@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT_DIR/bin/llama-model"
+export LLAMA_MODEL_AUTOSTART_GATEWAY_ON_SYNC=0
 
 fail() {
     printf 'FAIL: %s\n' "$*" >&2
@@ -694,7 +695,7 @@ EOF
         XDG_DATA_HOME="$tmp/data" \
         bash "$ROOT_DIR/install.sh")"
 
-    assert_contains "$output" "post-install sync skipped: no saved current model is resolvable yet"
+    assert_contains "$output" "post-install sync skipped: no running backend or saved current model is resolvable yet"
     [[ ! -e "$tmp/pwned" ]] || fail "installer executed content from current.env"
 }
 
@@ -1215,6 +1216,7 @@ EOF
     assert_contains "$output" "route_mode: routed"
     assert_contains "$output" "api_base: http://127.0.0.1:4010/v1"
     assert_contains "$output" "backend_api_base: http://127.0.0.1:19081/v1"
+    assert_contains "$output" "gateway_status: autostart-disabled"
     assert_contains "$output" "timeout_ms: 1800000"
     assert_contains "$output" "chunk_timeout_ms: 60000"
     assert_contains "$output" "compaction_reserved: 16384"
@@ -1564,6 +1566,7 @@ EOF
     output="$(run_cli "$tmp" sync-openclaw --profile lmm-eval qwen35-9b-q8)"
     assert_contains "$output" "openclaw_model: llamacpp/qwen35-9b-q8"
     assert_contains "$output" "route_mode: routed"
+    assert_contains "$output" "gateway_status: autostart-disabled"
 
     config="$(cat "$tmp/home/.openclaw-lmm-eval/openclaw.json")"
     assert_contains "$config" '"primary": "llamacpp/qwen35-9b-q8"'

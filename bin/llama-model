@@ -65,6 +65,7 @@ LLAMA_MODEL_GATEWAY_PORT="${LLAMA_MODEL_GATEWAY_PORT:-4010}"
 LLAMA_MODEL_GATEWAY_LOG="${LLAMA_MODEL_GATEWAY_LOG:-$HOME/models/lmm-gateway.log}"
 LLAMA_MODEL_GATEWAY_PID_FILE="${LLAMA_MODEL_GATEWAY_PID_FILE:-$STATE_DIR/lmm-gateway.pid}"
 LLAMA_MODEL_HARNESS_MODE="${LLAMA_MODEL_HARNESS_MODE:-routed}"
+LLAMA_MODEL_AUTOSTART_GATEWAY_ON_SYNC="${LLAMA_MODEL_AUTOSTART_GATEWAY_ON_SYNC:-1}"
 LLAMA_MODEL_SYNC_OPENCODE="${LLAMA_MODEL_SYNC_OPENCODE:-1}"
 LLAMA_MODEL_SYNC_CLAUDE="${LLAMA_MODEL_SYNC_CLAUDE:-0}"
 LLAMA_MODEL_SYNC_OPENCLAW="${LLAMA_MODEL_SYNC_OPENCLAW:-0}"
@@ -3857,6 +3858,26 @@ harness_route_label() {
     fi
 }
 
+ensure_lmm_gateway_for_routed_harness() {
+    local mode="$1"
+    local output=""
+    [[ "$mode" == "routed" ]] || return 0
+    if ! toggle_enabled "$LLAMA_MODEL_AUTOSTART_GATEWAY_ON_SYNC"; then
+        HARNESS_GATEWAY_STATUS="autostart-disabled"
+        return 0
+    fi
+    if lmm_gateway_health; then
+        HARNESS_GATEWAY_STATUS="already-running"
+        return 0
+    fi
+    if output="$(lmm_gateway_start 2>&1)"; then
+        HARNESS_GATEWAY_STATUS="started"
+        return 0
+    fi
+    printf '%s\n' "$output" >&2
+    die "routed harness mode requires the LMM gateway, but it could not be started; run: llama-model gateway logs"
+}
+
 api_current_model_id() {
     local api_base
 
@@ -4048,6 +4069,7 @@ sync_opencode() {
     local compaction_reserved
     local context_window
     local runtime_note=""
+    local HARNESS_GATEWAY_STATUS="not-required"
 
     while (($#)); do
         case "$1" in
@@ -4073,6 +4095,7 @@ sync_opencode() {
     mode="$(normalize_harness_mode "$mode")"
 
     resolve_sync_target "$spec"
+    ensure_lmm_gateway_for_routed_harness "$mode"
     api_base="$(harness_api_base "$mode")"
     context_window="${SYNC_TARGET_CONTEXT:-$LLAMA_SERVER_CONTEXT}"
     [[ "$context_window" =~ ^[0-9]+$ ]] || context_window="$LLAMA_SERVER_CONTEXT"
@@ -4108,6 +4131,7 @@ sync_opencode() {
     printf 'api_base: %s\n' "$api_base"
     printf 'backend_api_base: %s\n' "$(upstream_api_base)"
     printf 'gateway_api_base: %s\n' "$(lmm_gateway_api_base)"
+    printf 'gateway_status: %s\n' "$HARNESS_GATEWAY_STATUS"
     printf 'timeout_ms: %s\n' "$timeout_ms"
     printf 'chunk_timeout_ms: %s\n' "$chunk_timeout_ms"
     printf 'compaction_reserved: %s\n' "$compaction_reserved"
@@ -4132,6 +4156,7 @@ sync_openclaw() {
     local context_window
     local max_tokens="4096"
     local workspace
+    local HARNESS_GATEWAY_STATUS="not-required"
 
     while (($#)); do
         case "$1" in
@@ -4155,6 +4180,7 @@ sync_openclaw() {
 
     resolve_sync_target "$spec"
     mode="$(normalize_harness_mode "$mode")"
+    ensure_lmm_gateway_for_routed_harness "$mode"
     api_base="$(harness_api_base "$mode")"
     api_key="$(trim_whitespace "${OPENCLAW_API_KEY:-llama-local}")"
     [[ -n "$api_key" ]] || api_key="llama-local"
@@ -4186,6 +4212,7 @@ sync_openclaw() {
     printf 'api_base: %s\n' "$api_base"
     printf 'backend_api_base: %s\n' "$(upstream_api_base)"
     printf 'gateway_api_base: %s\n' "$(lmm_gateway_api_base)"
+    printf 'gateway_status: %s\n' "$HARNESS_GATEWAY_STATUS"
     printf 'workspace: %s\n' "$workspace"
     printf 'config_file: %s\n' "$config_file"
     printf 'config_exists_before: %s\n' "$config_exists_before"
@@ -4321,6 +4348,10 @@ lmm_gateway_model_id() {
     local model_id
     if model_id="$(api_current_model_id 2>/dev/null)" && [[ -n "$model_id" ]]; then
         printf '%s\n' "$model_id"
+        return 0
+    fi
+    if [[ -n "${SYNC_TARGET_MODEL_ID:-}" ]]; then
+        printf '%s\n' "$SYNC_TARGET_MODEL_ID"
         return 0
     fi
     resolve_sync_target ""
