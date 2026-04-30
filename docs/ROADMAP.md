@@ -2,6 +2,34 @@
 
 This roadmap tracks product-level follow-up that is not yet part of the shipped baseline.
 
+## Receipts & Notifications
+
+Status: planned
+
+Plans: 2 plans in 1 wave (parallel)
+
+Plans:
+- [ ] 03-receipts-notifications-01-PLAN.md — SHA-256-digested receipt emitter for per-request audit trail
+- [ ] 03-receipts-notifications-02-PLAN.md — Pluggable notification system with desktop/log fallback
+
+## Provider Protocol & Registry
+
+Status: planned
+
+Plans: 1 plan in 1 wave
+
+Plans:
+- [ ] 04-provider-protocol-01-PLAN.md — Provider protocol, LlamaCppProvider, and priority-based ProviderRegistry
+
+## Developer Experience
+
+Status: planned
+
+Plans: 1 plan in 1 wave
+
+Plans:
+- [ ] 05-devex-01-PLAN.md — Pre-commit hooks, Ruff linting, and install script improvements
+
 ## Run Records & Health Checks
 
 Status: planned
