@@ -1889,6 +1889,42 @@ class Phase0ContractTests(unittest.TestCase):
         self.assertEqual(captured["max_tokens"], 42)
         self.assertEqual(captured["temperature"], 0.1)
 
+    def test_gateway_streaming_client_disconnect_is_recorded_without_raising(self) -> None:
+        gateway = self.load_gateway_module()
+
+        class DisconnectingWriter:
+            def write(self, data: bytes) -> int:
+                raise BrokenPipeError("client went away")
+
+            def flush(self) -> None:
+                return None
+
+        class FakeHandler:
+            def __init__(self) -> None:
+                self.wfile = DisconnectingWriter()
+
+            def send_response(self, status: int) -> None:
+                self.status = status
+
+            def send_header(self, key: str, value: str) -> None:
+                return None
+
+            def end_headers(self) -> None:
+                return None
+
+        text, success, error_message, latency_ms = gateway.stream_completion(
+            FakeHandler(),
+            started=time.time(),
+            model="disconnect-model",
+            chunks=iter(["unwritten"]),
+            headers={},
+        )
+
+        self.assertEqual(text, "")
+        self.assertFalse(success)
+        self.assertIn("client disconnected", error_message)
+        self.assertGreaterEqual(latency_ms, 0)
+
     def test_gateway_chat_completion_returns_503_when_backend_route_fails(self) -> None:
         def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
             raise RuntimeError("llama.cpp backend is offline")
@@ -1941,6 +1977,31 @@ class Phase0ContractTests(unittest.TestCase):
         self.assertEqual(body["error"]["type"], "invalid_request_error")
         self.assertIn("max_tokens", body["error"]["message"])
 
+    def test_gateway_chat_completion_returns_400_for_non_integer_max_tokens(self) -> None:
+        gateway = self.load_gateway_module()
+        server = self.start_gateway_server(gateway_module=gateway)
+        for value in (True, 1.9):
+            with self.subTest(max_tokens=value):
+                payload = {
+                    "model": "invalid-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": value,
+                }
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+
+                with self.assertRaises(error.HTTPError) as raised:
+                    urllib.request.urlopen(req, timeout=5)
+                body = json.loads(raised.exception.read().decode("utf-8"))
+
+                self.assertEqual(raised.exception.code, 400)
+                self.assertEqual(body["error"]["type"], "invalid_request_error")
+                self.assertIn("max_tokens", body["error"]["message"])
+
     def test_gateway_chat_completion_returns_400_for_non_finite_temperature(self) -> None:
         gateway = self.load_gateway_module()
         server = self.start_gateway_server(gateway_module=gateway)
@@ -1989,6 +2050,53 @@ class Phase0ContractTests(unittest.TestCase):
                     self.assertEqual(routed["target"], "llamacpp")
                     self.assertEqual(routed["reason_code"], "complex_action_local_stream")
                     self.assertEqual(list(chunks), ["local stream"])
+        finally:
+            sys.path[:] = original_path
+
+    def test_external_glyphos_clients_raise_when_not_configured(self) -> None:
+        integration_root = str(ROOT_DIR / "integrations" / "public-glyphos-ai-compute")
+        original_path = list(sys.path)
+        try:
+            if integration_root not in sys.path:
+                sys.path.insert(0, integration_root)
+            from glyphos_ai.ai_compute.api_client import AnthropicClient, OpenAIClient, XAIClient  # type: ignore
+
+            empty_keys = {"OPENAI_API_KEY": "", "ANTHROPIC_API_KEY": "", "XAI_API_KEY": ""}
+            with mock.patch.dict(os.environ, empty_keys, clear=False):
+                for client in (OpenAIClient(api_key=""), AnthropicClient(api_key=""), XAIClient(api_key="")):
+                    with self.subTest(client=client.__class__.__name__):
+                        with self.assertRaises(RuntimeError):
+                            client.generate("hello")
+        finally:
+            sys.path[:] = original_path
+
+    def test_glyphos_external_route_failures_are_recorded_as_errors(self) -> None:
+        integration_root = str(ROOT_DIR / "integrations" / "public-glyphos-ai-compute")
+        original_path = list(sys.path)
+        try:
+            if integration_root not in sys.path:
+                sys.path.insert(0, integration_root)
+            from glyphos_ai.ai_compute.router import AdaptiveRouter  # type: ignore
+
+            class Packet:
+                psi_coherence = 0.2
+                action = "ANALYZE"
+
+            class FailingOpenAI:
+                def generate(self, prompt: str, **kwargs: object) -> str:
+                    raise RuntimeError("external unavailable")
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                telemetry_path = str(Path(tmpdir) / "glyphos-routing.json")
+                with mock.patch.dict(os.environ, {"LLAMA_MODEL_GLYPHOS_TELEMETRY_FILE": telemetry_path}, clear=False):
+                    router = AdaptiveRouter(openai_client=FailingOpenAI())
+                    result = router.route(Packet(), prompt="complex prompt")
+
+                    self.assertEqual(result.target.value, "openai")
+                    self.assertEqual(result.routing_reason_code, "fallback_complex_action_openai.error")
+                    self.assertIn("external unavailable", result.response)
+                    telemetry = router.routing_telemetry()
+                    self.assertEqual(telemetry["fallback_reason_counts"]["fallback_complex_action_openai.error"], 1)
         finally:
             sys.path[:] = original_path
 

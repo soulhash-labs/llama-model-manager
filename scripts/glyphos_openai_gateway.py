@@ -61,10 +61,14 @@ def read_json(handler: BaseHTTPRequestHandler, *, max_bytes: int = 2_000_000) ->
 
 def request_int(payload: dict[str, Any], key: str, default: int, *, minimum: int = 1) -> int:
     raw = payload.get(key, default)
-    try:
-        value = int(raw)
-    except (TypeError, ValueError) as exc:
-        raise InvalidRequestError(f"{key} must be an integer") from exc
+    if isinstance(raw, bool):
+        raise InvalidRequestError(f"{key} must be an integer")
+    if isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, str) and raw.strip().isdigit():
+        value = int(raw.strip())
+    else:
+        raise InvalidRequestError(f"{key} must be an integer")
     if value < minimum:
         raise InvalidRequestError(f"{key} must be at least {minimum}")
     return value
@@ -327,15 +331,16 @@ def stream_completion(
         "created": int(started),
         "model": model,
     }
-    handler.send_response(200)
-    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
-    handler.send_header("Cache-Control", "no-cache")
-    handler.send_header("Connection", "close")
-    for key, value in headers.items():
-        handler.send_header(key, value)
-    handler.end_headers()
-    handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]}))
     try:
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("Connection", "close")
+        for key, value in headers.items():
+            handler.send_header(key, value)
+        handler.end_headers()
+        handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]}))
+        handler.wfile.flush()
         for chunk in ([first_chunk] if first_chunk else []):
             collected.append(str(chunk))
             handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {"content": str(chunk)}, "finish_reason": None}]}))
@@ -350,6 +355,8 @@ def stream_completion(
         handler.wfile.write(sse_event("[DONE]"))
         handler.wfile.flush()
         return "".join(collected), True, "", round((now() - started) * 1000)
+    except (BrokenPipeError, ConnectionResetError) as exc:
+        return "".join(collected), False, f"client disconnected: {exc}", round((now() - started) * 1000)
     except Exception as exc:
         error_message = str(exc)
         try:

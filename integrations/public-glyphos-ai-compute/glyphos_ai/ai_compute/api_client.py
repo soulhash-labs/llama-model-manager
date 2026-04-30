@@ -266,7 +266,7 @@ class OpenAIClient(BaseChatClient):
 
     def generate(self, prompt: str, **kwargs) -> str:
         if not self._available:
-            return f"[OpenAI not configured] Processing: {prompt[:50]}..."
+            raise RuntimeError("OpenAI backend is not configured")
         try:
             from openai import OpenAI
             client = OpenAI(api_key=self.api_key)
@@ -278,7 +278,7 @@ class OpenAIClient(BaseChatClient):
             )
             return response.choices[0].message.content
         except Exception as exc:
-            return f"OpenAI error: {exc}"
+            raise RuntimeError(f"OpenAI request failed: {exc}") from exc
 
 
 class AnthropicClient(BaseChatClient):
@@ -292,7 +292,7 @@ class AnthropicClient(BaseChatClient):
 
     def generate(self, prompt: str, **kwargs) -> str:
         if not self._available:
-            return f"[Anthropic not configured] Processing: {prompt[:50]}..."
+            raise RuntimeError("Anthropic backend is not configured")
         try:
             import anthropic
             client = anthropic.Anthropic(api_key=self.api_key)
@@ -303,7 +303,7 @@ class AnthropicClient(BaseChatClient):
             )
             return response.content[0].text
         except Exception as exc:
-            return f"Anthropic error: {exc}"
+            raise RuntimeError(f"Anthropic request failed: {exc}") from exc
 
 
 class XAIClient(BaseChatClient):
@@ -317,7 +317,7 @@ class XAIClient(BaseChatClient):
 
     def generate(self, prompt: str, **kwargs) -> str:
         if not self._available:
-            return f"[xAI not configured] Processing: {prompt[:50]}..."
+            raise RuntimeError("xAI backend is not configured")
         try:
             response = _http_json(
                 "POST",
@@ -336,7 +336,7 @@ class XAIClient(BaseChatClient):
             response.raise_for_status()
             return response.json()["choices"][0]["message"]["content"]
         except Exception as exc:
-            return f"xAI error: {exc}"
+            raise RuntimeError(f"xAI request failed: {exc}") from exc
 
 
 def create_configured_clients() -> Dict[str, Any]:
