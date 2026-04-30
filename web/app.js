@@ -1512,7 +1512,9 @@ function renderDefaults(defaults) {
   $("#default-sync-openclaw").value = defaults.LLAMA_MODEL_SYNC_OPENCLAW || "0";
   $("#default-sync-glyphos").value = defaults.LLAMA_MODEL_SYNC_GLYPHOS || "0";
   $("#default-harness-mode").value = defaults.LLAMA_MODEL_HARNESS_MODE || "routed";
+  $("#default-gateway-host").value = defaults.LLAMA_MODEL_GATEWAY_HOST || "127.0.0.1";
   $("#default-gateway-port").value = defaults.LLAMA_MODEL_GATEWAY_PORT || "4010";
+  $("#default-gateway-log").value = defaults.LLAMA_MODEL_GATEWAY_LOG || "$HOME/models/lmm-gateway.log";
   $("#default-context-glyphos-pipeline").checked = isTruthySetting(defaults.LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE) || contextGlyphosLocallyActivated();
   $("#default-openclaw-profile").value = defaults.OPENCLAW_PROFILE || "";
   $("#default-openclaw-api-key").value = defaults.OPENCLAW_API_KEY || "";
@@ -1663,7 +1665,9 @@ function collectDefaultsPayload() {
     LLAMA_MODEL_SYNC_OPENCLAW: $("#default-sync-openclaw").value.trim(),
     LLAMA_MODEL_SYNC_GLYPHOS: $("#default-sync-glyphos").value.trim(),
     LLAMA_MODEL_HARNESS_MODE: $("#default-harness-mode").value.trim(),
+    LLAMA_MODEL_GATEWAY_HOST: $("#default-gateway-host").value.trim(),
     LLAMA_MODEL_GATEWAY_PORT: $("#default-gateway-port").value.trim(),
+    LLAMA_MODEL_GATEWAY_LOG: $("#default-gateway-log").value.trim(),
     LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE: $("#default-context-glyphos-pipeline").checked ? "1" : "",
     OPENCLAW_PROFILE: $("#default-openclaw-profile").value.trim(),
     OPENCLAW_API_KEY: $("#default-openclaw-api-key").value.trim(),
@@ -1734,6 +1738,19 @@ async function performGatewayAction(action, button, options = {}) {
   }, {
     successMessage: options.successMessage,
     successKind: options.successKind || "info",
+  });
+}
+
+async function loadGatewayLogs(button) {
+  await withButtonBusy(button, "Loading...", async () => {
+    const payload = await api("/api/gateway/logs?lines=100");
+    const output = $("#gateway-logs-output");
+    output.classList.remove("hidden");
+    output.textContent = payload.content || "";
+    output.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, {
+    successMessage: "Loaded LMM gateway logs.",
+    successKind: "info",
   });
 }
 
@@ -2213,6 +2230,7 @@ function bindEvents() {
   $("#gateway-start").addEventListener("click", (event) => performGatewayAction("start", event.currentTarget, { pendingLabel: "Starting...", successMessage: "LMM gateway started." }).catch(showError));
   $("#gateway-restart").addEventListener("click", (event) => performGatewayAction("restart", event.currentTarget, { pendingLabel: "Restarting...", successMessage: "LMM gateway restarted." }).catch(showError));
   $("#gateway-stop").addEventListener("click", (event) => performGatewayAction("stop", event.currentTarget, { pendingLabel: "Stopping...", successMessage: "LMM gateway stopped." }).catch(showError));
+  $("#gateway-logs").addEventListener("click", (event) => loadGatewayLogs(event.currentTarget).catch(showError));
   $("#claude-gateway-start").addEventListener("click", (event) => performClaudeGatewayAction("start", event.currentTarget, { pendingLabel: "Starting...", successMessage: "Claude gateway started." }).catch(showError));
   $("#claude-gateway-restart").addEventListener("click", (event) => performClaudeGatewayAction("restart", event.currentTarget, { pendingLabel: "Restarting...", successMessage: "Claude gateway restarted." }).catch(showError));
   $("#claude-gateway-stop").addEventListener("click", (event) => performClaudeGatewayAction("stop", event.currentTarget, { pendingLabel: "Stopping...", successMessage: "Claude gateway stopped." }).catch(showError));

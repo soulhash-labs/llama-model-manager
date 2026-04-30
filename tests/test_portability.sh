@@ -202,7 +202,9 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$defaults" "OPENCLAW_PROFILE="
     assert_contains "$defaults" "CLAUDE_GATEWAY_PORT=4000"
     assert_contains "$defaults" "LLAMA_MODEL_HARNESS_MODE=routed"
+    assert_contains "$defaults" "LLAMA_MODEL_GATEWAY_HOST=127.0.0.1"
     assert_contains "$defaults" "LLAMA_MODEL_GATEWAY_PORT=4010"
+    assert_contains "$defaults" 'LLAMA_MODEL_GATEWAY_LOG=$HOME/models/lmm-gateway.log'
     assert_contains "$defaults" "CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS=1800"
     assert_contains "$defaults" "GGML_CUDA_ENABLE_UNIFIED_MEMORY="
     assert_not_contains "$defaults" "LLAMA_SERVER_DEVICE=cuda0"
@@ -212,6 +214,9 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$web_index" "Observed Glyph Routes"
     assert_contains "$web_index" "Harness Gateway"
     assert_contains "$web_index" "Start Gateway"
+    assert_contains "$web_index" "Gateway Host"
+    assert_contains "$web_index" "Gateway Log"
+    assert_contains "$web_index" "gateway-logs"
     assert_contains "$web_index" "Control-plane actions only"
     assert_contains "$web_index" "toggle-activity-panel"
     assert_contains "$web_index" "glyphos-badge"
@@ -272,6 +277,9 @@ test_installers_support_bootstrap_tty_handoff_and_empty_registry_seed() {
     assert_contains "$app_js" 'function renderObservedGlyphRoutes'
     assert_contains "$app_js" 'llama-model-manager.activityPanelVisible'
     assert_contains "$app_js" 'default-cuda-unified-memory'
+    assert_contains "$app_js" 'LLAMA_MODEL_GATEWAY_HOST'
+    assert_contains "$app_js" 'LLAMA_MODEL_GATEWAY_LOG'
+    assert_contains "$app_js" '/api/gateway/logs?lines=100'
     assert_contains "$app_js" 'return `~/${value.slice(homeDir.length + 1)}`;'
 }
 

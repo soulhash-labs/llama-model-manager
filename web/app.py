@@ -3263,6 +3263,12 @@ class AppHandler(BaseHTTPRequestHandler):
                     logs = self.manager.run_cli("claude-gateway", "logs", str(lines))
                     self.send_json({"lines": lines, "content": logs})
                     return
+                if parsed.path == "/api/gateway/logs":
+                    query = urllib.parse.parse_qs(parsed.query)
+                    lines = self._parse_lines_query(query.get("lines", [None])[0], default=100)
+                    logs = self.manager.run_cli("gateway", "logs", str(lines))
+                    self.send_json({"lines": lines, "content": logs})
+                    return
                 raise ValidationError("unknown_route", f"Unknown API route: {parsed.path}")
             except Exception as exc:
                 status = self._status_for_error(exc)

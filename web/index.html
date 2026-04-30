@@ -580,9 +580,17 @@
               Harness Mode
               <input name="LLAMA_MODEL_HARNESS_MODE" id="default-harness-mode" placeholder="routed">
             </label>
+            <label title="Host interface used by the OpenAI-compatible LMM gateway. Keep 127.0.0.1 unless you intentionally expose the gateway.">
+              Gateway Host
+              <input name="LLAMA_MODEL_GATEWAY_HOST" id="default-gateway-host" placeholder="127.0.0.1">
+            </label>
             <label title="Port for the OpenAI-compatible LMM gateway used by routed harness sync.">
               Gateway Port
               <input name="LLAMA_MODEL_GATEWAY_PORT" id="default-gateway-port" placeholder="4010">
+            </label>
+            <label class="span-2" title="Log path for the OpenAI-compatible LMM gateway.">
+              Gateway Log
+              <input name="LLAMA_MODEL_GATEWAY_LOG" id="default-gateway-log" placeholder="$HOME/models/lmm-gateway.log">
             </label>
             <label title="Operator-facing toggle for the combined Context Mode MCP + GlyphOS workflow. It does not change security boundaries; it makes the intended combined pipeline visible in the dashboard.">
               Context + GlyphOS
@@ -663,7 +671,9 @@
                 <button id="gateway-start" class="button button-small button-primary" title="Start the LMM OpenAI-compatible gateway.">Start Gateway</button>
                 <button id="gateway-restart" class="button button-small" title="Restart the LMM gateway.">Restart</button>
                 <button id="gateway-stop" class="button button-small button-danger" title="Stop the LMM gateway.">Stop</button>
+                <button id="gateway-logs" class="button button-small" title="Show recent LMM gateway logs.">Logs</button>
               </div>
+              <pre id="gateway-logs-output" class="log-box hidden"></pre>
             </article>
             <article class="integration-card">
               <span class="metric-label">opencode</span>

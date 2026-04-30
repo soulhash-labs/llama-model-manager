@@ -296,7 +296,7 @@ These integrations are optional. The default product behavior remains the local 
 - `llama-model sync-glyphos` writes `~/.glyphos/config.yaml` so the bundled public GlyphOS AI Compute package can target the active local `llama.cpp` endpoint directly.
 - post-switch sync for Claude Code, OpenClaw, and GlyphOS is opt-in with `LLAMA_MODEL_SYNC_CLAUDE=1`, `LLAMA_MODEL_SYNC_OPENCLAW=1`, and `LLAMA_MODEL_SYNC_GLYPHOS=1`.
 - post-switch sync is non-fatal; a client-config error warns but does not roll back a successfully started local model.
-- the dashboard exposes direct sync actions for all three tools and gateway controls for Claude Code.
+- the dashboard exposes direct sync actions for all three tools, LMM Gateway controls for routed harness traffic, and separate Claude Gateway controls for Claude Code compatibility.
 
 ## Context Mode MCP
 

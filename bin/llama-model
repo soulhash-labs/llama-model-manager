@@ -4258,9 +4258,26 @@ lmm_gateway_health() {
     curl -fsS --max-time 2 "http://${LLAMA_MODEL_GATEWAY_HOST}:${LLAMA_MODEL_GATEWAY_PORT}/healthz" >/dev/null 2>&1
 }
 
+lmm_gateway_wait_for_health() {
+    local pid="$1"
+    local attempts="${2:-30}"
+    local i
+    for ((i = 0; i < attempts; i++)); do
+        if lmm_gateway_health; then
+            return 0
+        fi
+        if ! kill -0 "$pid" >/dev/null 2>&1; then
+            return 1
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
 lmm_gateway_start() {
     local script
     local model_id
+    local pid
     if lmm_gateway_running && lmm_gateway_health; then
         printf 'running: yes\n'
         printf 'pid: %s\n' "$(lmm_gateway_pid)"
@@ -4286,8 +4303,9 @@ lmm_gateway_start() {
         --backend-base-url "$(upstream_api_base)" \
         --model-id "$model_id" \
         >>"$LLAMA_MODEL_GATEWAY_LOG" 2>&1 &
-    printf '%s\n' "$!" >"$LLAMA_MODEL_GATEWAY_PID_FILE"
-    if lmm_gateway_health; then
+    pid="$!"
+    printf '%s\n' "$pid" >"$LLAMA_MODEL_GATEWAY_PID_FILE"
+    if lmm_gateway_wait_for_health "$pid" 40; then
         printf 'running: yes\n'
         printf 'pid: %s\n' "$(lmm_gateway_pid)"
         printf 'url: %s\n' "$(lmm_gateway_api_base)"
@@ -4295,11 +4313,16 @@ lmm_gateway_start() {
         printf 'model_id: %s\n' "$model_id"
         printf 'log: %s\n' "$LLAMA_MODEL_GATEWAY_LOG"
     else
-        printf 'running: starting\n'
-        printf 'pid: %s\n' "$(lmm_gateway_pid)"
+        rm -f "$LLAMA_MODEL_GATEWAY_PID_FILE"
+        if kill -0 "$pid" >/dev/null 2>&1; then
+            kill "$pid" >/dev/null 2>&1 || true
+        fi
+        printf 'running: no\n'
         printf 'url: %s\n' "$(lmm_gateway_api_base)"
-        printf 'message: gateway process started; health endpoint is not ready yet\n'
+        printf 'error: LMM gateway failed health check after startup\n'
         printf 'log: %s\n' "$LLAMA_MODEL_GATEWAY_LOG"
+        tail -n 20 "$LLAMA_MODEL_GATEWAY_LOG" 2>/dev/null || true
+        return 1
     fi
 }
 

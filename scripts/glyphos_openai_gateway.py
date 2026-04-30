@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -98,24 +100,38 @@ def save_gateway_state(payload: dict[str, Any]) -> None:
     temp.replace(path)
 
 
+@contextmanager
+def gateway_state_lock():
+    path = state_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(f".{path.name}.lock")
+    with lock_path.open("a", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def record_gateway_request(record: dict[str, Any]) -> None:
-    state = load_gateway_state()
-    counters = state.get("counters")
-    if not isinstance(counters, dict):
-        counters = {}
-    for key in ("mode", "route_target", "context_status", "success"):
-        value = str(record.get(key, "unknown"))
-        counter_key = f"{key}:{value}"
-        counters[counter_key] = int(counters.get(counter_key, 0)) + 1
-    recent = state.get("recent_requests")
-    if not isinstance(recent, list):
-        recent = []
-    recent.insert(0, record)
-    del recent[40:]
-    state["counters"] = counters
-    state["recent_requests"] = recent
-    state["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    save_gateway_state(state)
+    with gateway_state_lock():
+        state = load_gateway_state()
+        counters = state.get("counters")
+        if not isinstance(counters, dict):
+            counters = {}
+        for key in ("mode", "route_target", "context_status", "success"):
+            value = str(record.get(key, "unknown"))
+            counter_key = f"{key}:{value}"
+            counters[counter_key] = int(counters.get(counter_key, 0)) + 1
+        recent = state.get("recent_requests")
+        if not isinstance(recent, list):
+            recent = []
+        recent.insert(0, record)
+        del recent[40:]
+        state["counters"] = counters
+        state["recent_requests"] = recent
+        state["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        save_gateway_state(state)
 
 
 def messages_to_prompt(messages: Any) -> str:
@@ -178,7 +194,7 @@ def route_prompt(prompt: str, model: str, max_tokens: int, temperature: float) -
     )
     start = time.perf_counter()
     router = create_router()
-    result = router.route(packet, prompt=prompt)
+    result = router.route(packet, prompt=prompt, model=model, max_tokens=max_tokens, temperature=temperature)
     latency_ms = round((time.perf_counter() - start) * 1000)
     headers = {
         "X-LMM-Route-Mode": "routed",
@@ -192,6 +208,67 @@ def route_prompt(prompt: str, model: str, max_tokens: int, temperature: float) -
         "reason": result.routing_reason,
         "latency_ms": latency_ms,
     }, headers
+
+
+def completion_payload(
+    *,
+    started: float,
+    model: str,
+    routed: dict[str, Any],
+    context_state: str,
+    context_used: bool,
+) -> dict[str, Any]:
+    return {
+        "id": f"chatcmpl-lmm-{int(started * 1000)}",
+        "object": "chat.completion",
+        "created": int(started),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": routed["text"]},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "lmm": {
+            "route_mode": "routed",
+            "context_status": context_state,
+            "context_used": context_used,
+            "glyphos_target": routed["target"],
+            "glyphos_reason_code": routed["reason_code"],
+            "glyphos_reason": routed["reason"],
+            "latency_ms": routed["latency_ms"],
+        },
+    }
+
+
+def sse_event(payload: dict[str, Any] | str) -> bytes:
+    data = payload if isinstance(payload, str) else json.dumps(payload)
+    return f"data: {data}\n\n".encode("utf-8")
+
+
+def stream_completion(handler: BaseHTTPRequestHandler, payload: dict[str, Any], headers: dict[str, str]) -> None:
+    choice = payload["choices"][0]
+    text = str(choice["message"]["content"])
+    base = {
+        "id": payload["id"],
+        "object": "chat.completion.chunk",
+        "created": payload["created"],
+        "model": payload["model"],
+    }
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+    handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("Connection", "close")
+    for key, value in headers.items():
+        handler.send_header(key, value)
+    handler.end_headers()
+    handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]}))
+    if text:
+        handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}]}))
+    handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}))
+    handler.wfile.write(sse_event("[DONE]"))
 
 
 class GatewayHandler(BaseHTTPRequestHandler):
@@ -240,6 +317,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             model = str(payload.get("model") or self.server.model_id or "local-llama")  # type: ignore[attr-defined]
             max_tokens = int(payload.get("max_tokens") or 1000)
             temperature = float(payload.get("temperature") or 0.7)
+            stream = payload.get("stream") is True
             if not prompt.strip():
                 raise ValueError("messages must contain text content")
             routed, headers = route_prompt(prompt, model, max_tokens, temperature)
@@ -249,31 +327,18 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 "success": True,
                 "latency_ms": routed["latency_ms"],
             })
-            response_payload = {
-                "id": f"chatcmpl-lmm-{int(started * 1000)}",
-                "object": "chat.completion",
-                "created": int(started),
-                "model": model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": routed["text"]},
-                        "finish_reason": "stop",
-                    }
-                ],
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-                "lmm": {
-                    "route_mode": "routed",
-                    "context_status": context_state,
-                    "context_used": context_used,
-                    "glyphos_target": routed["target"],
-                    "glyphos_reason_code": routed["reason_code"],
-                    "glyphos_reason": routed["reason"],
-                    "latency_ms": routed["latency_ms"],
-                },
-            }
+            response_payload = completion_payload(
+                started=started,
+                model=model,
+                routed=routed,
+                context_state=context_state,
+                context_used=context_used,
+            )
             record_gateway_request(record)
-            json_response(self, 200, response_payload, headers=headers)
+            if stream:
+                stream_completion(self, response_payload, headers)
+            else:
+                json_response(self, 200, response_payload, headers=headers)
         except Exception as exc:
             record["error"] = str(exc)
             record["latency_ms"] = round((now() - started) * 1000)

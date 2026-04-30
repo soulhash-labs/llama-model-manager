@@ -4,8 +4,10 @@ Adaptive routing across local and external AI backends.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -102,59 +104,83 @@ def _write_shared_state(state: dict[str, Any]) -> None:
         return
 
 
+@contextmanager
+def _shared_state_lock():
+    path = _telemetry_file()
+    handle = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = path.with_name(f".{path.name}.lock")
+        handle = lock_path.open("a", encoding="utf-8")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        handle = None
+    try:
+        yield
+    finally:
+        if handle is not None:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()
+
+
 def _normalize_reason_code(value: str) -> str:
     return (value or "unresolved").strip().lower().replace(" ", "_").replace("/", "_")
 
 
 def _record_global_attempt(record: dict[str, Any]) -> None:
     with _GLOBAL_ROUTING_LOCK:
-        shared_state = _read_shared_state()
-        for key in ("attempts_by_target", "fallback_reason_counts"):
-            merged = dict(shared_state.get(key, {}))
-            merged.update(_GLOBAL_ROUTING_STATE.get(key, {}))
-            _GLOBAL_ROUTING_STATE[key] = merged
+        with _shared_state_lock():
+            shared_state = _read_shared_state()
+            for key in ("attempts_by_target", "fallback_reason_counts"):
+                merged = dict(shared_state.get(key, {}))
+                for item_key, count in dict(_GLOBAL_ROUTING_STATE.get(key, {})).items():
+                    merged[item_key] = max(int(merged.get(item_key, 0)), int(count))
+                _GLOBAL_ROUTING_STATE[key] = merged
 
-        attempts_by_target = _GLOBAL_ROUTING_STATE.setdefault("attempts_by_target", {})
-        fallback_reason_counts = _GLOBAL_ROUTING_STATE.setdefault("fallback_reason_counts", {})
-        recent_attempts = list(shared_state.get("recent_attempts", []))
-        for existing in list(_GLOBAL_ROUTING_STATE.setdefault("recent_attempts", [])):
-            if existing not in recent_attempts:
-                recent_attempts.append(existing)
+            attempts_by_target = _GLOBAL_ROUTING_STATE.setdefault("attempts_by_target", {})
+            fallback_reason_counts = _GLOBAL_ROUTING_STATE.setdefault("fallback_reason_counts", {})
+            recent_attempts = list(shared_state.get("recent_attempts", []))
+            for existing in list(_GLOBAL_ROUTING_STATE.setdefault("recent_attempts", [])):
+                if existing not in recent_attempts:
+                    recent_attempts.append(existing)
 
-        target = str(record.get("target", "unknown"))
-        reason_code = _normalize_reason_code(str(record.get("reason_code", "unresolved")))
-        success = bool(record.get("success", True))
-        normalized_reason = reason_code
-        if not success and not reason_code.endswith(".error"):
-            normalized_reason = f"{reason_code}.error"
+            target = str(record.get("target", "unknown"))
+            reason_code = _normalize_reason_code(str(record.get("reason_code", "unresolved")))
+            success = bool(record.get("success", True))
+            normalized_reason = reason_code
+            if not success and not reason_code.endswith(".error"):
+                normalized_reason = f"{reason_code}.error"
 
-        attempts_by_target[target] = int(attempts_by_target.get(target, 0)) + 1
-        fallback_reason_counts[normalized_reason] = int(fallback_reason_counts.get(normalized_reason, 0)) + 1
+            attempts_by_target[target] = int(attempts_by_target.get(target, 0)) + 1
+            fallback_reason_counts[normalized_reason] = int(fallback_reason_counts.get(normalized_reason, 0)) + 1
 
-        recent_attempts.insert(0, record)
-        del recent_attempts[_GLOBAL_ROUTING_HISTORY_LIMIT:]
+            recent_attempts.insert(0, record)
+            del recent_attempts[_GLOBAL_ROUTING_HISTORY_LIMIT:]
 
-        _GLOBAL_ROUTING_STATE["attempts_by_target"] = attempts_by_target
-        _GLOBAL_ROUTING_STATE["fallback_reason_counts"] = fallback_reason_counts
-        _GLOBAL_ROUTING_STATE["recent_attempts"] = recent_attempts
-        _write_shared_state(_GLOBAL_ROUTING_STATE)
+            _GLOBAL_ROUTING_STATE["attempts_by_target"] = attempts_by_target
+            _GLOBAL_ROUTING_STATE["fallback_reason_counts"] = fallback_reason_counts
+            _GLOBAL_ROUTING_STATE["recent_attempts"] = recent_attempts
+            _write_shared_state(_GLOBAL_ROUTING_STATE)
 
 
 def routing_telemetry_snapshot(limit: int = 10) -> dict[str, Any]:
     with _GLOBAL_ROUTING_LOCK:
-        shared_state = _read_shared_state()
-        attempts_by_target = dict(shared_state.get("attempts_by_target", {}))
-        for target, count in dict(_GLOBAL_ROUTING_STATE.get("attempts_by_target", {})).items():
-            attempts_by_target[target] = max(int(attempts_by_target.get(target, 0)), int(count))
-        fallback_reason_counts = dict(shared_state.get("fallback_reason_counts", {}))
-        for reason, count in dict(_GLOBAL_ROUTING_STATE.get("fallback_reason_counts", {})).items():
-            fallback_reason_counts[reason] = max(int(fallback_reason_counts.get(reason, 0)), int(count))
-        recent_attempts = list(shared_state.get("recent_attempts", []))
-        for existing in list(_GLOBAL_ROUTING_STATE.get("recent_attempts", [])):
-            if existing not in recent_attempts:
-                recent_attempts.append(existing)
-        recent_attempts = sorted(recent_attempts, key=lambda item: float(item.get("time", 0)) if isinstance(item, dict) else 0, reverse=True)
-        recent_attempts = recent_attempts[: max(0, int(limit))]
+        with _shared_state_lock():
+            shared_state = _read_shared_state()
+            attempts_by_target = dict(shared_state.get("attempts_by_target", {}))
+            for target, count in dict(_GLOBAL_ROUTING_STATE.get("attempts_by_target", {})).items():
+                attempts_by_target[target] = max(int(attempts_by_target.get(target, 0)), int(count))
+            fallback_reason_counts = dict(shared_state.get("fallback_reason_counts", {}))
+            for reason, count in dict(_GLOBAL_ROUTING_STATE.get("fallback_reason_counts", {})).items():
+                fallback_reason_counts[reason] = max(int(fallback_reason_counts.get(reason, 0)), int(count))
+            recent_attempts = list(shared_state.get("recent_attempts", []))
+            for existing in list(_GLOBAL_ROUTING_STATE.get("recent_attempts", [])):
+                if existing not in recent_attempts:
+                    recent_attempts.append(existing)
+            recent_attempts = sorted(recent_attempts, key=lambda item: float(item.get("time", 0)) if isinstance(item, dict) else 0, reverse=True)
+            recent_attempts = recent_attempts[: max(0, int(limit))]
 
     return {
         "attempts_by_target": attempts_by_target,
@@ -166,10 +192,11 @@ def routing_telemetry_snapshot(limit: int = 10) -> dict[str, Any]:
 
 def reset_routing_telemetry() -> None:
     with _GLOBAL_ROUTING_LOCK:
-        _GLOBAL_ROUTING_STATE["attempts_by_target"] = {}
-        _GLOBAL_ROUTING_STATE["fallback_reason_counts"] = {}
-        _GLOBAL_ROUTING_STATE["recent_attempts"] = []
-        _write_shared_state(_GLOBAL_ROUTING_STATE)
+        with _shared_state_lock():
+            _GLOBAL_ROUTING_STATE["attempts_by_target"] = {}
+            _GLOBAL_ROUTING_STATE["fallback_reason_counts"] = {}
+            _GLOBAL_ROUTING_STATE["recent_attempts"] = []
+            _write_shared_state(_GLOBAL_ROUTING_STATE)
 
 
 class AdaptiveRouter:
@@ -230,29 +257,29 @@ class AdaptiveRouter:
             "recent_attempts": list(self._attempt_history),
         }
 
-    def route(self, glyph_packet, prompt: Optional[str] = None) -> RoutingResult:
+    def route(self, glyph_packet, prompt: Optional[str] = None, **generation_kwargs: Any) -> RoutingResult:
         if prompt is None:
             prompt = glyph_to_prompt(glyph_packet)
         psi = self._packet_value(glyph_packet, "psi_coherence", "psiCoherence", 0.5)
         action = glyph_packet.action
 
         if psi >= self.config.high_coherence_threshold and self.llamacpp:
-            return self._route_llamacpp(prompt, "high coherence - prefer local llama.cpp", "high_coherence_local")
+            return self._route_llamacpp(prompt, "high coherence - prefer local llama.cpp", "high_coherence_local", **generation_kwargs)
 
         if action in self.config.complex_actions:
             if self.anthropic:
-                return self._route_anthropic(prompt, "complex action - prefer Claude", "complex_action_anthropic")
+                return self._route_anthropic(prompt, "complex action - prefer Claude", "complex_action_anthropic", **generation_kwargs)
             if self.openai:
-                return self._route_openai(prompt, "complex action - prefer GPT", "fallback_complex_action_openai")
+                return self._route_openai(prompt, "complex action - prefer GPT", "fallback_complex_action_openai", **generation_kwargs)
 
         if self.llamacpp:
-            return self._route_llamacpp(prompt, "default - use local llama.cpp", "default_local")
+            return self._route_llamacpp(prompt, "default - use local llama.cpp", "default_local", **generation_kwargs)
         if self.openai:
-            return self._route_openai(prompt, "fallback - use OpenAI", "fallback_openai")
+            return self._route_openai(prompt, "fallback - use OpenAI", "fallback_openai", **generation_kwargs)
         if self.anthropic:
-            return self._route_anthropic(prompt, "fallback - use Anthropic", "fallback_anthropic")
+            return self._route_anthropic(prompt, "fallback - use Anthropic", "fallback_anthropic", **generation_kwargs)
         if self.xai:
-            return self._route_xai(prompt, "fallback - use xAI", "fallback_xai")
+            return self._route_xai(prompt, "fallback - use xAI", "fallback_xai", **generation_kwargs)
         return RoutingResult(
             target=ComputeTarget.FALLBACK,
             response="No compute backend available",
@@ -260,10 +287,10 @@ class AdaptiveRouter:
             routing_reason_code="no_backends_configured",
         )
 
-    def _route_llamacpp(self, prompt: str, reason: str, reason_code: str) -> RoutingResult:
+    def _route_llamacpp(self, prompt: str, reason: str, reason_code: str, **generation_kwargs: Any) -> RoutingResult:
         start = time.perf_counter()
         try:
-            response = self.llamacpp.generate(prompt)
+            response = self.llamacpp.generate(prompt, **generation_kwargs)
             self._track_route(ComputeTarget.LOCAL_LLAMACPP, reason_code, latency_ms=round((time.perf_counter() - start) * 1000))
             return RoutingResult(
                 target=ComputeTarget.LOCAL_LLAMACPP,
@@ -286,10 +313,10 @@ class AdaptiveRouter:
                 routing_reason_code=reason_code,
             )
 
-    def _route_openai(self, prompt: str, reason: str, reason_code: str) -> RoutingResult:
+    def _route_openai(self, prompt: str, reason: str, reason_code: str, **generation_kwargs: Any) -> RoutingResult:
         start = time.perf_counter()
         try:
-            response = self.openai.generate(prompt)
+            response = self.openai.generate(prompt, **generation_kwargs)
             self._track_route(ComputeTarget.EXTERNAL_OPENAI, reason_code, latency_ms=round((time.perf_counter() - start) * 1000))
             return RoutingResult(
                 target=ComputeTarget.EXTERNAL_OPENAI,
@@ -312,10 +339,10 @@ class AdaptiveRouter:
                 routing_reason_code=reason_code,
             )
 
-    def _route_anthropic(self, prompt: str, reason: str, reason_code: str) -> RoutingResult:
+    def _route_anthropic(self, prompt: str, reason: str, reason_code: str, **generation_kwargs: Any) -> RoutingResult:
         start = time.perf_counter()
         try:
-            response = self.anthropic.generate(prompt)
+            response = self.anthropic.generate(prompt, **generation_kwargs)
             self._track_route(ComputeTarget.EXTERNAL_ANTHROPIC, reason_code, latency_ms=round((time.perf_counter() - start) * 1000))
             return RoutingResult(
                 target=ComputeTarget.EXTERNAL_ANTHROPIC,
@@ -338,10 +365,10 @@ class AdaptiveRouter:
                 routing_reason_code=reason_code,
             )
 
-    def _route_xai(self, prompt: str, reason: str, reason_code: str) -> RoutingResult:
+    def _route_xai(self, prompt: str, reason: str, reason_code: str, **generation_kwargs: Any) -> RoutingResult:
         start = time.perf_counter()
         try:
-            response = self.xai.generate(prompt)
+            response = self.xai.generate(prompt, **generation_kwargs)
             self._track_route(ComputeTarget.EXTERNAL_XAI, reason_code, latency_ms=round((time.perf_counter() - start) * 1000))
             return RoutingResult(
                 target=ComputeTarget.EXTERNAL_XAI,
@@ -412,6 +439,11 @@ def build_router_from_env(config: Optional[RoutingConfig] = None, glyph_packet: 
     )
 
 
-def route_with_configured_clients(glyph_packet, prompt: Optional[str] = None, config: Optional[RoutingConfig] = None) -> RoutingResult:
+def route_with_configured_clients(
+    glyph_packet,
+    prompt: Optional[str] = None,
+    config: Optional[RoutingConfig] = None,
+    **generation_kwargs: Any,
+) -> RoutingResult:
     router = build_router_from_env(config=config, glyph_packet=glyph_packet)
-    return router.route(glyph_packet, prompt=prompt)
+    return router.route(glyph_packet, prompt=prompt, **generation_kwargs)

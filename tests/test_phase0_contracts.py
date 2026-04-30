@@ -5,6 +5,7 @@ import importlib.util
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import threading
 import tempfile
@@ -26,8 +27,21 @@ assert SPEC and SPEC.loader
 WEB_APP = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(WEB_APP)
 
+GATEWAY_PATH = ROOT_DIR / "scripts" / "glyphos_openai_gateway.py"
+
 
 class Phase0ContractTests(unittest.TestCase):
+    def load_gateway_module(self) -> object:
+        gateway_spec = importlib.util.spec_from_file_location("llama_model_manager_gateway", GATEWAY_PATH)
+        assert gateway_spec and gateway_spec.loader
+        gateway = importlib.util.module_from_spec(gateway_spec)
+        original_path = list(sys.path)
+        try:
+            gateway_spec.loader.exec_module(gateway)
+        finally:
+            sys.path[:] = original_path
+        return gateway
+
     def make_manager(self, tmpdir: str) -> object:
         env = {
             "HOME": str(Path(tmpdir) / "home"),
@@ -81,6 +95,25 @@ class Phase0ContractTests(unittest.TestCase):
         handler.manager = manager
         handler.web_root = ROOT_DIR / "web"
         server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        self.addCleanup(thread.join, 1)
+        return server
+
+    def start_gateway_server(
+        self,
+        *,
+        gateway_module: object | None = None,
+        model_id: str = "test-model",
+        backend_base_url: str = "http://127.0.0.1:9/v1",
+    ) -> ThreadingHTTPServer:
+        gateway = gateway_module or self.load_gateway_module()
+        handler = type("Phase0GatewayHandler", (gateway.GatewayHandler,), {})
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        server.backend_base_url = backend_base_url  # type: ignore[attr-defined]
+        server.model_id = model_id  # type: ignore[attr-defined]
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(server.shutdown)
@@ -1718,6 +1751,153 @@ class Phase0ContractTests(unittest.TestCase):
                 state["models"][0]["validation_summary"],
                 "model file and runtime selection look consistent",
             )
+
+    def test_gateway_chat_completion_passes_generation_parameters_and_records_telemetry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "gateway-state.json"
+            captured: dict[str, object] = {}
+
+            def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+                captured.update({
+                    "prompt": prompt,
+                    "model": model,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                })
+                return {
+                    "text": "routed ok",
+                    "target": "llamacpp",
+                    "reason_code": "default_local",
+                    "reason": "default - use local llama.cpp",
+                    "latency_ms": 7,
+                }, {
+                    "X-LMM-Route-Mode": "routed",
+                    "X-LMM-GlyphOS-Target": "llamacpp",
+                    "X-LMM-GlyphOS-Reason": "default_local",
+                }
+
+            gateway = self.load_gateway_module()
+            with mock.patch.dict(os.environ, {"LMM_GATEWAY_STATE_FILE": str(state_path)}, clear=False):
+                with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+                    server = self.start_gateway_server(gateway_module=gateway, model_id="fallback-model")
+                    payload = {
+                        "model": "requested-model",
+                        "messages": [{"role": "user", "content": "hello gateway"}],
+                        "max_tokens": 123,
+                        "temperature": 0.25,
+                    }
+                    req = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json", "User-Agent": "phase0-test"},
+                        method="POST",
+                    )
+
+                    with urllib.request.urlopen(req, timeout=5) as response:
+                        body = json.loads(response.read().decode("utf-8"))
+
+            self.assertEqual(captured["model"], "requested-model")
+            self.assertEqual(captured["max_tokens"], 123)
+            self.assertEqual(captured["temperature"], 0.25)
+            self.assertIn("user: hello gateway", str(captured["prompt"]))
+            self.assertEqual(body["choices"][0]["message"]["content"], "routed ok")
+            self.assertEqual(body["lmm"]["glyphos_target"], "llamacpp")
+            telemetry = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(telemetry["counters"]["success:True"], 1)
+            self.assertEqual(telemetry["recent_requests"][0]["route_target"], "llamacpp")
+
+    def test_gateway_chat_completion_supports_openai_sse_streaming(self) -> None:
+        def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+            return {
+                "text": "streamed ok",
+                "target": "llamacpp",
+                "reason_code": "default_local",
+                "reason": "default - use local llama.cpp",
+                "latency_ms": 5,
+            }, {"X-LMM-Route-Mode": "routed"}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gateway = self.load_gateway_module()
+            with mock.patch.dict(os.environ, {"LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json")}, clear=False):
+                with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+                    server = self.start_gateway_server(gateway_module=gateway)
+                    payload = {
+                        "model": "stream-model",
+                        "messages": [{"role": "user", "content": "stream please"}],
+                        "stream": True,
+                    }
+                    req = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+
+                    with urllib.request.urlopen(req, timeout=5) as response:
+                        content_type = response.headers.get("Content-Type", "")
+                        raw = response.read().decode("utf-8")
+
+        self.assertIn("text/event-stream", content_type)
+        self.assertIn("chat.completion.chunk", raw)
+        self.assertIn("streamed ok", raw)
+        self.assertIn("data: [DONE]", raw)
+
+    def test_gateway_models_fallback_keeps_openai_model_shape_when_backend_is_unavailable(self) -> None:
+        server = self.start_gateway_server(model_id="fallback-model", backend_base_url="http://127.0.0.1:9/v1")
+
+        with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/v1/models", timeout=5) as response:
+            body = json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(body["object"], "list")
+        self.assertEqual(body["data"][0]["id"], "fallback-model")
+        self.assertIn("warning", body)
+
+    def test_gateway_logs_endpoint_uses_cli_gateway_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self.make_manager(tmpdir)
+            calls: list[tuple[str, ...]] = []
+
+            def fake_run_cli(command: str, *args: str) -> str:
+                calls.append((command, *args))
+                return "gateway line\n"
+
+            manager.run_cli = fake_run_cli  # type: ignore[method-assign]
+            server = self.start_app_server(manager)
+
+            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/api/gateway/logs?lines=12", timeout=5) as response:
+                body = json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(calls, [("gateway", "logs", "12")])
+        self.assertEqual(body["lines"], 12)
+        self.assertEqual(body["content"], "gateway line\n")
+
+    def test_glyphos_shared_telemetry_preserves_concurrent_process_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            telemetry_path = Path(tmpdir) / "glyphos-routing.json"
+            env = {
+                **os.environ,
+                "PYTHONPATH": str(ROOT_DIR / "integrations" / "public-glyphos-ai-compute"),
+                "LLAMA_MODEL_GLYPHOS_TELEMETRY_FILE": str(telemetry_path),
+            }
+            code = (
+                "from glyphos_ai.ai_compute.router import _record_global_attempt\n"
+                "import time\n"
+                "_record_global_attempt({'target': 'llamacpp', 'reason_code': 'default_local', "
+                "'success': True, 'latency_ms': 1, 'error': '', 'time': time.time()})\n"
+            )
+            processes = [
+                subprocess.Popen([sys.executable, "-c", code], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                for _ in range(8)
+            ]
+            for process in processes:
+                stdout, stderr = process.communicate(timeout=10)
+                self.assertEqual(process.returncode, 0, stderr.decode("utf-8", errors="replace") + stdout.decode("utf-8", errors="replace"))
+
+            telemetry = json.loads(telemetry_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(telemetry["attempts_by_target"]["llamacpp"], 8)
+        self.assertEqual(telemetry["fallback_reason_counts"]["default_local"], 8)
+        self.assertEqual(len(telemetry["recent_attempts"]), 8)
 
     def test_defaults_preserve_shell_quoted_extra_args(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
