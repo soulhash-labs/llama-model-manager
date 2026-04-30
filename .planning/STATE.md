@@ -6,16 +6,16 @@ current_phase: 2
 current_phase_name: run-records
 current_plan: 3
 status: paused
-stopped_at: Completed 02-run-records-02-PLAN.md
+stopped_at: Completed 02-run-records-03-PLAN.md
 paused_at: None
-last_updated: "2026-04-30T20:21:48.674Z"
+last_updated: "2026-04-30T20:24:23.765Z"
 last_activity: 2026-04-30
 progress:
   total_phases: 1
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 3
-  completed_plans: 2
-  percent: 29
+  completed_plans: 3
+  percent: 43
 ---
 
 # Project State
@@ -27,10 +27,10 @@ progress:
 **Total Phases:** 3
 **Current Plan:** 3
 **Total Plans in Phase:** 3
-**Status:** Ready to execute
+**Status:** Phase complete — ready for verification
 **Last Activity:** 2026-04-30
 **Last Activity Description:** completed 02-run-records-01
-**Progress:** [███░░░░░░░] 29%
+**Progress:** [████░░░░░░] 43%
 **Paused At:** None
 
 ## Performance Metrics
@@ -47,6 +47,7 @@ progress:
 | Phase 02 P01 | 10m | 3 tasks | 3 files |
 | Phase 02 P01 | 10m | 3 tasks | 3 files |
 | Phase 02-run-records P02 | 12 | 3 tasks | 3 files |
+| Phase 02-run-records P03 | 360 | 3 tasks | 3 files |
 
 ## Decisions
 
@@ -56,13 +57,18 @@ progress:
 - [Phase 02]: Shared _FileLockedJsonStore introduced for JSON file write parity.
 - [Phase 02-run-records]: Emit typed run records while preserving legacy telemetry for dashboard compatibility
 - [Phase 02-run-records]: Add /readyz and /-/runtime/report from HealthChecker component snapshots
+- [Phase 02-run-records]: Load demo dashboard state from  via fixture fallback and preserve interface constants.
+- [Phase 02-run-records]: Expose  in dashboard state for both demo and production responses.
+- [Phase 02-run-records]: Load demo dashboard state from web/demo_state.json via fixture fallback and preserve interface constants.
+- [Phase 02-run-records]: Expose run_history in dashboard state for both demo and production responses.
 
 ## Blockers
 
-- None.
+-
+- requirements.mark-complete for RUNREC-02 could not run because requirement id is not defined in .planning/REQUIREMENTS.md (only RUNREC-01 exists).
 
 ## Session
 
-**Last Date:** 2026-04-30T20:21:48.670Z
-**Stopped At:** Completed 02-run-records-02-PLAN.md
+**Last Date:** 2026-04-30T20:24:15.031Z
+**Stopped At:** Completed 02-run-records-03-PLAN.md
 **Resume File:** None
