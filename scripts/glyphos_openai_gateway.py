@@ -167,8 +167,18 @@ def load_gateway_state() -> dict[str, Any]:
     return telemetry_store().read_state()
 
 
+def _redact_gateway_telemetry_record(record: dict[str, Any]) -> dict[str, Any]:
+    redacted = dict(record)
+    prompt = redacted.pop("prompt", "")
+    if isinstance(prompt, str):
+        redacted.setdefault("prompt_chars", len(prompt))
+    elif prompt:
+        redacted.setdefault("prompt_chars", len(json.dumps(prompt)))
+    return redacted
+
+
 def record_gateway_request(record: dict[str, Any]) -> None:
-    telemetry_store().append_event(record)
+    telemetry_store().append_event(_redact_gateway_telemetry_record(record))
 
 
 def safe_record_gateway_request(record: dict[str, Any]) -> None:
