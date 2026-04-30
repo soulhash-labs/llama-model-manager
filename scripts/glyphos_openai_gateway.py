@@ -29,7 +29,9 @@ if str(INTEGRATION_ROOT) not in sys.path:
 
 from lmm_config import load_lmm_config_from_env  # noqa: E402
 from lmm_errors import GatewayError, InvalidRequestError  # noqa: E402
-from lmm_storage import JsonGatewayTelemetryStore  # noqa: E402
+from lmm_health import HealthChecker, ComponentHealth  # noqa: E402
+from lmm_storage import JsonGatewayTelemetryStore, JsonRunRecordStore  # noqa: E402
+from lmm_types import ExitResult, RunRecord, RunStatus  # noqa: E402
 
 
 def now() -> float:
@@ -144,6 +146,14 @@ def telemetry_store() -> JsonGatewayTelemetryStore:
     return JsonGatewayTelemetryStore(config.state_file, recent_limit=config.telemetry_recent_limit)
 
 
+def run_record_store() -> JsonRunRecordStore:
+    config = load_lmm_config_from_env().gateway
+    run_path = Path(os.environ.get("LMM_RUN_RECORDS_FILE", str(
+        Path.home() / ".local" / "state" / "llama-server" / "lmm-run-records.json"
+    ))).expanduser()
+    return JsonRunRecordStore(run_path, recent_limit=config.telemetry_recent_limit)
+
+
 def load_gateway_state() -> dict[str, Any]:
     return telemetry_store().read_state()
 
@@ -157,6 +167,49 @@ def safe_record_gateway_request(record: dict[str, Any]) -> None:
         record_gateway_request(record)
     except Exception as exc:
         sys.stderr.write(f"warning: failed to persist LMM gateway telemetry: {exc}\n")
+
+
+def safe_record_run_record(record: RunRecord) -> None:
+    try:
+        run_record_store().append_record(record.to_dict())
+    except Exception as exc:
+        sys.stderr.write(f"warning: failed to persist LMM run record: {exc}\n")
+
+
+def _current_iso_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _run_record_from_dict(record: dict[str, Any]) -> RunRecord:
+    raw_prompt = record.get("prompt", "")
+    if not isinstance(raw_prompt, str):
+        raw_prompt = json.dumps(raw_prompt)
+
+    provider = str(record.get("provider") or record.get("route_target") or "")
+    status = RunStatus(record.get("status", RunStatus.PENDING))
+    exit_result = record.get("exit_result")
+    if isinstance(exit_result, str):
+        exit_result = ExitResult(exit_result)
+    elif not isinstance(exit_result, ExitResult):
+        exit_result = None
+
+    return RunRecord(
+        prompt=raw_prompt,
+        model=str(record.get("model", "")),
+        provider=provider,
+        status=status,
+        exit_result=exit_result,
+        started_at=str(record.get("started_at")) if record.get("started_at") else None,
+        completed_at=str(record.get("completed_at")) if record.get("completed_at") else None,
+        error_message=str(record.get("error")) if isinstance(record.get("error"), str) else None,
+        route_target=str(record.get("route_target", "")),
+        route_reason_code=str(record.get("reason_code", "")),
+        completion_chars=int(record.get("completion_chars", 0) or 0),
+        harness=str(record.get("harness", "")),
+        context_status=str(record.get("context_status", "")),
+        context_used=bool(record.get("context_used", False)),
+        duration_ms=record.get("duration_ms") if isinstance(record.get("duration_ms"), int) else None,
+    )
 
 
 def messages_to_prompt(messages: Any) -> str:
@@ -773,6 +826,7 @@ class LMMOpenAIGateway:
     def __init__(self, *, backend_base_url: str, model_id: str = "") -> None:
         self.backend_base_url = backend_base_url.rstrip("/")
         self.model_id = model_id
+        self._health = HealthChecker(backend_url=backend_base_url, config=load_lmm_config_from_env())
 
     def health(self) -> dict[str, Any]:
         return {"ok": True, "service": "lmm-glyphos-openai-gateway"}
@@ -791,6 +845,13 @@ class LMMOpenAIGateway:
     def telemetry(self) -> dict[str, Any]:
         return load_gateway_state()
 
+    @property
+    def health_checker(self) -> HealthChecker:
+        return self._health
+
+    def health_check(self) -> dict[str, ComponentHealth]:
+        return self.health_checker.check_all()
+
 
 class GatewayHandler(BaseHTTPRequestHandler):
     server_version = "LMMGlyphOSGateway/1.0"
@@ -807,6 +868,17 @@ class GatewayHandler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path in {"/healthz", "/v1", "/v1/health"}:
             json_response(self, 200, self.gateway().health())
+            return
+        if path == "/readyz":
+            checker = self.gateway().health_checker
+            if checker.is_ready():
+                json_response(self, 200, {"status": "ready"})
+            else:
+                components = {name: item.to_dict() for name, item in checker.check_all().items()}
+                json_response(self, 503, {"status": "not_ready", "components": components})
+            return
+        if path == "/-/runtime/report":
+            json_response(self, 200, self.gateway().health_checker.get_runtime_report().to_dict())
             return
         if path == "/v1/models":
             status, payload = self.gateway().list_models()
@@ -826,6 +898,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         context_state, context_used = context_status()
         record: dict[str, Any] = {
             "time": started,
+            "started_at": _current_iso_timestamp(),
             "harness": self.headers.get("User-Agent", "unknown"),
             "mode": "routed-basic",
             "context_status": context_state,
@@ -837,11 +910,18 @@ class GatewayHandler(BaseHTTPRequestHandler):
             "success": False,
             "fallback_mode": "",
             "latency_ms": 0,
+            "status": RunStatus.RUNNING.value,
+            "exit_result": None,
+            "provider": "unknown",
+            "prompt": "",
+            "model": "",
         }
         try:
             payload = read_json(self)
             prompt = messages_to_prompt(payload.get("messages"))
             model = str(payload.get("model") or self.server.model_id or "local-llama")  # type: ignore[attr-defined]
+            record["prompt"] = prompt
+            record["model"] = model
             max_tokens = request_int(payload, "max_tokens", 1000)
             temperature = request_float(payload, "temperature", 0.7)
             stream = payload.get("stream") is True
@@ -890,9 +970,19 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     "success": success,
                     "latency_ms": latency_ms,
                     "completion_chars": len(text),
+                    "completed_at": _current_iso_timestamp(),
                 })
                 if error_message:
                     record["error"] = error_message
+                if not success:
+                    record["status"] = RunStatus.CANCELLED.value
+                    record["exit_result"] = ExitResult.USER_CANCELLED.value
+                    record["provider"] = record["route_target"]
+                else:
+                    record["status"] = RunStatus.COMPLETED.value
+                    record["exit_result"] = ExitResult.SUCCESS.value
+                    record["provider"] = record["route_target"]
+                safe_record_run_record(_run_record_from_dict(record))
                 safe_record_gateway_request(record)
                 return
             routed, headers = route_prompt(assembled_prompt, model, max_tokens, temperature)
@@ -904,6 +994,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 "reason_code": routed["reason_code"],
                 "success": True,
                 "latency_ms": routed["latency_ms"],
+                "provider": routed["target"],
+                "status": RunStatus.COMPLETED.value,
+                "exit_result": ExitResult.SUCCESS.value,
+                "completed_at": _current_iso_timestamp(),
             })
             response_payload = completion_payload(
                 started=started,
@@ -911,12 +1005,17 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 routed=routed,
                 pipeline=pipeline,
             )
+            safe_record_run_record(_run_record_from_dict(record))
             safe_record_gateway_request(record)
             json_response(self, 200, response_payload, headers=headers)
         except InvalidRequestError as exc:
             record["error"] = str(exc)
+            record["status"] = RunStatus.FAILED.value
+            record["exit_result"] = ExitResult.ERROR.value
             record["latency_ms"] = round((now() - started) * 1000)
+            record["completed_at"] = _current_iso_timestamp()
             safe_record_gateway_request(record)
+            safe_record_run_record(_run_record_from_dict(record))
             json_response(
                 self,
                 400,
@@ -924,8 +1023,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
             )
         except Exception as exc:
             record["error"] = str(exc)
+            record["status"] = RunStatus.FAILED.value
+            record["exit_result"] = ExitResult.PROVIDER_ERROR.value
             record["latency_ms"] = round((now() - started) * 1000)
+            record["completed_at"] = _current_iso_timestamp()
             safe_record_gateway_request(record)
+            safe_record_run_record(_run_record_from_dict(record))
             error_payload = exc.to_dict() if isinstance(exc, GatewayError) else {"message": str(exc), "type": "lmm_gateway_error"}
             json_response(self, 503, {"error": error_payload, "lmm": record})
 
@@ -950,6 +1053,7 @@ def create_gateway_server(
     server.backend_base_url = backend_base_url  # type: ignore[attr-defined]
     server.model_id = model_id  # type: ignore[attr-defined]
     server.gateway = LMMOpenAIGateway(backend_base_url=backend_base_url, model_id=model_id)  # type: ignore[attr-defined]
+    server.health_checker = server.gateway.health_checker  # type: ignore[attr-defined]
     return server
 
 
