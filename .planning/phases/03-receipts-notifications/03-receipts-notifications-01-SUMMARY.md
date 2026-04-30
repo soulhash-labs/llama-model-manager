@@ -79,3 +79,10 @@ None - plan executed exactly as written.
 
 *Phase: 03-receipts-notifications*
 *Completed: 2026-04-30*
+
+## Self-Check: PASSED
+
+- `scripts/lmm_receipts.py` exists.
+- `tests/test_phase0_contracts.py` exists.
+- Task commits found: `4b76842`, `cead05a`.
+- Plan execution docs commit found: `db236dc`.
