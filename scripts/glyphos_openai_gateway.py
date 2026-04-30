@@ -2,22 +2,22 @@
 from __future__ import annotations
 
 import argparse
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
 import os
-from pathlib import Path
 import queue
 import shlex
 import signal
-import sys
 import subprocess
+import sys
 import threading
 import time
-from typing import Any, Iterator
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
-
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_ROOT = Path(__file__).resolve().parent
@@ -29,7 +29,8 @@ if str(INTEGRATION_ROOT) not in sys.path:
 
 from lmm_config import load_lmm_config_from_env  # noqa: E402
 from lmm_errors import GatewayError, InvalidRequestError  # noqa: E402
-from lmm_health import HealthChecker, ComponentHealth  # noqa: E402
+from lmm_health import ComponentHealth, HealthChecker  # noqa: E402
+from lmm_notifications import NotificationType, create_notification_manager  # noqa: E402
 from lmm_storage import JsonGatewayTelemetryStore, JsonRunRecordStore  # noqa: E402
 from lmm_types import ExitResult, RunRecord, RunStatus  # noqa: E402
 
@@ -38,7 +39,9 @@ def now() -> float:
     return time.time()
 
 
-def json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any], headers: dict[str, str] | None = None) -> None:
+def json_response(
+    handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any], headers: dict[str, str] | None = None
+) -> None:
     raw = json.dumps(payload).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json")
@@ -93,7 +96,9 @@ def request_float(payload: dict[str, Any], key: str, default: float) -> float:
     return value
 
 
-def http_json(method: str, url: str, *, payload: dict[str, Any] | None = None, timeout: int = 5) -> tuple[int, dict[str, Any]]:
+def http_json(
+    method: str, url: str, *, payload: dict[str, Any] | None = None, timeout: int = 5
+) -> tuple[int, dict[str, Any]]:
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = urlrequest.Request(url, data=data, headers={"Content-Type": "application/json"}, method=method)
     try:
@@ -112,7 +117,9 @@ def http_json(method: str, url: str, *, payload: dict[str, Any] | None = None, t
         raise RuntimeError(str(exc)) from exc
 
 
-def run_context_command(command: list[str], *, input_text: str, timeout_seconds: float, cwd: str) -> subprocess.CompletedProcess[str]:
+def run_context_command(
+    command: list[str], *, input_text: str, timeout_seconds: float, cwd: str
+) -> subprocess.CompletedProcess[str]:
     proc = subprocess.Popen(
         command,
         stdin=subprocess.PIPE,
@@ -148,9 +155,11 @@ def telemetry_store() -> JsonGatewayTelemetryStore:
 
 def run_record_store() -> JsonRunRecordStore:
     config = load_lmm_config_from_env().gateway
-    run_path = Path(os.environ.get("LMM_RUN_RECORDS_FILE", str(
-        Path.home() / ".local" / "state" / "llama-server" / "lmm-run-records.json"
-    ))).expanduser()
+    run_path = Path(
+        os.environ.get(
+            "LMM_RUN_RECORDS_FILE", str(Path.home() / ".local" / "state" / "llama-server" / "lmm-run-records.json")
+        )
+    ).expanduser()
     return JsonRunRecordStore(run_path, recent_limit=config.telemetry_recent_limit)
 
 
@@ -276,11 +285,13 @@ def extract_payload_context(payload: dict[str, Any]) -> Any:
         payload.get("context"),
     ]
     if isinstance(metadata, dict):
-        candidates.extend([
-            metadata.get("lmm_context"),
-            metadata.get("retrieved_context"),
-            metadata.get("context"),
-        ])
+        candidates.extend(
+            [
+                metadata.get("lmm_context"),
+                metadata.get("retrieved_context"),
+                metadata.get("context"),
+            ]
+        )
     for candidate in candidates:
         if candidate is None:
             continue
@@ -296,6 +307,11 @@ def context_to_text(context: Any) -> str:
     if isinstance(context, str):
         return context.strip()
     return compact_json(context)
+
+
+def notification_manager():
+    enabled = os.environ.get("LMM_NOTIFICATIONS_ENABLED", "").lower() in {"1", "true", "yes"}
+    return create_notification_manager(enabled=enabled)
 
 
 def message_summary(messages: Any) -> dict[str, Any]:
@@ -318,11 +334,13 @@ def message_summary(messages: Any) -> dict[str, Any]:
         roles[role] = roles.get(role, 0) + 1
         chars += content_chars
         canonical.append({"role": role, "chars": content_chars})
-    summary.update({
-        "count": len(canonical),
-        "roles": roles,
-        "chars": chars,
-    })
+    summary.update(
+        {
+            "count": len(canonical),
+            "roles": roles,
+            "chars": chars,
+        }
+    )
     return summary
 
 
@@ -380,39 +398,47 @@ def retrieve_context(payload: dict[str, Any], prompt: str, *, model: str, stream
     payload_context = extract_payload_context(payload)
     if payload_context:
         text = context_to_text(payload_context)
-        result.update({
-            "status": "retrieved_from_payload",
-            "used": bool(text),
-            "context": text,
-            "source": "payload",
-            "latency_ms": round((time.perf_counter() - started) * 1000),
-        })
+        result.update(
+            {
+                "status": "retrieved_from_payload",
+                "used": bool(text),
+                "context": text,
+                "source": "payload",
+                "latency_ms": round((time.perf_counter() - started) * 1000),
+            }
+        )
         return result
 
     command = context_config.command
     if not command:
         bridge = context_mcp_bridge_path()
         if not bridge.is_file():
-            result.update({
-                "status": "missing_bridge",
-                "source": "context-mode-mcp",
-                "latency_ms": round((time.perf_counter() - started) * 1000),
-            })
+            result.update(
+                {
+                    "status": "missing_bridge",
+                    "source": "context-mode-mcp",
+                    "latency_ms": round((time.perf_counter() - started) * 1000),
+                }
+            )
             return result
         if not (root / "dist" / "index.js").is_file():
-            result.update({
-                "status": "missing_dist",
-                "source": "context-mode-mcp",
-                "latency_ms": round((time.perf_counter() - started) * 1000),
-            })
+            result.update(
+                {
+                    "status": "missing_dist",
+                    "source": "context-mode-mcp",
+                    "latency_ms": round((time.perf_counter() - started) * 1000),
+                }
+            )
             return result
         command = f"{sys.executable} {bridge}"
     if not command:
-        result.update({
-            "status": "available_no_context",
-            "source": "context-mode-mcp",
-            "latency_ms": round((time.perf_counter() - started) * 1000),
-        })
+        result.update(
+            {
+                "status": "available_no_context",
+                "source": "context-mode-mcp",
+                "latency_ms": round((time.perf_counter() - started) * 1000),
+            }
+        )
         return result
 
     timeout_ms = context_config.timeout_ms
@@ -435,12 +461,14 @@ def retrieve_context(payload: dict[str, Any], prompt: str, *, model: str, stream
             result.update({"status": "error", "source": "context-mode-mcp", "error": "context_command_failed"})
             return result
         text = context_to_text(command_context_from_output(completed.stdout))
-        result.update({
-            "status": "retrieved" if text else "empty",
-            "used": bool(text),
-            "context": text,
-            "source": "context-mode-mcp",
-        })
+        result.update(
+            {
+                "status": "retrieved" if text else "empty",
+                "used": bool(text),
+                "context": text,
+                "source": "context-mode-mcp",
+            }
+        )
         return result
     except subprocess.TimeoutExpired:
         result.update({"status": "timeout", "source": "context-mode-mcp", "error": f"timeout after {timeout_ms}ms"})
@@ -527,20 +555,24 @@ def glyph_encode_context(context: str) -> dict[str, Any]:
             return result
         encoded_chars = len(encoded)
         if encoded_chars >= raw_chars:
-            result.update({
-                "status": "raw_not_smaller",
-                "encoded_context_chars": encoded_chars,
-                "encoding_ratio": round(encoded_chars / raw_chars, 4) if raw_chars else 1.0,
-            })
+            result.update(
+                {
+                    "status": "raw_not_smaller",
+                    "encoded_context_chars": encoded_chars,
+                    "encoding_ratio": round(encoded_chars / raw_chars, 4) if raw_chars else 1.0,
+                }
+            )
             return result
-        result.update({
-            "status": "encoded",
-            "used": True,
-            "encoded_context_chars": encoded_chars,
-            "estimated_token_delta": round((raw_chars - encoded_chars) / 4),
-            "encoding_ratio": round(encoded_chars / raw_chars, 4),
-            "encoded_context": encoded,
-        })
+        result.update(
+            {
+                "status": "encoded",
+                "used": True,
+                "encoded_context_chars": encoded_chars,
+                "estimated_token_delta": round((raw_chars - encoded_chars) / 4),
+                "encoding_ratio": round(encoded_chars / raw_chars, 4),
+                "encoded_context": encoded,
+            }
+        )
         return result
     except Exception as exc:
         result.update({"status": "error_raw_fallback", "error": str(exc)[:400]})
@@ -549,7 +581,9 @@ def glyph_encode_context(context: str) -> dict[str, Any]:
         result["latency_ms"] = round((time.perf_counter() - started) * 1000)
 
 
-def assemble_prompt(raw_prompt: str, context_result: dict[str, Any], encoding_result: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def assemble_prompt(
+    raw_prompt: str, context_result: dict[str, Any], encoding_result: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
     context = str(context_result.get("context") or "").strip()
     if not context:
         return raw_prompt, {
@@ -558,24 +592,30 @@ def assemble_prompt(raw_prompt: str, context_result: dict[str, Any], encoding_re
             "context_block_chars": 0,
         }
     if encoding_result.get("used"):
-        context_block = "\n".join([
-            "[Glyph Encoding v1]",
-            "Decode this compact context before reasoning. Key aliases: p=path, f=file, t=title, u=uri, c=content, x=text, s=snippet, m=summary, r=score.",
-            str(encoding_result.get("encoded_context", "")),
-        ])
+        context_block = "\n".join(
+            [
+                "[Glyph Encoding v1]",
+                "Decode this compact context before reasoning. Key aliases: p=path, f=file, t=title, u=uri, c=content, x=text, s=snippet, m=summary, r=score.",
+                str(encoding_result.get("encoded_context", "")),
+            ]
+        )
         assembly_status = "glyph_encoded_context"
     else:
-        context_block = "\n".join([
-            "[Retrieved Context]",
-            context,
-        ])
+        context_block = "\n".join(
+            [
+                "[Retrieved Context]",
+                context,
+            ]
+        )
         assembly_status = "raw_context"
-    assembled = "\n\n".join([
-        "System: Use retrieved context only as supporting evidence. The latest user instruction below overrides retrieved or encoded context.",
-        context_block,
-        "[Conversation and latest user request]",
-        raw_prompt,
-    ])
+    assembled = "\n\n".join(
+        [
+            "System: Use retrieved context only as supporting evidence. The latest user instruction below overrides retrieved or encoded context.",
+            context_block,
+            "[Conversation and latest user request]",
+            raw_prompt,
+        ]
+    )
     return assembled, {
         "assembly_status": assembly_status,
         "assembled_prompt_chars": len(assembled),
@@ -583,7 +623,9 @@ def assemble_prompt(raw_prompt: str, context_result: dict[str, Any], encoding_re
     }
 
 
-def prepare_gateway_pipeline(payload: dict[str, Any], raw_prompt: str, *, model: str, stream: bool) -> tuple[str, dict[str, Any]]:
+def prepare_gateway_pipeline(
+    payload: dict[str, Any], raw_prompt: str, *, model: str, stream: bool
+) -> tuple[str, dict[str, Any]]:
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
     request_lifecycle = {
         "messages": message_summary(payload.get("messages", [])),
@@ -597,7 +639,11 @@ def prepare_gateway_pipeline(payload: dict[str, Any], raw_prompt: str, *, model:
         "metadata_keys": sorted(str(key) for key in metadata.keys()),
     }
     context_result = retrieve_context(payload, raw_prompt, model=model, stream=stream)
-    encoding_result = glyph_encode_context(str(context_result.get("context") or "")) if context_result.get("used") else glyph_encode_context("")
+    encoding_result = (
+        glyph_encode_context(str(context_result.get("context") or ""))
+        if context_result.get("used")
+        else glyph_encode_context("")
+    )
     assembled_prompt, assembly = assemble_prompt(raw_prompt, context_result, encoding_result)
     pipeline_mode = "routed-full" if context_result.get("used") else "routed-basic"
     pipeline = {
@@ -665,7 +711,9 @@ def route_prompt(prompt: str, model: str, max_tokens: int, temperature: float) -
     }, headers
 
 
-def route_prompt_stream(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, Any], dict[str, str], Iterator[str]]:
+def route_prompt_stream(
+    prompt: str, model: str, max_tokens: int, temperature: float
+) -> tuple[dict[str, Any], dict[str, str], Iterator[str]]:
     from glyphos_ai.glyph.types import GlyphPacket  # type: ignore
 
     packet = GlyphPacket(
@@ -677,7 +725,9 @@ def route_prompt_stream(prompt: str, model: str, max_tokens: int, temperature: f
         destination=model or "local-llama",
     )
     router = create_router()
-    routed, chunks = router.route_stream(packet, prompt=prompt, model=model, max_tokens=max_tokens, temperature=temperature)
+    routed, chunks = router.route_stream(
+        packet, prompt=prompt, model=model, max_tokens=max_tokens, temperature=temperature
+    )
     headers = {
         "X-LMM-Route-Mode": "routed",
         "X-LMM-GlyphOS-Target": str(routed["target"]),
@@ -727,12 +777,12 @@ def completion_payload(
 
 def sse_event(payload: dict[str, Any] | str) -> bytes:
     data = payload if isinstance(payload, str) else json.dumps(payload)
-    return f"data: {data}\n\n".encode("utf-8")
+    return f"data: {data}\n\n".encode()
 
 
 def sse_comment(comment: str) -> bytes:
     safe = comment.replace("\n", " ").replace("\r", " ").strip() or "keepalive"
-    return f": {safe}\n\n".encode("utf-8")
+    return f": {safe}\n\n".encode()
 
 
 def stream_completion(
@@ -748,6 +798,7 @@ def stream_completion(
     iterator = iter(chunks)
     events: queue.Queue[tuple[str, Any]] = queue.Queue()
     stop_event = threading.Event()
+    model_short = model.split("/")[-1] if "/" in model else model
     base = {
         "id": f"chatcmpl-lmm-{int(started * 1000)}",
         "object": "chat.completion.chunk",
@@ -777,7 +828,9 @@ def stream_completion(
         for key, value in headers.items():
             handler.send_header(key, value)
         handler.end_headers()
-        handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]}))
+        handler.wfile.write(
+            sse_event({**base, "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]})
+        )
         handler.wfile.flush()
 
         worker = threading.Thread(target=pump_chunks, name="lmm-gateway-stream-pump", daemon=True)
@@ -800,26 +853,53 @@ def stream_completion(
             if not chunk:
                 continue
             collected.append(str(chunk))
-            handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {"content": str(chunk)}, "finish_reason": None}]}))
+            handler.wfile.write(
+                sse_event({**base, "choices": [{"index": 0, "delta": {"content": str(chunk)}, "finish_reason": None}]})
+            )
             handler.wfile.flush()
 
         handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}))
         handler.wfile.write(sse_event("[DONE]"))
         handler.wfile.flush()
-        return "".join(collected), True, "", round((now() - started) * 1000)
+        latency_ms = round((now() - started) * 1000)
+        if latency_ms > 30000:
+            mgr = notification_manager()
+            if mgr:
+                mgr.notify(
+                    f"LMM: {model_short} completed",
+                    f"Run finished in {latency_ms // 1000}s",
+                    NotificationType.RUN_COMPLETED,
+                )
+        return "".join(collected), True, "", latency_ms
     except (BrokenPipeError, ConnectionResetError) as exc:
         stop_event.set()
-        return "".join(collected), False, f"client disconnected: {exc}", round((now() - started) * 1000)
+        latency_ms = round((now() - started) * 1000)
+        mgr = notification_manager()
+        if mgr:
+            mgr.notify(
+                "LMM: Client disconnected",
+                "Run cancelled by client",
+                NotificationType.CLIENT_DISCONNECTED,
+            )
+        return "".join(collected), False, f"client disconnected: {exc}", latency_ms
     except Exception as exc:
         stop_event.set()
         error_message = str(exc)
+        latency_ms = round((now() - started) * 1000)
+        mgr = notification_manager()
+        if mgr:
+            mgr.notify(
+                f"LMM: {model_short} failed",
+                f"Error: {error_message[:100]}",
+                NotificationType.RUN_FAILED,
+            )
         try:
             handler.wfile.write(sse_event({"error": {"message": error_message, "type": "lmm_gateway_error"}}))
             handler.wfile.write(sse_event("[DONE]"))
             handler.wfile.flush()
         except Exception:
             pass
-        return "".join(collected), False, error_message, round((now() - started) * 1000)
+        return "".join(collected), False, error_message, latency_ms
 
 
 class LMMOpenAIGateway:
@@ -931,34 +1011,38 @@ class GatewayHandler(BaseHTTPRequestHandler):
             pipeline_request = pipeline.get("request")
             if isinstance(pipeline_request, dict):
                 pipeline_request["harness_identity"] = record["harness"]
-            record.update({
-                "mode": pipeline.get("mode", "routed-basic"),
-                "context_status": pipeline.get("context_status", context_state),
-                "context_used": bool(pipeline.get("context_used")),
-                "context_source": pipeline.get("context_source", ""),
-                "context_error": pipeline.get("context_error", ""),
-                "context_latency_ms": pipeline.get("context_latency_ms", 0),
-                "glyph_encoding_status": pipeline.get("glyph_encoding_status", "skipped"),
-                "glyph_encoding_used": bool(pipeline.get("glyph_encoding_used")),
-                "raw_context_chars": pipeline.get("raw_context_chars", 0),
-                "encoded_context_chars": pipeline.get("encoded_context_chars", 0),
-                "estimated_token_delta": pipeline.get("estimated_token_delta", 0),
-                "encoding_ratio": pipeline.get("encoding_ratio", 1.0),
-                "glyph_encoding_error": pipeline.get("glyph_encoding_error", ""),
-                "assembly_status": pipeline.get("assembly_status", "raw_prompt"),
-                "assembled_prompt_chars": pipeline.get("assembled_prompt_chars", 0),
-                "context_block_chars": pipeline.get("context_block_chars", 0),
-                "request": pipeline_request if isinstance(pipeline_request, dict) else {},
-            })
+            record.update(
+                {
+                    "mode": pipeline.get("mode", "routed-basic"),
+                    "context_status": pipeline.get("context_status", context_state),
+                    "context_used": bool(pipeline.get("context_used")),
+                    "context_source": pipeline.get("context_source", ""),
+                    "context_error": pipeline.get("context_error", ""),
+                    "context_latency_ms": pipeline.get("context_latency_ms", 0),
+                    "glyph_encoding_status": pipeline.get("glyph_encoding_status", "skipped"),
+                    "glyph_encoding_used": bool(pipeline.get("glyph_encoding_used")),
+                    "raw_context_chars": pipeline.get("raw_context_chars", 0),
+                    "encoded_context_chars": pipeline.get("encoded_context_chars", 0),
+                    "estimated_token_delta": pipeline.get("estimated_token_delta", 0),
+                    "encoding_ratio": pipeline.get("encoding_ratio", 1.0),
+                    "glyph_encoding_error": pipeline.get("glyph_encoding_error", ""),
+                    "assembly_status": pipeline.get("assembly_status", "raw_prompt"),
+                    "assembled_prompt_chars": pipeline.get("assembled_prompt_chars", 0),
+                    "context_block_chars": pipeline.get("context_block_chars", 0),
+                    "request": pipeline_request if isinstance(pipeline_request, dict) else {},
+                }
+            )
             if stream:
                 routed, headers, chunks = route_prompt_stream(assembled_prompt, model, max_tokens, temperature)
                 headers["X-LMM-Route-Mode"] = str(pipeline.get("mode", "routed-basic"))
                 headers["X-LMM-Context-Status"] = str(pipeline.get("context_status", "unknown"))
                 headers["X-LMM-Glyph-Encoding"] = str(pipeline.get("glyph_encoding_status", "skipped"))
-                record.update({
-                    "route_target": routed["target"],
-                    "reason_code": routed["reason_code"],
-                })
+                record.update(
+                    {
+                        "route_target": routed["target"],
+                        "reason_code": routed["reason_code"],
+                    }
+                )
                 text, success, error_message, latency_ms = stream_completion(
                     self,
                     started=started,
@@ -966,12 +1050,14 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     chunks=chunks,
                     headers=headers,
                 )
-                record.update({
-                    "success": success,
-                    "latency_ms": latency_ms,
-                    "completion_chars": len(text),
-                    "completed_at": _current_iso_timestamp(),
-                })
+                record.update(
+                    {
+                        "success": success,
+                        "latency_ms": latency_ms,
+                        "completion_chars": len(text),
+                        "completed_at": _current_iso_timestamp(),
+                    }
+                )
                 if error_message:
                     record["error"] = error_message
                 if not success:
@@ -989,16 +1075,18 @@ class GatewayHandler(BaseHTTPRequestHandler):
             headers["X-LMM-Route-Mode"] = str(pipeline.get("mode", "routed-basic"))
             headers["X-LMM-Context-Status"] = str(pipeline.get("context_status", "unknown"))
             headers["X-LMM-Glyph-Encoding"] = str(pipeline.get("glyph_encoding_status", "skipped"))
-            record.update({
-                "route_target": routed["target"],
-                "reason_code": routed["reason_code"],
-                "success": True,
-                "latency_ms": routed["latency_ms"],
-                "provider": routed["target"],
-                "status": RunStatus.COMPLETED.value,
-                "exit_result": ExitResult.SUCCESS.value,
-                "completed_at": _current_iso_timestamp(),
-            })
+            record.update(
+                {
+                    "route_target": routed["target"],
+                    "reason_code": routed["reason_code"],
+                    "success": True,
+                    "latency_ms": routed["latency_ms"],
+                    "provider": routed["target"],
+                    "status": RunStatus.COMPLETED.value,
+                    "exit_result": ExitResult.SUCCESS.value,
+                    "completed_at": _current_iso_timestamp(),
+                }
+            )
             response_payload = completion_payload(
                 started=started,
                 model=model,
@@ -1029,11 +1117,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
             record["completed_at"] = _current_iso_timestamp()
             safe_record_gateway_request(record)
             safe_record_run_record(_run_record_from_dict(record))
-            error_payload = exc.to_dict() if isinstance(exc, GatewayError) else {"message": str(exc), "type": "lmm_gateway_error"}
+            error_payload = (
+                exc.to_dict() if isinstance(exc, GatewayError) else {"message": str(exc), "type": "lmm_gateway_error"}
+            )
             json_response(self, 503, {"error": error_payload, "lmm": record})
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
-        sys.stderr.write("%s - %s\n" % (self.log_date_time_string(), format % args))
+        sys.stderr.write(f"{self.log_date_time_string()} - {format % args}\n")
 
 
 def create_gateway_server(
