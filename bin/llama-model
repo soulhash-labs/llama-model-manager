@@ -3851,7 +3851,7 @@ harness_route_label() {
     if [[ "$mode" == "direct" ]]; then
         printf 'direct\n'
     elif [[ "$context_pipeline" == "1" || "$context_pipeline" == "true" || "$context_pipeline" == "yes" || "$context_pipeline" == "on" ]]; then
-        printf 'routed-full\n'
+        printf 'routed-full-capable\n'
     else
         printf 'routed-basic\n'
     fi

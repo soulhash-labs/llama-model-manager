@@ -309,10 +309,13 @@ class AdaptiveRouter:
         if not hasattr(self.llamacpp, "stream_generate"):
             raise RuntimeError("local llama.cpp client does not support streaming")
         start = time.perf_counter()
+        if not getattr(self.llamacpp, "opens_stream_before_return", False):
+            raise RuntimeError("streaming client must open or fail before returning chunks")
+        source_chunks = iter(self.llamacpp.stream_generate(prompt, **generation_kwargs))
 
         def chunks() -> Iterator[str]:
             try:
-                for chunk in self.llamacpp.stream_generate(prompt, **generation_kwargs):
+                for chunk in source_chunks:
                     yield chunk
                 self._track_route(
                     ComputeTarget.LOCAL_LLAMACPP,

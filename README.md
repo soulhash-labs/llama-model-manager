@@ -13,7 +13,7 @@ Key capabilities:
 - 📦 **GGUF Discovery & Management:** Find, register, and hot-swap local models.
 - ⚙️ **Runtime Posture Tuning:** Real-time control over context limits, GPU offload, batch, threads, health metrics, and guarded startup auto-fit.
 - 🛠️ **Dev-Tool Sync:** Native integration for local coding environments, with CLI and desktop launchers included.
-- 🧬 **GlyphOS™ Routing:** Route workloads through the active local endpoint with 🔱 𝚿 Glyph Encoding, reducing token payloads by 60-90% for faster transport and stronger long-context stability.
+- 🧬 **GlyphOS™ Routing:** Route workloads through the active local endpoint with 🔱 𝚿 Glyph Encoding, which can reduce structured context payloads when applicable and help long-context workflows stay more stable.
 
 Stay local. Stay sovereign. Stay fast.
 
@@ -287,7 +287,7 @@ These integrations are optional. The default product behavior remains the local 
 - `opencode` keeps its own local client config in `~/.config/opencode/opencode.json`, so it can keep pointing at a stale GGUF even after `llama-model switch`.
 - successful model switches auto-run the OpenCode sync by default with `LLAMA_MODEL_SYNC_OPENCODE=1`; set it to `0` for manual-only sync.
 - `llama-model sync-opencode` updates the `llamacpp` provider endpoint, default model, and local model-state wiring to match `llama-model current`. The default route mode is now `routed`, which points OpenAI-compatible harnesses at the LMM gateway on `http://127.0.0.1:4010/v1`.
-- Routed mode means `harness -> LMM gateway -> Context MCP when available -> Glyph Encoding when useful -> GlyphOS AI Compute -> local llama.cpp backend`. Requests are labelled `routed-full` when context is actually supplied to the gateway pipeline and `routed-basic` when the gateway degrades to GlyphOS-only routing. Use `llama-model sync-opencode --mode direct` or `llama-model sync-openclaw --mode direct` when you intentionally want to bypass the gateway and call the backend `8081/v1` endpoint.
+- Routed mode means `harness -> LMM gateway -> Context MCP when available -> Glyph Encoding when useful -> GlyphOS AI Compute -> local llama.cpp backend`. Sync output reports `routed-full-capable` when the combined feature is configured; individual gateway requests are labelled `routed-full` only when context is actually supplied to the pipeline, otherwise `routed-basic`. Use `llama-model sync-opencode --mode direct` or `llama-model sync-openclaw --mode direct` when you intentionally want to bypass the gateway and call the backend `8081/v1` endpoint.
 - Manage the gateway with `llama-model gateway start|stop|restart|status|logs`. The backend llama.cpp endpoint remains available as an advanced bypass path.
 - Upgrades migrate legacy `LLAMA_MODEL_OPENCODE_GATEWAY_BASE_URL` defaults into `LLAMA_MODEL_HARNESS_MODE=routed` plus `LLAMA_MODEL_GATEWAY_HOST/PORT/LOG`, write a timestamped defaults backup, and attempt a non-fatal resync for existing opencode, OpenClaw, and GlyphOS configs when a saved/running model is resolvable.
 - `llama-model sync-opencode --preset long-run` also writes model-aware `compaction.reserved` headroom. For 128k-token local contexts it reserves `64000` tokens, which avoids the observed long-session `Preparing write...` stall pattern where opencode aborts a pending tool after a parent message timeout or compaction overflow.

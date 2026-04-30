@@ -153,6 +153,8 @@ class BaseChatClient:
 class LlamaCppClient(BaseChatClient):
     """OpenAI-compatible local llama.cpp client."""
 
+    opens_stream_before_return = True
+
     def __init__(self, base_url: str = "http://127.0.0.1:8081/v1", model: str = "", max_tokens: int = 1000, timeout: int = 300):
         super().__init__(model=model, max_tokens=max_tokens, timeout=timeout)
         self.base_url = base_url.rstrip("/")
@@ -226,33 +228,41 @@ class LlamaCppClient(BaseChatClient):
             method="POST",
         )
         try:
-            with urlrequest.urlopen(req, timeout=self.timeout) as response:
-                yield ""
-                for raw_line in response:
-                    line = raw_line.decode("utf-8", errors="replace").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    data = line.split(":", 1)[1].strip()
-                    if not data or data == "[DONE]":
-                        break
-                    try:
-                        event = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    choices = event.get("choices") if isinstance(event, dict) else None
-                    if not isinstance(choices, list) or not choices:
-                        continue
-                    choice = choices[0]
-                    if not isinstance(choice, dict):
-                        continue
-                    delta = choice.get("delta")
-                    if isinstance(delta, dict) and delta.get("content"):
-                        yield str(delta["content"])
-                    message = choice.get("message")
-                    if isinstance(message, dict) and message.get("content"):
-                        yield str(message["content"])
+            response = urlrequest.urlopen(req, timeout=self.timeout)
         except Exception as exc:
             raise RuntimeError(f"llama.cpp streaming request failed: {exc}") from exc
+
+        def chunks() -> Iterator[str]:
+            try:
+                with response:
+                    yield ""
+                    for raw_line in response:
+                        line = raw_line.decode("utf-8", errors="replace").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        data = line.split(":", 1)[1].strip()
+                        if not data or data == "[DONE]":
+                            break
+                        try:
+                            event = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        choices = event.get("choices") if isinstance(event, dict) else None
+                        if not isinstance(choices, list) or not choices:
+                            continue
+                        choice = choices[0]
+                        if not isinstance(choice, dict):
+                            continue
+                        delta = choice.get("delta")
+                        if isinstance(delta, dict) and delta.get("content"):
+                            yield str(delta["content"])
+                        message = choice.get("message")
+                        if isinstance(message, dict) and message.get("content"):
+                            yield str(message["content"])
+            except Exception as exc:
+                raise RuntimeError(f"llama.cpp streaming request failed: {exc}") from exc
+
+        return chunks()
 
 
 class OpenAIClient(BaseChatClient):

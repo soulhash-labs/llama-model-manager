@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import hashlib
 import json
 import os
@@ -28,6 +29,7 @@ WEB_APP = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(WEB_APP)
 
 GATEWAY_PATH = ROOT_DIR / "scripts" / "glyphos_openai_gateway.py"
+CONTEXT_BRIDGE_PATH = ROOT_DIR / "scripts" / "context_mcp_bridge.py"
 
 
 class Phase0ContractTests(unittest.TestCase):
@@ -41,6 +43,13 @@ class Phase0ContractTests(unittest.TestCase):
         finally:
             sys.path[:] = original_path
         return gateway
+
+    def load_context_bridge_module(self) -> object:
+        bridge_spec = importlib.util.spec_from_file_location("llama_model_manager_context_bridge", CONTEXT_BRIDGE_PATH)
+        assert bridge_spec and bridge_spec.loader
+        bridge = importlib.util.module_from_spec(bridge_spec)
+        bridge_spec.loader.exec_module(bridge)
+        return bridge
 
     def make_manager(self, tmpdir: str) -> object:
         env = {
@@ -1902,6 +1911,39 @@ class Phase0ContractTests(unittest.TestCase):
             self.assertEqual(recent["mode"], "routed-basic")
             self.assertIn("continue despite context timeout", str(captured["prompt"]))
 
+    def test_gateway_context_command_timeout_kills_process_group(self) -> None:
+        gateway = self.load_gateway_module()
+
+        class TimeoutProc:
+            pid = 4242
+            returncode = -9
+
+            def __init__(self) -> None:
+                self.communicate_calls = 0
+
+            def communicate(self, input: str | None = None, timeout: float | None = None) -> tuple[str, str]:
+                self.communicate_calls += 1
+                if self.communicate_calls == 1:
+                    raise subprocess.TimeoutExpired(["ctx-bridge"], timeout or 0.01, output="", stderr="")
+                return "", ""
+
+            def kill(self) -> None:
+                pass
+
+        proc = TimeoutProc()
+        with mock.patch.object(gateway.subprocess, "Popen", return_value=proc):
+            with mock.patch.object(gateway.os, "killpg") as killpg:
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    gateway.run_context_command(
+                        ["ctx-bridge"],
+                        input_text="{}",
+                        timeout_seconds=0.01,
+                        cwd=str(ROOT_DIR),
+                    )
+
+        killpg.assert_called_once_with(proc.pid, gateway.signal.SIGKILL)
+        self.assertEqual(proc.communicate_calls, 2)
+
     def test_gateway_context_mcp_command_result_is_used(self) -> None:
         captured: dict[str, object] = {}
 
@@ -1929,7 +1971,7 @@ class Phase0ContractTests(unittest.TestCase):
                 "LMM_CONTEXT_MCP_COMMAND": "ctx-bridge",
                 "LMM_CONTEXT_MCP_TIMEOUT_MS": "500",
             }, clear=False):
-                with mock.patch.object(gateway.subprocess, "run", return_value=completed):
+                with mock.patch.object(gateway, "run_context_command", return_value=completed):
                     with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
                         server = self.start_gateway_server(gateway_module=gateway)
                         body = self.post_json(
@@ -1943,6 +1985,184 @@ class Phase0ContractTests(unittest.TestCase):
         self.assertTrue(body["lmm"]["context_used"])
         self.assertEqual(body["lmm"]["context_status"], "retrieved")
         self.assertIn("retrieved from mcp", str(captured["prompt"]))
+
+    def test_gateway_empty_context_command_output_is_not_used(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+            captured["prompt"] = prompt
+            return {
+                "text": "empty context ok",
+                "target": "llamacpp",
+                "reason_code": "default_local",
+                "reason": "default - use local llama.cpp",
+                "latency_ms": 12,
+            }, {"X-LMM-Route-Mode": "routed"}
+
+        gateway = self.load_gateway_module()
+        for stdout in ("{}", '{"results":[]}', '{"snippets":[]}', '{"context":""}'):
+            with self.subTest(stdout=stdout):
+                completed = subprocess.CompletedProcess(args=["ctx-bridge"], returncode=0, stdout=stdout, stderr="")
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    with mock.patch.dict(os.environ, {
+                        "LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json"),
+                        "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
+                        "LMM_CONTEXT_MCP_COMMAND": "ctx-bridge",
+                    }, clear=False):
+                        with mock.patch.object(gateway, "run_context_command", return_value=completed):
+                            with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+                                server = self.start_gateway_server(gateway_module=gateway)
+                                body = self.post_json(
+                                    f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                                    {
+                                        "model": "empty-context-model",
+                                        "messages": [{"role": "user", "content": "do not overclaim context"}],
+                                    },
+                                )
+
+                    telemetry = json.loads((Path(tmpdir) / "gateway-state.json").read_text(encoding="utf-8"))
+
+                self.assertFalse(body["lmm"]["context_used"])
+                self.assertEqual(body["lmm"]["context_status"], "empty")
+                self.assertEqual(telemetry["recent_requests"][0]["mode"], "routed-basic")
+                self.assertNotIn("[Retrieved Context]", str(captured["prompt"]))
+
+    def test_context_mcp_bridge_speaks_stdio_protocol(self) -> None:
+        bridge = self.load_context_bridge_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            mcp_root = tmp / "context-mode-mcp"
+            (mcp_root / "dist").mkdir(parents=True)
+            (mcp_root / "dist" / "index.js").write_text("// fake entrypoint\n", encoding="utf-8")
+            fake_bin = tmp / "bin"
+            fake_bin.mkdir()
+            fake_node = fake_bin / "node"
+            fake_node.write_text(
+                """#!/usr/bin/env python3
+import json
+import sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            sys.exit(0)
+        line = line.decode().strip()
+        if not line:
+            break
+        if ":" in line:
+            key, value = line.split(":", 1)
+            headers[key.lower()] = value.strip()
+    raw = sys.stdin.buffer.read(int(headers.get("content-length", "0")))
+    return json.loads(raw)
+
+def send(payload):
+    raw = json.dumps(payload, separators=(",", ":")).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(raw)}\\r\\n\\r\\n".encode() + raw)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": message.get("id"), "result": {"protocolVersion": "2024-11-05", "capabilities": {}}})
+    elif method == "tools/call":
+        send({"jsonrpc": "2.0", "id": message.get("id"), "result": {"structuredContent": {"context": {"items": [{"title": "Doc", "snippet": "bridge context"}]}}}})
+        break
+""",
+                encoding="utf-8",
+            )
+            fake_node.chmod(0o755)
+            stdin = io.StringIO(json.dumps({"query": "find bridge context", "limit": 3}))
+            stdout = io.StringIO()
+            with mock.patch.object(bridge, "MCP_ROOT", mcp_root):
+                with mock.patch.dict(os.environ, {"PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}, clear=False):
+                    with mock.patch("sys.stdin", stdin), mock.patch("sys.stdout", stdout):
+                        status = bridge.main()
+
+        self.assertEqual(status, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["context"]["items"][0]["snippet"], "bridge context")
+
+    def test_gateway_telemetry_redacts_raw_request_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "gateway-state.json"
+
+            def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+                return {
+                    "text": "redacted ok",
+                    "target": "llamacpp",
+                    "reason_code": "default_local",
+                    "reason": "default - use local llama.cpp",
+                    "latency_ms": 12,
+                }, {"X-LMM-Route-Mode": "routed"}
+
+            gateway = self.load_gateway_module()
+            with mock.patch.dict(os.environ, {"LMM_GATEWAY_STATE_FILE": str(state_path)}, clear=False):
+                with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+                    server = self.start_gateway_server(gateway_module=gateway)
+                    self.post_json(
+                        f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                        {
+                            "model": "privacy-model",
+                            "messages": [{"role": "user", "content": "SECRET_TOKEN_SHOULD_NOT_PERSIST"}],
+                            "metadata": {"workspace": "/private/workspace", "session": "secret-session"},
+                        },
+                    )
+
+            telemetry_text = state_path.read_text(encoding="utf-8")
+            telemetry = json.loads(telemetry_text)
+            request = telemetry["recent_requests"][0]["request"]
+            self.assertNotIn("raw_messages", request)
+            self.assertNotIn("SECRET_TOKEN_SHOULD_NOT_PERSIST", telemetry_text)
+            self.assertNotIn("/private/workspace", telemetry_text)
+            self.assertNotIn("secret-session", telemetry_text)
+            self.assertEqual(request["messages"]["count"], 1)
+            self.assertEqual(request["messages"]["roles"]["user"], 1)
+            self.assertNotIn("content_hash", json.dumps(request))
+
+    def test_gateway_context_command_stderr_is_sanitized_in_telemetry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "gateway-state.json"
+
+            def fake_route(prompt: str, model: str, max_tokens: int, temperature: float) -> tuple[dict[str, object], dict[str, str]]:
+                return {
+                    "text": "sanitized context failure ok",
+                    "target": "llamacpp",
+                    "reason_code": "default_local",
+                    "reason": "default - use local llama.cpp",
+                    "latency_ms": 12,
+                }, {"X-LMM-Route-Mode": "routed"}
+
+            failed = subprocess.CompletedProcess(
+                args=["ctx-bridge"],
+                returncode=1,
+                stdout="",
+                stderr="SECRET_CONTEXT_COMMAND_STDERR",
+            )
+            gateway = self.load_gateway_module()
+            with mock.patch.dict(os.environ, {
+                "LMM_GATEWAY_STATE_FILE": str(state_path),
+                "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
+                "LMM_CONTEXT_MCP_COMMAND": "ctx-bridge",
+            }, clear=False):
+                with mock.patch.object(gateway, "run_context_command", return_value=failed):
+                    with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+                        server = self.start_gateway_server(gateway_module=gateway)
+                        self.post_json(
+                            f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                            {
+                                "model": "privacy-model",
+                                "messages": [{"role": "user", "content": "hello"}],
+                            },
+                        )
+
+            telemetry_text = state_path.read_text(encoding="utf-8")
+            telemetry = json.loads(telemetry_text)
+            recent = telemetry["recent_requests"][0]
+            self.assertEqual(recent["context_error"], "context_command_failed")
+            self.assertNotIn("SECRET_CONTEXT_COMMAND_STDERR", telemetry_text)
 
     def test_gateway_glyph_encoding_failure_uses_raw_context_fallback(self) -> None:
         captured: dict[str, object] = {}
@@ -2063,6 +2283,50 @@ class Phase0ContractTests(unittest.TestCase):
         self.assertEqual(captured["model"], "stream-model")
         self.assertEqual(captured["max_tokens"], 42)
         self.assertEqual(captured["temperature"], 0.1)
+
+    def test_gateway_streaming_sends_headers_before_first_content_chunk(self) -> None:
+        gateway = self.load_gateway_module()
+        events: list[str] = []
+
+        class RecordingWriter:
+            def write(self, data: bytes) -> int:
+                events.append(data.decode("utf-8"))
+                return len(data)
+
+            def flush(self) -> None:
+                events.append("flush")
+
+        class FakeHandler:
+            def __init__(self) -> None:
+                self.wfile = RecordingWriter()
+
+            def send_response(self, status: int) -> None:
+                events.append(f"status:{status}")
+
+            def send_header(self, key: str, value: str) -> None:
+                events.append(f"header:{key}")
+
+            def end_headers(self) -> None:
+                events.append("end_headers")
+
+        def delayed_chunks() -> object:
+            events.append("first_content_requested")
+            yield "late content"
+
+        text, success, error_message, _latency_ms = gateway.stream_completion(
+            FakeHandler(),
+            started=time.time(),
+            model="stream-order-model",
+            chunks=delayed_chunks(),
+            headers={},
+        )
+
+        role_index = next(index for index, item in enumerate(events) if '"role": "assistant"' in item)
+        first_content_index = events.index("first_content_requested")
+        self.assertLess(role_index, first_content_index)
+        self.assertEqual(text, "late content")
+        self.assertTrue(success)
+        self.assertEqual(error_message, "")
 
     def test_gateway_streaming_uses_same_context_enrichment_path(self) -> None:
         captured: dict[str, object] = {}
@@ -2262,6 +2526,8 @@ class Phase0ContractTests(unittest.TestCase):
                 action = "ANALYZE"
 
             class FakeLlamaCpp:
+                opens_stream_before_return = True
+
                 def stream_generate(self, prompt: str, **kwargs: object) -> object:
                     yield "local stream"
 
@@ -2274,6 +2540,32 @@ class Phase0ContractTests(unittest.TestCase):
                     self.assertEqual(routed["target"], "llamacpp")
                     self.assertEqual(routed["reason_code"], "complex_action_local_stream")
                     self.assertEqual(list(chunks), ["local stream"])
+        finally:
+            sys.path[:] = original_path
+
+    def test_glyphos_route_stream_generator_failure_happens_before_return(self) -> None:
+        integration_root = str(ROOT_DIR / "integrations" / "public-glyphos-ai-compute")
+        original_path = list(sys.path)
+        try:
+            if integration_root not in sys.path:
+                sys.path.insert(0, integration_root)
+            from glyphos_ai.ai_compute.router import AdaptiveRouter  # type: ignore
+
+            class Packet:
+                psi_coherence = 0.9
+                action = "QUERY"
+
+            class FailingLlamaCpp:
+                def stream_generate(self, prompt: str, **kwargs: object) -> object:
+                    raise RuntimeError("open failed")
+                    yield "unreachable"
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                telemetry_path = str(Path(tmpdir) / "glyphos-routing.json")
+                with mock.patch.dict(os.environ, {"LLAMA_MODEL_GLYPHOS_TELEMETRY_FILE": telemetry_path}, clear=False):
+                    router = AdaptiveRouter(llamacpp_client=FailingLlamaCpp())
+                    with self.assertRaises(RuntimeError):
+                        router.route_stream(Packet(), prompt="fail before sse")
         finally:
             sys.path[:] = original_path
 

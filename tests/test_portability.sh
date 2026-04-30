@@ -225,6 +225,7 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$install_script" "Would you like to check/install build dependencies"
     assert_contains "$install_script" "llama-model sync-opencode"
     assert_contains "$install_script" "glyphos_openai_gateway.py"
+    assert_contains "$install_script" "context_mcp_bridge.py"
     assert_contains "$install_script" "llama-model sync-openclaw"
     assert_contains "$install_script" "llama-model sync-claude"
     assert_contains "$install_script" "llama-model sync-glyphos"

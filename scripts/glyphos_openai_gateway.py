@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import shlex
+import signal
 import sys
 import subprocess
 import time
@@ -104,6 +105,31 @@ def http_json(method: str, url: str, *, payload: dict[str, Any] | None = None, t
         return int(exc.code), parsed if isinstance(parsed, dict) else {"error": raw}
     except URLError as exc:
         raise RuntimeError(str(exc)) from exc
+
+
+def run_context_command(command: list[str], *, input_text: str, timeout_seconds: float, cwd: str) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(input_text, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        stdout, stderr = proc.communicate()
+        raise subprocess.TimeoutExpired(command, timeout_seconds, output=stdout, stderr=stderr) from exc
+    return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
 
 
 def state_file() -> Path:
@@ -250,6 +276,34 @@ def context_to_text(context: Any) -> str:
     return compact_json(context)
 
 
+def message_summary(messages: Any) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "count": 0,
+        "roles": {},
+        "chars": 0,
+    }
+    if not isinstance(messages, list):
+        return summary
+    roles: dict[str, int] = {}
+    chars = 0
+    canonical: list[dict[str, Any]] = []
+    for item in messages:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role", "user")).strip() or "user"
+        content = item.get("content", "")
+        content_chars = len(compact_json(content) if not isinstance(content, str) else content)
+        roles[role] = roles.get(role, 0) + 1
+        chars += content_chars
+        canonical.append({"role": role, "chars": content_chars})
+    summary.update({
+        "count": len(canonical),
+        "roles": roles,
+        "chars": chars,
+    })
+    return summary
+
+
 def command_context_from_output(raw: str) -> Any:
     raw = raw.strip()
     if not raw:
@@ -261,8 +315,13 @@ def command_context_from_output(raw: str) -> Any:
     if not isinstance(parsed, dict):
         return parsed
     for key in ("retrieved_context", "context", "text", "markdown"):
-        if parsed.get(key):
-            return parsed[key]
+        value = parsed.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+        if isinstance(value, dict) and value:
+            return value
+        if isinstance(value, list) and value:
+            return value
     items = parsed.get("items") or parsed.get("results") or parsed.get("snippets")
     if isinstance(items, list):
         pieces: list[str] = []
@@ -275,7 +334,7 @@ def command_context_from_output(raw: str) -> Any:
             elif item:
                 pieces.append(str(item))
         return "\n".join(pieces)
-    return parsed
+    return ""
 
 
 def retrieve_context(payload: dict[str, Any], prompt: str, *, model: str, stream: bool) -> dict[str, Any]:
@@ -310,6 +369,10 @@ def retrieve_context(payload: dict[str, Any], prompt: str, *, model: str, stream
 
     command = os.environ.get("LMM_CONTEXT_MCP_COMMAND", "").strip()
     if not command:
+        bridge = APP_ROOT / "scripts" / "context_mcp_bridge.py"
+        if bridge.is_file():
+            command = f"{sys.executable} {bridge}"
+    if not command:
         result.update({
             "status": "available_no_context",
             "source": "context-mode-mcp",
@@ -324,22 +387,17 @@ def retrieve_context(payload: dict[str, Any], prompt: str, *, model: str, stream
         "limit": 8,
         "model": model,
         "stream": stream,
-        "messages": payload.get("messages", []),
-        "metadata": payload.get("metadata", {}),
+        "message_summary": message_summary(payload.get("messages", [])),
     }
     try:
-        completed = subprocess.run(
+        completed = run_context_command(
             shlex.split(command),
-            input=compact_json(request_payload),
-            text=True,
-            capture_output=True,
-            timeout=timeout_ms / 1000,
+            input_text=compact_json(request_payload),
+            timeout_seconds=timeout_ms / 1000,
             cwd=str(root),
-            check=False,
         )
         if completed.returncode != 0:
-            stderr = completed.stderr.strip() or f"exit {completed.returncode}"
-            result.update({"status": "error", "source": "context-mode-mcp", "error": stderr[:400]})
+            result.update({"status": "error", "source": "context-mode-mcp", "error": "context_command_failed"})
             return result
         text = context_to_text(command_context_from_output(completed.stdout))
         result.update({
@@ -353,7 +411,7 @@ def retrieve_context(payload: dict[str, Any], prompt: str, *, model: str, stream
         result.update({"status": "timeout", "source": "context-mode-mcp", "error": f"timeout after {timeout_ms}ms"})
         return result
     except Exception as exc:
-        result.update({"status": "error", "source": "context-mode-mcp", "error": str(exc)[:400]})
+        result.update({"status": "error", "source": "context-mode-mcp", "error": exc.__class__.__name__})
         return result
     finally:
         result["latency_ms"] = round((time.perf_counter() - started) * 1000)
@@ -490,15 +548,17 @@ def assemble_prompt(raw_prompt: str, context_result: dict[str, Any], encoding_re
 
 
 def prepare_gateway_pipeline(payload: dict[str, Any], raw_prompt: str, *, model: str, stream: bool) -> tuple[str, dict[str, Any]]:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
     request_lifecycle = {
-        "raw_messages": payload.get("messages", []),
+        "messages": message_summary(payload.get("messages", [])),
         "model": model,
         "temperature": payload.get("temperature", 0.7),
         "max_tokens": payload.get("max_tokens", 1000),
         "stream": stream,
         "harness_identity": "",
-        "workspace": payload.get("workspace") or (payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}).get("workspace", ""),
-        "session": payload.get("session") or (payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}).get("session", ""),
+        "workspace_present": bool(payload.get("workspace") or metadata.get("workspace")),
+        "session_present": bool(payload.get("session") or metadata.get("session")),
+        "metadata_keys": sorted(str(key) for key in metadata.keys()),
     }
     context_result = retrieve_context(payload, raw_prompt, model=model, stream=stream)
     encoding_result = glyph_encode_context(str(context_result.get("context") or "")) if context_result.get("used") else glyph_encode_context("")
@@ -644,12 +704,6 @@ def stream_completion(
 ) -> tuple[str, bool, str, int]:
     collected: list[str] = []
     iterator = iter(chunks)
-    try:
-        first_chunk = next(iterator)
-    except StopIteration:
-        first_chunk = ""
-    except Exception as exc:
-        raise RuntimeError(str(exc)) from exc
     base = {
         "id": f"chatcmpl-lmm-{int(started * 1000)}",
         "object": "chat.completion.chunk",
@@ -666,10 +720,6 @@ def stream_completion(
         handler.end_headers()
         handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]}))
         handler.wfile.flush()
-        for chunk in ([first_chunk] if first_chunk else []):
-            collected.append(str(chunk))
-            handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {"content": str(chunk)}, "finish_reason": None}]}))
-            handler.wfile.flush()
         for chunk in iterator:
             if not chunk:
                 continue

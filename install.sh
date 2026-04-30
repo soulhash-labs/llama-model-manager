@@ -234,6 +234,10 @@ require_source_tree() {
         printf 'error: installer payload is missing scripts/glyphos_openai_gateway.py\n' >&2
         missing=1
     }
+    [[ -f "$ROOT_DIR/scripts/context_mcp_bridge.py" ]] || {
+        printf 'error: installer payload is missing scripts/context_mcp_bridge.py\n' >&2
+        missing=1
+    }
     [[ -d "$ROOT_DIR/integrations/public-glyphos-ai-compute/glyphos_ai" ]] || {
         printf 'error: installer payload is missing integrations/public-glyphos-ai-compute/glyphos_ai\n' >&2
         missing=1
@@ -260,7 +264,7 @@ rm -rf "$APP_SHARE_DIR/web"
 cp -a "$ROOT_DIR/web" "$APP_SHARE_DIR/web"
 rm -rf "$APP_SHARE_DIR/scripts"
 cp -a "$ROOT_DIR/scripts" "$APP_SHARE_DIR/scripts"
-chmod 0755 "$APP_SHARE_DIR/scripts/glyphos_openai_gateway.py" "$APP_SHARE_DIR/scripts/integration_sync.py" 2>/dev/null || true
+chmod 0755 "$APP_SHARE_DIR/scripts/glyphos_openai_gateway.py" "$APP_SHARE_DIR/scripts/context_mcp_bridge.py" "$APP_SHARE_DIR/scripts/integration_sync.py" 2>/dev/null || true
 rm -rf "$APP_SHARE_DIR/integrations"
 cp -a "$ROOT_DIR/integrations" "$APP_SHARE_DIR/integrations"
 clean_python_cache "$APP_SHARE_DIR/integrations"
