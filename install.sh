@@ -44,6 +44,95 @@ clean_python_cache() {
     find "$target" -type f -name '*.pyc' -delete 2>/dev/null || true
 }
 
+defaults_has_key() {
+    local key="$1"
+    local file="$2"
+    grep -Eq "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file"
+}
+
+migrate_routed_gateway_defaults() {
+    local file="$CONFIG_DIR/defaults.env"
+    local changed="no"
+    local backup=""
+    local tmp=""
+
+    [[ -f "$file" ]] || return 0
+
+    if grep -Eq '^[[:space:]]*(export[[:space:]]+)?LLAMA_MODEL_OPENCODE_GATEWAY_BASE_URL=' "$file"; then
+        changed="yes"
+    fi
+    for key in LLAMA_MODEL_HARNESS_MODE LLAMA_MODEL_GATEWAY_HOST LLAMA_MODEL_GATEWAY_PORT LLAMA_MODEL_GATEWAY_LOG; do
+        if ! defaults_has_key "$key" "$file"; then
+            changed="yes"
+        fi
+    done
+    [[ "$changed" == "yes" ]] || return 0
+
+    backup="${file}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+    cp "$file" "$backup"
+    tmp="${file}.tmp.$$"
+    grep -Ev '^[[:space:]]*(export[[:space:]]+)?LLAMA_MODEL_OPENCODE_GATEWAY_BASE_URL=' "$backup" >"$tmp" || true
+    if ! defaults_has_key LLAMA_MODEL_HARNESS_MODE "$tmp"; then
+        printf '\n# Harness routing. Routed mode points OpenAI-compatible clients at the LMM gateway.\n' >>"$tmp"
+        printf 'LLAMA_MODEL_HARNESS_MODE=routed\n' >>"$tmp"
+    fi
+    if ! defaults_has_key LLAMA_MODEL_GATEWAY_HOST "$tmp"; then
+        printf 'LLAMA_MODEL_GATEWAY_HOST=127.0.0.1\n' >>"$tmp"
+    fi
+    if ! defaults_has_key LLAMA_MODEL_GATEWAY_PORT "$tmp"; then
+        printf 'LLAMA_MODEL_GATEWAY_PORT=4010\n' >>"$tmp"
+    fi
+    if ! defaults_has_key LLAMA_MODEL_GATEWAY_LOG "$tmp"; then
+        printf 'LLAMA_MODEL_GATEWAY_LOG=$HOME/models/lmm-gateway.log\n' >>"$tmp"
+    fi
+    mv "$tmp" "$file"
+    printf 'migrated routed gateway defaults in %s\n' "$(compact_home_path "$file")"
+    printf 'backup: %s\n' "$(compact_home_path "$backup")"
+}
+
+post_install_sync_clients() {
+    local synced="no"
+    local opencode_config="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"
+    local openclaw_config="$HOME/.openclaw/openclaw.json"
+    local glyphos_config="$HOME/.glyphos/config.yaml"
+    local state_file="${XDG_STATE_HOME:-$HOME/.local/state}/llama-server/current.env"
+    local saved_model=""
+
+    if [[ -f "$state_file" ]]; then
+        saved_model="$(CURRENT_MODEL=""; source "$state_file" 2>/dev/null || true; printf '%s\n' "${CURRENT_MODEL:-}")"
+    fi
+    if [[ -z "$saved_model" || ! -f "$saved_model" ]]; then
+        printf 'post-install sync skipped: no saved current model is resolvable yet\n'
+        return 0
+    fi
+
+    if [[ -f "$opencode_config" ]]; then
+        if "$BIN_DIR/llama-model" sync-opencode >/dev/null 2>&1; then
+            printf 'post-install synced opencode to routed gateway\n'
+            synced="yes"
+        else
+            printf 'post-install warning: opencode sync failed; run llama-model sync-opencode after resolving the current model\n' >&2
+        fi
+    fi
+    if [[ -f "$openclaw_config" ]]; then
+        if "$BIN_DIR/llama-model" sync-openclaw >/dev/null 2>&1; then
+            printf 'post-install synced OpenClaw to routed gateway\n'
+            synced="yes"
+        else
+            printf 'post-install warning: OpenClaw sync failed; run llama-model sync-openclaw after resolving the current model\n' >&2
+        fi
+    fi
+    if [[ -f "$glyphos_config" ]]; then
+        if "$BIN_DIR/llama-model" sync-glyphos >/dev/null 2>&1; then
+            printf 'post-install synced GlyphOS to the backend endpoint\n'
+            synced="yes"
+        else
+            printf 'post-install warning: GlyphOS sync failed; run llama-model sync-glyphos after resolving the current model\n' >&2
+        fi
+    fi
+    [[ "$synced" == "yes" ]] || printf 'post-install sync skipped: no existing opencode, OpenClaw, or GlyphOS configs found\n'
+}
+
 require_source_tree() {
     local missing=0
 
@@ -103,6 +192,7 @@ if [[ ! -f "$CONFIG_DIR/defaults.env" ]]; then
     printf 'installed %s\n' "$CONFIG_DIR/defaults.env"
 else
     printf 'kept existing %s\n' "$CONFIG_DIR/defaults.env"
+    migrate_routed_gateway_defaults
     if ! grep -Eq '^[[:space:]]*GGML_CUDA_ENABLE_UNIFIED_MEMORY=' "$CONFIG_DIR/defaults.env"; then
         printf 'note: existing defaults.env does not include the experimental CUDA unified-memory toggle\n'
         printf 'note: add GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 to %s/defaults.env if you want to test RAM fallback for oversized CUDA context/KV allocations\n' "$(compact_home_path "$CONFIG_DIR")"
@@ -130,6 +220,8 @@ if [[ -d "$DESKTOP_DIR" ]]; then
         "$ROOT_DIR/desktop/llama-model-manager.desktop" >"$DESKTOP_DIR/Llama Model Manager.desktop"
     chmod 0755 "$DESKTOP_DIR/Llama Model Manager.desktop"
 fi
+
+post_install_sync_clients
 
 printf '\nInstalled llama-model-manager.\n'
 printf 'Next steps:\n'
@@ -161,6 +253,10 @@ printf ' 10. Sync GlyphOS AI Compute if you use it: llama-model sync-glyphos\n'
 printf ' 11. Bundled public GlyphOS AI Compute package: %s/integrations/public-glyphos-ai-compute\n' "$(compact_home_path "$APP_SHARE_DIR")"
 printf ' 12. Experimental CUDA unified-memory fallback: set GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 in %s/defaults.env to try larger context/KV/compute allocations through system RAM\n' "$(compact_home_path "$CONFIG_DIR")"
 printf '     on discrete GPUs this can be much slower; usually pair it with LLAMA_SERVER_PARALLEL=1\n'
+printf 'Routing endpoints:\n'
+printf '  harness endpoint: http://127.0.0.1:4010/v1\n'
+printf '  backend endpoint: http://127.0.0.1:8081/v1\n'
+printf '  default route mode: LLAMA_MODEL_HARNESS_MODE=routed\n'
 
 if [[ -t 0 && -t 1 ]]; then
     printf '\nWould you like to check/install build dependencies and compile a local llama.cpp runtime now? [Y/n] '

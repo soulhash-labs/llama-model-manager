@@ -228,6 +228,11 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$install_script" "llama-model sync-openclaw"
     assert_contains "$install_script" "llama-model sync-claude"
     assert_contains "$install_script" "llama-model sync-glyphos"
+    assert_contains "$install_script" "LLAMA_MODEL_OPENCODE_GATEWAY_BASE_URL"
+    assert_contains "$install_script" "migrated routed gateway defaults"
+    assert_contains "$install_script" "post-install synced opencode to routed gateway"
+    assert_contains "$install_script" "harness endpoint: http://127.0.0.1:4010/v1"
+    assert_contains "$install_script" "backend endpoint: http://127.0.0.1:8081/v1"
     assert_contains "$install_script" "require_source_tree"
     assert_contains "$install_script" "installer payload is missing integrations/public-glyphos-ai-compute/glyphos_ai"
     assert_contains "$install_script" "refreshed bundled integrations"
@@ -605,16 +610,74 @@ test_install_next_steps_sanitize_home_paths() {
     assert_not_contains "$next_steps" "$tmp/home"
 }
 
+test_install_resyncs_existing_clients_when_saved_model_is_resolvable() {
+    local tmp
+    local model
+    local output
+    local opencode_config
+    local openclaw_config
+    local glyphos_config
+
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/home/Desktop" "$tmp/config/llama-server" "$tmp/config/opencode" "$tmp/state/llama-server" "$tmp/state/opencode" "$tmp/data" "$tmp/models" "$tmp/home/.openclaw" "$tmp/home/.glyphos"
+    model="$tmp/models/Qwen3.5-9B-Q8_0.gguf"
+    : >"$model"
+    cat >"$tmp/config/llama-server/defaults.env" <<'EOF'
+LLAMA_SERVER_HOST=127.0.0.1
+LLAMA_SERVER_PORT=19081
+LLAMA_MODEL_OPENCODE_GATEWAY_BASE_URL=http://127.0.0.1:4010/v1
+EOF
+    cat >"$tmp/state/llama-server/current.env" <<EOF
+CURRENT_ALIAS=qwen35-9b-q8
+CURRENT_MODEL=$model
+CURRENT_CONTEXT=32768
+EOF
+    cat >"$tmp/config/opencode/opencode.json" <<'EOF'
+{
+  "provider": {
+    "oldgpu": {
+      "options": {
+        "baseURL": "http://127.0.0.1:8080/v1"
+      }
+    }
+  }
+}
+EOF
+    printf '{}\n' >"$tmp/home/.openclaw/openclaw.json"
+    printf 'ai_compute: {}\n' >"$tmp/home/.glyphos/config.yaml"
+
+    output="$(env \
+        HOME="$tmp/home" \
+        XDG_CONFIG_HOME="$tmp/config" \
+        XDG_STATE_HOME="$tmp/state" \
+        XDG_DATA_HOME="$tmp/data" \
+        bash "$ROOT_DIR/install.sh")"
+    opencode_config="$(cat "$tmp/config/opencode/opencode.json")"
+    openclaw_config="$(cat "$tmp/home/.openclaw/openclaw.json")"
+    glyphos_config="$(cat "$tmp/home/.glyphos/config.yaml")"
+
+    assert_contains "$output" "post-install synced opencode to routed gateway"
+    assert_contains "$output" "post-install synced OpenClaw to routed gateway"
+    assert_contains "$output" "post-install synced GlyphOS to the backend endpoint"
+    assert_contains "$opencode_config" '"baseURL": "http://127.0.0.1:4010/v1"'
+    assert_not_contains "$opencode_config" '127.0.0.1:8080'
+    assert_contains "$openclaw_config" '"baseUrl": "http://127.0.0.1:4010/v1"'
+    assert_contains "$glyphos_config" 'url: http://127.0.0.1:19081/v1'
+}
+
 
 test_install_reports_unified_memory_upgrade_note_for_existing_defaults() {
     local tmp
     local output
+    local defaults_after
 
     tmp="$(mktemp -d)"
     mkdir -p "$tmp/home/Desktop" "$tmp/config/llama-server" "$tmp/data"
     cat >"$tmp/config/llama-server/defaults.env" <<'EOF'
 LLAMA_SERVER_CONTEXT=128000
 LLAMA_SERVER_PARALLEL=1
+LLAMA_SERVER_THREADS=12
+LLAMA_MODEL_OPENCODE_GATEWAY_BASE_URL=http://127.0.0.1:4010/v1
 EOF
 
     output="$(env \
@@ -626,6 +689,18 @@ EOF
     assert_contains "$output" "existing defaults.env does not include the experimental CUDA unified-memory toggle"
     assert_contains "$output" "GGML_CUDA_ENABLE_UNIFIED_MEMORY=1"
     assert_contains "$output" "should usually be paired with LLAMA_SERVER_PARALLEL=1"
+    assert_contains "$output" "migrated routed gateway defaults"
+    assert_contains "$output" "backup: "
+    defaults_after="$(cat "$tmp/config/llama-server/defaults.env")"
+    assert_contains "$defaults_after" "LLAMA_SERVER_CONTEXT=128000"
+    assert_contains "$defaults_after" "LLAMA_SERVER_PARALLEL=1"
+    assert_contains "$defaults_after" "LLAMA_SERVER_THREADS=12"
+    assert_contains "$defaults_after" "LLAMA_MODEL_HARNESS_MODE=routed"
+    assert_contains "$defaults_after" "LLAMA_MODEL_GATEWAY_HOST=127.0.0.1"
+    assert_contains "$defaults_after" "LLAMA_MODEL_GATEWAY_PORT=4010"
+    assert_contains "$defaults_after" 'LLAMA_MODEL_GATEWAY_LOG=$HOME/models/lmm-gateway.log'
+    assert_not_contains "$defaults_after" "LLAMA_MODEL_OPENCODE_GATEWAY_BASE_URL"
+    compgen -G "$tmp/config/llama-server/defaults.env.bak.*" >/dev/null || fail "expected defaults.env backup"
 }
 
 test_cuda_unified_memory_preserves_requested_context_and_exports_env() {
@@ -955,6 +1030,38 @@ PY
     assert_contains "$output" "dashboard_api_guidance: Live dashboard cannot see bundled GlyphOS"
 }
 
+test_doctor_reports_legacy_route_state() {
+    local tmp
+    local output
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    cat >>"$tmp/config/llama-server/defaults.env" <<'EOF'
+LLAMA_MODEL_OPENCODE_GATEWAY_BASE_URL=http://127.0.0.1:4010/v1
+EOF
+    mkdir -p "$tmp/config/opencode"
+    cat >"$tmp/config/opencode/opencode.json" <<'EOF'
+{
+  "model": "oldgpu/example",
+  "provider": {
+    "oldgpu": {
+      "options": {
+        "baseURL": "http://127.0.0.1:8080/v1"
+      }
+    }
+  }
+}
+EOF
+
+    output="$(LLAMA_MODEL_WEB_PORT=9 run_doctor "$tmp")"
+
+    assert_contains "$output" "legacy_opencode_gateway_default: yes"
+    assert_contains "$output" "harness_mode_configured: no"
+    assert_contains "$output" "stale_opencode_providers: oldgpu"
+    assert_contains "$output" "route_state: mixed-legacy"
+    assert_contains "$output" "route_guidance: Run install.sh to migrate defaults"
+}
+
 test_dashboard_service_unit_rendering() {
     local unit
 
@@ -1094,6 +1201,50 @@ EOF
     assert_contains "$state_json" '"sessionTimeoutObservedMs": 1800000'
     assert_contains "$state_json" '"pendingToolAbortGuidance"'
     assert_contains "$state_json" '"favorite"'
+}
+
+test_sync_opencode_removes_stale_local_provider_blocks() {
+    local tmp
+    local config
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    mkdir -p "$tmp/models" "$tmp/config/opencode" "$tmp/state/opencode"
+    : >"$tmp/models/Qwen3.5-9B-Q8_0.gguf"
+    cat >"$tmp/config/llama-server/models.tsv" <<EOF
+# alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes
+qwen35-9b-q8	$tmp/models/Qwen3.5-9B-Q8_0.gguf		32768
+EOF
+    cat >"$tmp/config/opencode/opencode.json" <<'EOF'
+{
+  "provider": {
+    "llamacpp": {
+      "options": {
+        "baseURL": "http://127.0.0.1:4010/v1"
+      }
+    },
+    "llama-server-gpu": {
+      "options": {
+        "baseURL": "http://127.0.0.1:8080/v1"
+      }
+    },
+    "remote": {
+      "options": {
+        "baseURL": "https://example.invalid/v1"
+      }
+    }
+  }
+}
+EOF
+
+    run_cli "$tmp" sync-opencode --preset balanced qwen35-9b-q8 >/dev/null
+    config="$(cat "$tmp/config/opencode/opencode.json")"
+
+    assert_contains "$config" '"llamacpp"'
+    assert_contains "$config" '"remote"'
+    assert_not_contains "$config" '"llama-server-gpu"'
+    assert_not_contains "$config" '127.0.0.1:8080'
+    assert_contains "$config" '"baseURL": "http://127.0.0.1:4010/v1"'
 }
 
 test_sync_opencode_long_run_preset() {
@@ -1665,6 +1816,7 @@ main() {
     test_startup_log_classifier_emits_actionable_categories
     test_add_blocks_obvious_mmproj_family_mismatch
     test_install_next_steps_sanitize_home_paths
+    test_install_resyncs_existing_clients_when_saved_model_is_resolvable
     test_install_reports_unified_memory_upgrade_note_for_existing_defaults
     test_system_memory_influences_fit_posture
     test_cuda_unified_memory_preserves_requested_context_and_exports_env
@@ -1674,12 +1826,14 @@ main() {
     test_registry_parsing_preserves_empty_columns
     test_doctor_tolerates_missing_log_markers
     test_doctor_reports_install_health
+    test_doctor_reports_legacy_route_state
     test_dashboard_service_unit_rendering
     test_dashboard_service_status_reports_unsupported_without_systemctl
     test_doctor_reports_external_systemd_owner
     test_bundled_glyphos_public_package_exists
     test_integration_sync_cli_glyphos_entrypoint
     test_sync_opencode_updates_config_and_state
+    test_sync_opencode_removes_stale_local_provider_blocks
     test_sync_opencode_long_run_preset
     test_sync_opencode_compaction_override
     test_sync_opencode_direct_mode

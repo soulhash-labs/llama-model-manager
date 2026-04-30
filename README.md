@@ -289,6 +289,7 @@ These integrations are optional. The default product behavior remains the local 
 - `llama-model sync-opencode` updates the `llamacpp` provider endpoint, default model, and local model-state wiring to match `llama-model current`. The default route mode is now `routed`, which points OpenAI-compatible harnesses at the LMM gateway on `http://127.0.0.1:4010/v1`.
 - Routed mode means `harness -> LMM gateway -> GlyphOS AI Compute -> local llama.cpp backend`. Use `llama-model sync-opencode --mode direct` or `llama-model sync-openclaw --mode direct` when you intentionally want to bypass Context + GlyphOS and call the backend `8081/v1` endpoint.
 - Manage the gateway with `llama-model gateway start|stop|restart|status|logs`. The backend llama.cpp endpoint remains available as an advanced bypass path.
+- Upgrades migrate legacy `LLAMA_MODEL_OPENCODE_GATEWAY_BASE_URL` defaults into `LLAMA_MODEL_HARNESS_MODE=routed` plus `LLAMA_MODEL_GATEWAY_HOST/PORT/LOG`, write a timestamped defaults backup, and attempt a non-fatal resync for existing opencode, OpenClaw, and GlyphOS configs when a saved/running model is resolvable.
 - `llama-model sync-opencode --preset long-run` also writes model-aware `compaction.reserved` headroom. For 128k-token local contexts it reserves `64000` tokens, which avoids the observed long-session `Preparing write...` stall pattern where opencode aborts a pending tool after a parent message timeout or compaction overflow.
 - `OPENCODE_COMPACTION_RESERVED=N` overrides the generated reserve. LMM records provider timeout, chunk timeout, compaction reserve, and the observed 1800s message-timeout caveat in `~/.local/state/opencode/model.json` under `llamaModelManager.opencodeSync`.
 - `llama-model sync-openclaw` updates `~/.openclaw/openclaw.json` or `~/.openclaw-<profile>/openclaw.json` so OpenClaw points at the routed LMM gateway by default.
@@ -301,6 +302,8 @@ These integrations are optional. The default product behavior remains the local 
 ## Context Mode MCP
 
 The optional Context Mode MCP package lives under `integrations/context-mode-mcp/`. It is intended for local development workflows that need indexed context, compact retrieval, lifecycle diagnostics, and MCP tool execution helpers.
+
+Current gateway requests report Context MCP availability, but the gateway does not yet invoke a stable Context retrieval API for every request. Treat Context status as readiness/diagnostic state, not proof that every routed inference was context-enriched.
 
 Common commands:
 

@@ -113,6 +113,7 @@ Client integrations:
   Run `llama-model sync-opencode --preset balanced|long-run` to align it with the active LMM gateway and model.
   Routed mode is the default: harness -> LMM gateway -> GlyphOS AI Compute -> local llama.cpp backend. Use `--mode direct` to bypass the gateway and write the backend endpoint directly.
   Manage the gateway with `llama-model gateway start|stop|restart|status|logs`.
+  Upgrades migrate legacy LLAMA_MODEL_OPENCODE_GATEWAY_BASE_URL defaults into LLAMA_MODEL_HARNESS_MODE plus LLAMA_MODEL_GATEWAY_HOST/PORT/LOG, and doctor reports route_state when mixed legacy/direct/routed config is detected.
   The long-run preset also writes top-level compaction headroom (`compaction.reserved`) so large tool-heavy sessions compact before write/edit calls run out of context. Override with OPENCODE_COMPACTION_RESERVED=N if needed.
 
   OpenClaw keeps its provider config under ~/.openclaw/openclaw.json or ~/.openclaw-<profile>/openclaw.json.
@@ -124,6 +125,7 @@ Client integrations:
   GlyphOS AI Compute can target the same local llama.cpp endpoint.
   A bundled public copy lives under integrations/public-glyphos-ai-compute/ in the repo and under ~/.local/share/llama-model-manager/integrations/ after install.
   Run `llama-model sync-glyphos` to align ~/.glyphos/config.yaml with the active local runtime. Set LLAMA_MODEL_SYNC_GLYPHOS=1 to update it after successful switches.
+  Context MCP availability is diagnostic today; gateway requests do not yet invoke a stable Context retrieval API for every routed inference.
 
 Legacy UI:
   Set LLAMA_MODEL_UI=zenity if you want to force the old Zenity launcher.

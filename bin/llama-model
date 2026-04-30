@@ -3161,6 +3161,11 @@ show_doctor() {
     local gateway_url="$(lmm_gateway_api_base)"
     local gateway_backend_api_base="$(upstream_api_base)"
     local gateway_mode_default
+    local legacy_opencode_gateway_default="no"
+    local harness_mode_configured="yes"
+    local route_state="routed"
+    local route_guidance=""
+    local stale_opencode_providers=""
 
     pid="$(find_pid)"
     if [[ -n "$pid" ]]; then
@@ -3219,6 +3224,65 @@ show_doctor() {
     [[ -f "$INSTALLED_APP_ROOT/scripts/glyphos_openai_gateway.py" ]] && installed_gateway_script="yes"
     [[ -d "$INSTALLED_APP_ROOT/integrations/public-glyphos-ai-compute/glyphos_ai" ]] && bundled_glyphos="yes"
     gateway_mode_default="$(normalize_harness_mode "$LLAMA_MODEL_HARNESS_MODE")"
+    if [[ -f "$DEFAULTS_FILE" ]]; then
+        if grep -Eq '^[[:space:]]*(export[[:space:]]+)?LLAMA_MODEL_OPENCODE_GATEWAY_BASE_URL=' "$DEFAULTS_FILE"; then
+            legacy_opencode_gateway_default="yes"
+        fi
+        if ! grep -Eq '^[[:space:]]*(export[[:space:]]+)?LLAMA_MODEL_HARNESS_MODE=' "$DEFAULTS_FILE"; then
+            harness_mode_configured="no"
+        fi
+    else
+        harness_mode_configured="no"
+    fi
+    if [[ -f "$OPENCODE_CONFIG_FILE" ]]; then
+        stale_opencode_providers="$(python3 - "$OPENCODE_CONFIG_FILE" "$gateway_url" "$gateway_backend_api_base" "$gateway_mode_default" <<'PY' 2>/dev/null || true
+import json
+import sys
+from urllib.parse import urlparse
+
+path, gateway_url, backend_url, route_mode = sys.argv[1:5]
+try:
+    data = json.load(open(path, encoding="utf-8"))
+except Exception:
+    print("unreadable")
+    raise SystemExit(0)
+providers = data.get("provider") if isinstance(data, dict) else {}
+if not isinstance(providers, dict):
+    print("")
+    raise SystemExit(0)
+selected = str(data.get("model") or "")
+selected_provider = selected.split("/", 1)[0] if "/" in selected else ""
+gateway = urlparse(gateway_url).netloc
+backend = urlparse(backend_url).netloc
+stale = []
+for name, provider in providers.items():
+    if not isinstance(provider, dict):
+        continue
+    options = provider.get("options")
+    if not isinstance(options, dict):
+        continue
+    base = str(options.get("baseURL") or options.get("baseUrl") or "")
+    netloc = urlparse(base).netloc
+    if netloc.endswith(":8080") or (route_mode == "routed" and name == selected_provider and netloc == backend):
+        stale.append(str(name))
+    elif route_mode == "routed" and name == "llamacpp" and netloc and netloc != gateway:
+        stale.append(str(name))
+print(",".join(sorted(set(stale))))
+PY
+)"
+    fi
+    if [[ "$legacy_opencode_gateway_default" == "yes" || -n "$stale_opencode_providers" ]]; then
+        route_state="mixed-legacy"
+        route_guidance="Run install.sh to migrate defaults, then run llama-model sync-opencode and llama-model sync-openclaw to align harnesses with the routed gateway."
+    elif [[ "$gateway_mode_default" == "direct" ]]; then
+        route_state="direct"
+        route_guidance="Direct mode is active; harnesses bypass the LMM gateway and Context + GlyphOS until LLAMA_MODEL_HARNESS_MODE=routed or --mode routed is used."
+    elif [[ "$harness_mode_configured" == "no" ]]; then
+        route_state="routed-default-missing"
+        route_guidance="LLAMA_MODEL_HARNESS_MODE is not written in defaults.env; rerun install.sh to persist routed gateway defaults."
+    else
+        route_state="routed"
+    fi
     if gateway_status_text="$(lmm_gateway_status 2>/dev/null)"; then
         gateway_running="$(printf '%s\n' "$gateway_status_text" | awk -F': ' '/^running: / { print $2; exit }')"
         gateway_health="$(printf '%s\n' "$gateway_status_text" | awk -F': ' '/^health: / { print $2; exit }')"
@@ -3309,6 +3373,11 @@ print("glyphos_config=" + ("yes" if data.get("glyphos_config_exists") else "no")
     printf 'gateway_url: %s\n' "$gateway_url"
     printf 'gateway_backend_api_base: %s\n' "$gateway_backend_api_base"
     printf 'gateway_mode_default: %s\n' "$gateway_mode_default"
+    printf 'route_state: %s\n' "$route_state"
+    printf 'route_guidance: %s\n' "$route_guidance"
+    printf 'legacy_opencode_gateway_default: %s\n' "$legacy_opencode_gateway_default"
+    printf 'harness_mode_configured: %s\n' "$harness_mode_configured"
+    printf 'stale_opencode_providers: %s\n' "$stale_opencode_providers"
     printf 'binary_ok: %s\n' "$binary_ok"
     printf 'binary: %s\n' "${SELECTED_LLAMA_SERVER_BIN:-}"
     printf 'binary_source: %s\n' "${SELECTED_LLAMA_SERVER_SOURCE:-none}"

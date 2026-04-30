@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 try:
     import yaml  # type: ignore
@@ -39,6 +40,22 @@ def int_or_zero(value: Any) -> int:
         return 0
 
 
+def is_stale_local_opencode_provider(name: str, provider: Any, *, active_provider: str = "llamacpp") -> bool:
+    if name == active_provider or not isinstance(provider, dict):
+        return False
+    options = provider.get("options")
+    if not isinstance(options, dict):
+        return False
+    base_url = str(options.get("baseURL") or options.get("baseUrl") or "").strip()
+    if not base_url:
+        return False
+    parsed = urlparse(base_url)
+    host = (parsed.hostname or "").lower()
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        return False
+    return parsed.port == 8080 or name.lower() in {"llama-server-gpu", "llamacpp-8080", "llama-cpp-8080"}
+
+
 def sync_opencode(args: argparse.Namespace) -> None:
     config_path = Path(args.config_file).expanduser()
     state_path = Path(args.state_file).expanduser()
@@ -53,6 +70,11 @@ def sync_opencode(args: argparse.Namespace) -> None:
     providers = config.get("provider")
     if not isinstance(providers, dict):
         providers = {}
+    providers = {
+        str(name): provider
+        for name, provider in providers.items()
+        if not is_stale_local_opencode_provider(str(name), provider)
+    }
     llamacpp = providers.get("llamacpp")
     if not isinstance(llamacpp, dict):
         llamacpp = {}
