@@ -4,13 +4,14 @@ API clients for local and external AI backends.
 
 from __future__ import annotations
 
-import os
 import json
+import os
 import warnings
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional
+from typing import Any
 from urllib import request as urlrequest
-from urllib.error import URLError, HTTPError
+from urllib.error import HTTPError, URLError
 
 
 class _HttpJsonResponse:
@@ -26,7 +27,14 @@ class _HttpJsonResponse:
         return self._payload
 
 
-def _http_json(method: str, url: str, *, payload: Optional[dict[str, Any]] = None, headers: Optional[dict[str, str]] = None, timeout: int = 30) -> _HttpJsonResponse:
+def _http_json(
+    method: str,
+    url: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: int = 30,
+) -> _HttpJsonResponse:
     data = None
     request_headers = {"Content-Type": "application/json", **(headers or {})}
     if payload is not None:
@@ -138,7 +146,7 @@ def _warn_on_retired_configuration(config: dict[str, Any]) -> None:
 
 
 class BaseChatClient:
-    def __init__(self, model: str, max_tokens: int = 1000, timeout: int = 30):
+    def __init__(self, model: str, max_tokens: int = 32768, timeout: int = 30):
         self.model = model
         self.max_tokens = max_tokens
         self.timeout = timeout
@@ -155,7 +163,13 @@ class LlamaCppClient(BaseChatClient):
 
     opens_stream_before_return = True
 
-    def __init__(self, base_url: str = "http://127.0.0.1:8081/v1", model: str = "", max_tokens: int = 1000, timeout: int = 300):
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:8081/v1",
+        model: str = "",
+        max_tokens: int = int(os.environ.get("LMM_DEFAULT_MAX_TOKENS", "32768")),
+        timeout: int = int(os.environ.get("LLAMA_CPP_STREAM_TIMEOUT", "3600")),
+    ):
         super().__init__(model=model, max_tokens=max_tokens, timeout=timeout)
         self.base_url = base_url.rstrip("/")
         self._available = False
@@ -266,7 +280,7 @@ class LlamaCppClient(BaseChatClient):
 
 
 class OpenAIClient(BaseChatClient):
-    def __init__(self, api_key: Optional[str] = None, model: str = "gpt-4-turbo-preview", max_tokens: int = 1000):
+    def __init__(self, api_key: str | None = None, model: str = "gpt-4-turbo-preview", max_tokens: int = 1000):
         super().__init__(model=model, max_tokens=max_tokens, timeout=30)
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self._available = bool(self.api_key)
@@ -279,6 +293,7 @@ class OpenAIClient(BaseChatClient):
             raise RuntimeError("OpenAI backend is not configured")
         try:
             from openai import OpenAI
+
             client = OpenAI(api_key=self.api_key)
             response = client.chat.completions.create(
                 model=kwargs.get("model", self.model),
@@ -292,7 +307,7 @@ class OpenAIClient(BaseChatClient):
 
 
 class AnthropicClient(BaseChatClient):
-    def __init__(self, api_key: Optional[str] = None, model: str = "claude-3-sonnet-20240229", max_tokens: int = 1000):
+    def __init__(self, api_key: str | None = None, model: str = "claude-3-sonnet-20240229", max_tokens: int = 1000):
         super().__init__(model=model, max_tokens=max_tokens, timeout=30)
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self._available = bool(self.api_key)
@@ -305,6 +320,7 @@ class AnthropicClient(BaseChatClient):
             raise RuntimeError("Anthropic backend is not configured")
         try:
             import anthropic
+
             client = anthropic.Anthropic(api_key=self.api_key)
             response = client.messages.create(
                 model=kwargs.get("model", self.model),
@@ -317,7 +333,7 @@ class AnthropicClient(BaseChatClient):
 
 
 class XAIClient(BaseChatClient):
-    def __init__(self, api_key: Optional[str] = None, model: str = "grok-beta", max_tokens: int = 1000):
+    def __init__(self, api_key: str | None = None, model: str = "grok-beta", max_tokens: int = 1000):
         super().__init__(model=model, max_tokens=max_tokens, timeout=30)
         self.api_key = api_key or os.environ.get("XAI_API_KEY", "")
         self._available = bool(self.api_key)
@@ -349,38 +365,65 @@ class XAIClient(BaseChatClient):
             raise RuntimeError(f"xAI request failed: {exc}") from exc
 
 
-def create_configured_clients() -> Dict[str, Any]:
+def create_configured_clients() -> dict[str, Any]:
     config = _load_glyphos_config()
-    clients: Dict[str, Any] = {}
+    clients: dict[str, Any] = {}
 
     _warn_on_retired_configuration(config)
 
-    llama_url = _env_first('GLYPHOS_LLAMACPP_URL', default=_config_value(config, 'ai_compute.llamacpp.url', default='http://127.0.0.1:8081/v1'))
-    llama_model = _env_first('GLYPHOS_LLAMACPP_MODEL', default=_config_value(config, 'ai_compute.llamacpp.model', default=''))
-    llama_timeout = int(_env_first('GLYPHOS_LLAMACPP_TIMEOUT', default=_config_value(config, 'ai_compute.llamacpp.timeout', default='300')) or '300')
-    if _env_first('GLYPHOS_LLAMACPP_ENABLED', default=_config_value(config, 'ai_compute.llamacpp.enabled', default='true')).lower() != 'false':
+    llama_url = _env_first(
+        "GLYPHOS_LLAMACPP_URL",
+        default=_config_value(config, "ai_compute.llamacpp.url", default="http://127.0.0.1:8081/v1"),
+    )
+    llama_model = _env_first(
+        "GLYPHOS_LLAMACPP_MODEL", default=_config_value(config, "ai_compute.llamacpp.model", default="")
+    )
+    llama_timeout = int(
+        _env_first(
+            "GLYPHOS_LLAMACPP_TIMEOUT", default=_config_value(config, "ai_compute.llamacpp.timeout", default="300")
+        )
+        or "300"
+    )
+    if (
+        _env_first(
+            "GLYPHOS_LLAMACPP_ENABLED", default=_config_value(config, "ai_compute.llamacpp.enabled", default="true")
+        ).lower()
+        != "false"
+    ):
         llamacpp = LlamaCppClient(base_url=llama_url, model=llama_model, timeout=llama_timeout)
         if llamacpp.is_available():
-            clients['llamacpp'] = llamacpp
+            clients["llamacpp"] = llamacpp
 
-    lane_keys = ['aurora', 'terran', 'starlight', 'polaris']
+    lane_keys = ["aurora", "terran", "starlight", "polaris"]
     for lane in lane_keys:
-        base_url = _env_first(f'GLYPHOS_LLAMACPP_{lane.upper()}_URL', default=_config_value(config, f'ai_compute.lanes.{lane}.llamacpp_url', default=''))
+        base_url = _env_first(
+            f"GLYPHOS_LLAMACPP_{lane.upper()}_URL",
+            default=_config_value(config, f"ai_compute.lanes.{lane}.llamacpp_url", default=""),
+        )
         if not base_url:
             continue
-        model = _env_first(f'GLYPHOS_LLAMACPP_{lane.upper()}_MODEL', default=_config_value(config, f'ai_compute.lanes.{lane}.llamacpp_model', default=''))
-        timeout = int(_env_first(f'GLYPHOS_LLAMACPP_{lane.upper()}_TIMEOUT', default=_config_value(config, f'ai_compute.lanes.{lane}.llamacpp_timeout', default='300')) or '300')
+        model = _env_first(
+            f"GLYPHOS_LLAMACPP_{lane.upper()}_MODEL",
+            default=_config_value(config, f"ai_compute.lanes.{lane}.llamacpp_model", default=""),
+        )
+        timeout = int(
+            _env_first(
+                f"GLYPHOS_LLAMACPP_{lane.upper()}_TIMEOUT",
+                default=_config_value(config, f"ai_compute.lanes.{lane}.llamacpp_timeout", default="300"),
+            )
+            or "300"
+        )
         client = LlamaCppClient(base_url=base_url, model=model, timeout=timeout)
         if client.is_available():
-            clients[f'llamacpp-{lane}'] = client
+            clients[f"llamacpp-{lane}"] = client
 
     openai = OpenAIClient()
     if openai.is_available():
-        clients['openai'] = openai
+        clients["openai"] = openai
     anthropic = AnthropicClient()
     if anthropic.is_available():
-        clients['anthropic'] = anthropic
+        clients["anthropic"] = anthropic
     xai = XAIClient()
     if xai.is_available():
-        clients['xai'] = xai
+        clients["xai"] = xai
     return clients

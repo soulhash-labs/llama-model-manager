@@ -641,7 +641,7 @@ def prepare_gateway_pipeline(
         "messages": message_summary(payload.get("messages", [])),
         "model": model,
         "temperature": payload.get("temperature", 0.7),
-        "max_tokens": payload.get("max_tokens", 1000),
+        "max_tokens": payload.get("max_tokens", int(os.environ.get("LMM_DEFAULT_MAX_TOKENS", "32768"))),
         "stream": stream,
         "harness_identity": "",
         "workspace_present": bool(payload.get("workspace") or metadata.get("workspace")),
@@ -1012,7 +1012,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             model = str(payload.get("model") or self.server.model_id or "local-llama")  # type: ignore[attr-defined]
             record["prompt"] = prompt
             record["model"] = model
-            max_tokens = request_int(payload, "max_tokens", 1000)
+            max_tokens = request_int(payload, "max_tokens", int(os.environ.get("LMM_DEFAULT_MAX_TOKENS", "32768")))
             temperature = request_float(payload, "temperature", 0.7)
             stream = payload.get("stream") is True
             if not prompt.strip():

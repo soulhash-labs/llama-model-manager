@@ -1562,6 +1562,9 @@ function clearModelForm() {
 }
 
 function renderDefaults(defaults) {
+  $("#default-max-tokens").value = defaults.LMM_DEFAULT_MAX_TOKENS || "";
+  $("#default-stream-timeout").value = defaults.LLAMA_CPP_STREAM_TIMEOUT || "";
+  $("#default-sse-heartbeat").value = defaults.LMM_GATEWAY_SSE_HEARTBEAT_SECONDS || "";
   $("#default-host").value = defaults.LLAMA_SERVER_HOST || "";
   $("#default-port").value = defaults.LLAMA_SERVER_PORT || "";
   $("#default-device").value = defaults.LLAMA_SERVER_DEVICE || "";
@@ -1715,6 +1718,9 @@ async function performIntegrationSync(path, button, pendingLabel, successMessage
 
 function collectDefaultsPayload() {
   return {
+    LMM_DEFAULT_MAX_TOKENS: $("#default-max-tokens").value.trim(),
+    LLAMA_CPP_STREAM_TIMEOUT: $("#default-stream-timeout").value.trim(),
+    LMM_GATEWAY_SSE_HEARTBEAT_SECONDS: $("#default-sse-heartbeat").value.trim(),
     LLAMA_SERVER_HOST: $("#default-host").value.trim(),
     LLAMA_SERVER_PORT: $("#default-port").value.trim(),
     LLAMA_SERVER_DEVICE: $("#default-device").value.trim(),

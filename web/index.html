@@ -528,10 +528,25 @@
             <div>
               <span class="panel-tag">Baseline</span>
               <h2>Global Defaults</h2>
-              <p>These values become the room posture unless a model overrides them.</p>
+              <p>Room posture, gateway streaming knobs, and harness sync defaults. These become the baseline unless a model or client overrides them.</p>
             </div>
           </div>
           <form id="defaults-form" class="form-grid">
+            <label class="span-2" title="Default LMM gateway output token budget. Controls max_tokens sent to llama.cpp when clients do not specify. Increase this for long reasoning or coding sessions.">
+              Gateway Max Tokens
+              <input name="LMM_DEFAULT_MAX_TOKENS" id="default-max-tokens" placeholder="32768">
+              <span class="field-note">Output token budget for the LMM gateway when clients do not set max_tokens. Default 32768; raise for long sessions.</span>
+            </label>
+            <label title="LMM gateway HTTP stream timeout in seconds. How long the gateway waits for the llama.cpp backend before aborting a streaming response.">
+              Gateway Stream Timeout (s)
+              <input name="LLAMA_CPP_STREAM_TIMEOUT" id="default-stream-timeout" placeholder="3600">
+              <span class="field-note">Max wait for a streaming response from llama.cpp before the gateway aborts. Default 3600 (1 hour).</span>
+            </label>
+            <label title="SSE keepalive interval in seconds. How often the gateway sends heartbeat comments to prevent client disconnects on idle streams.">
+              SSE Heartbeat (s)
+              <input name="LMM_GATEWAY_SSE_HEARTBEAT_SECONDS" id="default-sse-heartbeat" placeholder="5">
+              <span class="field-note">Interval for SSE keepalive comments. Default 5s. Lower values prevent reverse-proxy timeouts.</span>
+            </label>
             <label title="Network host for llama-server. 127.0.0.1 keeps it local to this machine.">
               Host
               <input name="LLAMA_SERVER_HOST" id="default-host">

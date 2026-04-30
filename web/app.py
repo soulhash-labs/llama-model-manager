@@ -2,39 +2,43 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import ipaddress
-import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
-import sys
 import urllib.parse
 import urllib.request
 import webbrowser
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-
 APP_TITLE = "LLM Model Manager"
 APP_BRAND = "Local Control Surface"
-HEADER_LINE = "# alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes"
+HEADER_LINE = (
+    "# alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes"
+)
 PHASE0_SCHEMA_VERSION = 1
 MAX_ACTIVITY_EVENTS = 100
 DEFAULT_MAX_REQUEST_BYTES = 2 * 1024 * 1024
 DEFAULT_CLI_TIMEOUT_SECONDS = 60
 KNOWN_DEFAULT_KEYS = [
     "LLAMA_SERVER_BIN",
+    "LMM_DEFAULT_MAX_TOKENS",
+    "LLAMA_CPP_STREAM_TIMEOUT",
+    "LMM_GATEWAY_SSE_HEARTBEAT_SECONDS",
     "LLAMA_SERVER_HOST",
     "LLAMA_SERVER_PORT",
     "LLAMA_SERVER_DEVICE",
@@ -82,9 +86,7 @@ class CommandTimeoutError(RuntimeError):
         self.code = "command_timeout"
         self.command = command
         self.timeout_seconds = timeout_seconds
-        super().__init__(
-            f"Command timed out after {timeout_seconds}s: {command}"
-        )
+        super().__init__(f"Command timed out after {timeout_seconds}s: {command}")
 
 
 def env_int(name: str, fallback: int) -> int:
@@ -105,11 +107,7 @@ def parse_allowed_hosts() -> set[str]:
     raw_hosts = os.environ.get("LLAMA_MODEL_WEB_ALLOWED_HOSTS", "").strip()
     if not raw_hosts:
         return set()
-    return {
-        item.strip().lower()
-        for item in raw_hosts.split(",")
-        if item.strip()
-    }
+    return {item.strip().lower() for item in raw_hosts.split(",") if item.strip()}
 
 
 def default_operation_activity_store() -> dict[str, Any]:
@@ -131,7 +129,18 @@ def parse_max_request_bytes() -> int:
 API_POST_PAYLOAD_SCHEMAS: dict[str, dict[str, Any]] = {
     "/api/models/save": {
         "allowed": {
-            "alias", "path", "mmproj", "extra_args", "context", "ngl", "batch", "threads", "parallel", "device", "notes", "extra",
+            "alias",
+            "path",
+            "mmproj",
+            "extra_args",
+            "context",
+            "ngl",
+            "batch",
+            "threads",
+            "parallel",
+            "device",
+            "notes",
+            "extra",
         },
         "required": {"path"},
     },
@@ -251,6 +260,7 @@ API_POST_PAYLOAD_SCHEMAS: dict[str, dict[str, Any]] = {
     },
 }
 
+
 def _load_demo_state() -> dict[str, Any]:
     demo_path = Path(__file__).parent / "demo_state.json"
     if not demo_path.exists():
@@ -330,7 +340,7 @@ class Manager:
     def __init__(self, app_root: Path, *, demo: bool = False) -> None:
         self.app_root = app_root
         self.demo = demo
-        self.started_at = datetime.now(timezone.utc).isoformat()
+        self.started_at = datetime.now(UTC).isoformat()
         self.home = Path.home()
         self.xdg_config_home = Path(os.environ.get("XDG_CONFIG_HOME", self.home / ".config"))
         self.xdg_state_home = Path(os.environ.get("XDG_STATE_HOME", self.home / ".local" / "state"))
@@ -338,9 +348,15 @@ class Manager:
         self.defaults_file = Path(os.environ.get("LLAMA_DEFAULTS_FILE", self.config_dir / "defaults.env"))
         self.models_file = Path(os.environ.get("LLAMA_MODELS_FILE", self.config_dir / "models.tsv"))
         self.discovery_root = os.environ.get("LLAMA_MODEL_DISCOVERY_ROOT", str(self.home / "models"))
-        self.opencode_config_file = Path(os.environ.get("OPENCODE_CONFIG_FILE", self.xdg_config_home / "opencode" / "opencode.json"))
-        self.opencode_model_state_file = Path(os.environ.get("OPENCODE_MODEL_STATE_FILE", self.xdg_state_home / "opencode" / "model.json"))
-        self.claude_settings_file = Path(os.environ.get("CLAUDE_SETTINGS_FILE", self.home / ".claude" / "settings.json"))
+        self.opencode_config_file = Path(
+            os.environ.get("OPENCODE_CONFIG_FILE", self.xdg_config_home / "opencode" / "opencode.json")
+        )
+        self.opencode_model_state_file = Path(
+            os.environ.get("OPENCODE_MODEL_STATE_FILE", self.xdg_state_home / "opencode" / "model.json")
+        )
+        self.claude_settings_file = Path(
+            os.environ.get("CLAUDE_SETTINGS_FILE", self.home / ".claude" / "settings.json")
+        )
         self.glyphos_config_file = Path(os.environ.get("GLYPHOS_CONFIG_FILE", self.home / ".glyphos" / "config.yaml"))
         self.glyphos_integration_root = self.resolve_bundled_integration_root(
             "public-glyphos-ai-compute",
@@ -354,12 +370,16 @@ class Manager:
         self.download_jobs_file = self.xdg_state_home / "llama-server" / "download-jobs.json"
         self.download_policy_file = self.xdg_state_home / "llama-server" / "download-policy.json"
         self.operation_activity_file = self.xdg_state_home / "llama-server" / "operation-activity.json"
-        self.gateway_requests_file = Path(os.environ.get("LMM_GATEWAY_STATE_FILE", self.xdg_state_home / "llama-server" / "lmm-gateway-requests.json"))
+        self.gateway_requests_file = Path(
+            os.environ.get("LMM_GATEWAY_STATE_FILE", self.xdg_state_home / "llama-server" / "lmm-gateway-requests.json")
+        )
         self.runtime_profiles_file = self.config_dir / "runtime-profiles.json"
         self.validation_results_file = self.xdg_state_home / "llama-server" / "validation-results.json"
         self.host_capability_file = self.xdg_state_home / "llama-server" / "host-capability.json"
         self.operation_activity_lock = threading.RLock()
-        self.runtime_root = Path(os.environ.get("LLAMA_SERVER_RUNTIME_DIR", self.app_root.parent / "runtime")) / "llama-server"
+        self.runtime_root = (
+            Path(os.environ.get("LLAMA_SERVER_RUNTIME_DIR", self.app_root.parent / "runtime")) / "llama-server"
+        )
         self.cli_bin = self._resolve_cli_bin()
         self.download_lock = threading.RLock()
         self.download_threads: dict[str, threading.Thread] = {}
@@ -374,7 +394,10 @@ class Manager:
         candidates = [
             Path(explicit) if explicit else None,
             self.app_root.parent / "integrations" / integration_name,
-            Path(os.environ.get("XDG_DATA_HOME", self.home / ".local" / "share")) / "llama-model-manager" / "integrations" / integration_name,
+            Path(os.environ.get("XDG_DATA_HOME", self.home / ".local" / "share"))
+            / "llama-model-manager"
+            / "integrations"
+            / integration_name,
         ]
         for candidate in candidates:
             if candidate and candidate.is_dir():
@@ -669,11 +692,19 @@ class Manager:
         replaced = False
         for index, existing in enumerate(models):
             if existing["alias"] == alias:
-                models[index] = {**existing, **model, "mmproj": mmproj, "extra_args": str(payload.get("extra_args", "")).strip(), "exists": "yes"}
+                models[index] = {
+                    **existing,
+                    **model,
+                    "mmproj": mmproj,
+                    "extra_args": str(payload.get("extra_args", "")).strip(),
+                    "exists": "yes",
+                }
                 replaced = True
                 break
         if not replaced:
-            models.append({**model, "mmproj": mmproj, "extra_args": str(payload.get("extra_args", "")).strip(), "exists": "yes"})
+            models.append(
+                {**model, "mmproj": mmproj, "extra_args": str(payload.get("extra_args", "")).strip(), "exists": "yes"}
+            )
 
         self.write_models(models)
         return {
@@ -752,7 +783,9 @@ class Manager:
             "LLAMA_MODEL_HARNESS_MODE": values.get("LLAMA_MODEL_HARNESS_MODE", "routed"),
             "LLAMA_MODEL_GATEWAY_HOST": values.get("LLAMA_MODEL_GATEWAY_HOST", "127.0.0.1"),
             "LLAMA_MODEL_GATEWAY_PORT": values.get("LLAMA_MODEL_GATEWAY_PORT", "4010"),
-            "LLAMA_MODEL_GATEWAY_LOG": values.get("LLAMA_MODEL_GATEWAY_LOG", str(self.home / "models" / "lmm-gateway.log")),
+            "LLAMA_MODEL_GATEWAY_LOG": values.get(
+                "LLAMA_MODEL_GATEWAY_LOG", str(self.home / "models" / "lmm-gateway.log")
+            ),
             "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": values.get("LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE", ""),
             "OPENCLAW_PROFILE": values.get("OPENCLAW_PROFILE", ""),
             "OPENCLAW_API_KEY": values.get("OPENCLAW_API_KEY", "llama-local"),
@@ -767,7 +800,7 @@ class Manager:
         }
 
     def iso_now(self) -> str:
-        return datetime.now(timezone.utc).isoformat()
+        return datetime.now(UTC).isoformat()
 
     def human_bytes(self, value: int) -> str:
         if value <= 0:
@@ -857,10 +890,7 @@ class Manager:
             source = store.get("items") if isinstance(store.get("items"), list) else []
             needs_write = True
 
-        normalized_events = [
-            event for event in source
-            if isinstance(event, dict)
-        ]
+        normalized_events = [event for event in source if isinstance(event, dict)]
         normalized = {
             "schema_version": PHASE0_SCHEMA_VERSION,
             "updated_at": str(store.get("updated_at", "")),
@@ -969,8 +999,7 @@ class Manager:
                 annotated["can_deprioritize"] = False
                 normalized_items.append(annotated)
             queued_indexes = [
-                index for index, item in enumerate(normalized_items)
-                if str(item.get("status", "")) == "queued"
+                index for index, item in enumerate(normalized_items) if str(item.get("status", "")) == "queued"
             ]
             for queued_order, item_index in enumerate(queued_indexes):
                 can_prioritize = queued_order > 0
@@ -998,7 +1027,9 @@ class Manager:
             }
             self.write_json_store(self.download_jobs_file, normalized)
 
-    def normalize_host_capability_store(self, store: dict[str, Any], doctor: dict[str, str] | None = None) -> dict[str, Any]:
+    def normalize_host_capability_store(
+        self, store: dict[str, Any], doctor: dict[str, str] | None = None
+    ) -> dict[str, Any]:
         doctor = doctor or {}
         raw_backends = store.get("host_backends", doctor.get("host_backends", []))
         if isinstance(raw_backends, str):
@@ -1008,7 +1039,11 @@ class Manager:
         else:
             host_backends = []
 
-        preferred_backend = str(store.get("preferred_backend") or doctor.get("binary_backend") or (host_backends[0] if host_backends else "")).strip()
+        preferred_backend = str(
+            store.get("preferred_backend")
+            or doctor.get("binary_backend")
+            or (host_backends[0] if host_backends else "")
+        ).strip()
         try:
             memory_bytes = int(store.get("memory_bytes") or 0)
         except (TypeError, ValueError):
@@ -1053,10 +1088,7 @@ class Manager:
         runtime_profiles = self.read_runtime_profiles_store()
         validation_results = self.read_validation_results_store()
         host_capability = self.read_host_capability_store(doctor)
-        remote_items = [
-            item for item in remote_models.get("items", [])
-            if isinstance(item, dict)
-        ]
+        remote_items = [item for item in remote_models.get("items", []) if isinstance(item, dict)]
         remote_models = {
             **remote_models,
             "items": self.annotate_remote_models(remote_items, host_capability),
@@ -1097,7 +1129,9 @@ class Manager:
                 "id": str(next_queued.get("id", "")),
                 "repo_id": str(next_queued.get("repo_id", "")),
                 "artifact_name": str(next_queued.get("artifact_name", "")),
-            } if next_queued else {},
+            }
+            if next_queued
+            else {},
             "available_slots": 0 if self.download_queue_paused else max(self.max_active_downloads - len(running), 0),
             "at_capacity": len(running) >= self.max_active_downloads,
             "duplicate_active_artifacts": duplicate_active,
@@ -1132,9 +1166,7 @@ class Manager:
             if str(item.get("status", "")) == "completed" and mmproj_local_path:
                 referenced_paths.add(str(Path(mmproj_local_path).expanduser().resolve()))
         duplicates = [
-            {"path": path, "job_ids": job_ids}
-            for path, job_ids in sorted(completed_paths.items())
-            if len(job_ids) > 1
+            {"path": path, "job_ids": job_ids} for path, job_ids in sorted(completed_paths.items()) if len(job_ids) > 1
         ]
         duplicate_job_records = sum(max(len(item["job_ids"]) - 1, 0) for item in duplicates)
         orphaned = self.orphaned_download_artifacts(download_roots, referenced_paths)
@@ -1179,11 +1211,13 @@ class Manager:
                 if resolved in referenced_paths:
                     continue
                 total_bytes += size_bytes
-                items.append({
-                    "path": resolved,
-                    "size_bytes": size_bytes,
-                    "size_human": self.human_bytes(size_bytes),
-                })
+                items.append(
+                    {
+                        "path": resolved,
+                        "size_bytes": size_bytes,
+                        "size_human": self.human_bytes(size_bytes),
+                    }
+                )
         return {
             "items": items,
             "bytes": total_bytes,
@@ -1297,17 +1331,19 @@ class Manager:
 
         sibling_map = self.sibling_metadata_map([sib for sib in siblings if isinstance(sib, dict)])
         gguf_names = sorted(
-            name for name in sibling_map.keys()
-            if name.endswith(".gguf") and "mmproj" not in name.lower()
+            name for name in sibling_map.keys() if name.endswith(".gguf") and "mmproj" not in name.lower()
         )
         if not gguf_names:
             return []
         mmproj_names = sorted(
-            name for name in sibling_map.keys()
-            if name.endswith(".gguf") and "mmproj" in name.lower()
+            name for name in sibling_map.keys() if name.endswith(".gguf") and "mmproj" in name.lower()
         )
         mmproj_artifact_name = mmproj_names[0] if mmproj_names else ""
-        mmproj_size_bytes = self.sibling_size_bytes(self.remote_artifact_metadata(sibling_map, mmproj_artifact_name)) if mmproj_artifact_name else 0
+        mmproj_size_bytes = (
+            self.sibling_size_bytes(self.remote_artifact_metadata(sibling_map, mmproj_artifact_name))
+            if mmproj_artifact_name
+            else 0
+        )
 
         gguf_meta = raw.get("gguf", {})
         architecture = str(gguf_meta.get("architecture", "")).strip() if isinstance(gguf_meta, dict) else ""
@@ -1323,29 +1359,33 @@ class Manager:
             quant_match = re.search(r"-(Q[^.]+)\.gguf$", artifact_name, re.IGNORECASE)
             quant = quant_match.group(1) if quant_match else ""
             resolved_url = f"{source_url}/resolve/main/{urllib.parse.quote(artifact_name)}"
-            mmproj_url = f"{source_url}/resolve/main/{urllib.parse.quote(mmproj_artifact_name)}" if mmproj_artifact_name else ""
-            items.append({
-                "repo_id": repo_id,
-                "artifact_name": artifact_name,
-                "alias": self.sanitize_alias(artifact_name),
-                "download_url": resolved_url,
-                "source_url": source_url,
-                "quant": quant,
-                "architecture": architecture,
-                "context": context_value,
-                "size_bytes": int(size_bytes or 0),
-                "size_human": self.human_bytes(int(size_bytes or 0)),
-                "gated": "yes" if bool(raw.get("gated")) else "no",
-                "private": "yes" if bool(raw.get("private")) else "no",
-                "downloads": int(raw.get("downloads") or 0),
-                "likes": int(raw.get("likes") or 0),
-                "last_modified": str(raw.get("lastModified", "")).strip(),
-                "mmproj_artifact_name": mmproj_artifact_name,
-                "mmproj_download_url": mmproj_url,
-                "mmproj_size_bytes": int(mmproj_size_bytes or 0),
-                "mmproj_sha256": "",
-                "sha256": "",
-            })
+            mmproj_url = (
+                f"{source_url}/resolve/main/{urllib.parse.quote(mmproj_artifact_name)}" if mmproj_artifact_name else ""
+            )
+            items.append(
+                {
+                    "repo_id": repo_id,
+                    "artifact_name": artifact_name,
+                    "alias": self.sanitize_alias(artifact_name),
+                    "download_url": resolved_url,
+                    "source_url": source_url,
+                    "quant": quant,
+                    "architecture": architecture,
+                    "context": context_value,
+                    "size_bytes": int(size_bytes or 0),
+                    "size_human": self.human_bytes(int(size_bytes or 0)),
+                    "gated": "yes" if bool(raw.get("gated")) else "no",
+                    "private": "yes" if bool(raw.get("private")) else "no",
+                    "downloads": int(raw.get("downloads") or 0),
+                    "likes": int(raw.get("likes") or 0),
+                    "last_modified": str(raw.get("lastModified", "")).strip(),
+                    "mmproj_artifact_name": mmproj_artifact_name,
+                    "mmproj_download_url": mmproj_url,
+                    "mmproj_size_bytes": int(mmproj_size_bytes or 0),
+                    "mmproj_sha256": "",
+                    "sha256": "",
+                }
+            )
         return items
 
     def normalize_remote_model_entry(
@@ -1363,22 +1403,18 @@ class Manager:
 
         gguf_names = sorted(
             name
-            for name in (
-                str(item.get("rfilename", "")).strip()
-                for item in siblings
-                if isinstance(item, dict)
-            )
+            for name in (str(item.get("rfilename", "")).strip() for item in siblings if isinstance(item, dict))
             if name.endswith(".gguf") and "mmproj" not in name.lower()
         )
         if not gguf_names:
             return None
 
         artifact_name = gguf_names[0]
-        mmproj_names = sorted(name for name in (
-            str(item.get("rfilename", "")).strip()
-            for item in siblings
-            if isinstance(item, dict)
-        ) if name.endswith(".gguf") and "mmproj" in name.lower())
+        mmproj_names = sorted(
+            name
+            for name in (str(item.get("rfilename", "")).strip() for item in siblings if isinstance(item, dict))
+            if name.endswith(".gguf") and "mmproj" in name.lower()
+        )
         mmproj_artifact_name = mmproj_names[0] if mmproj_names else ""
         quant_match = re.search(r"-(Q[^.]+)\.gguf$", artifact_name, re.IGNORECASE)
         quant = quant_match.group(1) if quant_match else ""
@@ -1391,7 +1427,9 @@ class Manager:
         size_bytes = int(size_bytes_override or 0)
         source_url = f"https://huggingface.co/{repo_id}"
         resolved_url = f"{source_url}/resolve/main/{urllib.parse.quote(artifact_name)}"
-        mmproj_url = f"{source_url}/resolve/main/{urllib.parse.quote(mmproj_artifact_name)}" if mmproj_artifact_name else ""
+        mmproj_url = (
+            f"{source_url}/resolve/main/{urllib.parse.quote(mmproj_artifact_name)}" if mmproj_artifact_name else ""
+        )
         return {
             "repo_id": repo_id,
             "artifact_name": artifact_name,
@@ -1682,7 +1720,8 @@ class Manager:
             if str(job.get("status", "")) != "queued":
                 raise ValueError("Only queued download jobs can be removed")
             items = [
-                item for item in store.get("items", [])
+                item
+                for item in store.get("items", [])
                 if not (isinstance(item, dict) and str(item.get("id", "")) == job_id)
             ]
             store["items"] = items
@@ -1748,7 +1787,8 @@ class Manager:
                 raise ValueError("Only queued download jobs can be deprioritized")
             next_queued_index = next(
                 (
-                    index for index in range(target_index + 1, len(items))
+                    index
+                    for index in range(target_index + 1, len(items))
                     if str(items[index].get("status", "")) == "queued"
                 ),
                 -1,
@@ -1829,7 +1869,11 @@ class Manager:
                 status = str(job.get("status", "")).strip()
                 partial_path_text = str(job.get("partial_path", "")).strip()
                 partial_path = Path(partial_path_text) if partial_path_text else None
-                if status in {"cancelled", "failed"} and partial_path is not None and partial_path_text not in active_partials:
+                if (
+                    status in {"cancelled", "failed"}
+                    and partial_path is not None
+                    and partial_path_text not in active_partials
+                ):
                     try:
                         if partial_path.is_file() and now - partial_path.stat().st_mtime >= max_age_seconds:
                             partial_path.unlink()
@@ -1911,11 +1955,13 @@ class Manager:
                 status = str(job.get("status", "")).strip()
                 worker = self.download_threads.get(job_id)
                 if status == "running" and (worker is None or not worker.is_alive()):
-                    job.update({
-                        "status": "failed",
-                        "completed_at": self.iso_now(),
-                        "error": "Download worker is not active. Resume or retry this job.",
-                    })
+                    job.update(
+                        {
+                            "status": "failed",
+                            "completed_at": self.iso_now(),
+                            "error": "Download worker is not active. Resume or retry this job.",
+                        }
+                    )
                     self._clear_download_controls(job_id)
                     recovered.append(job_id)
                 items.append(self.annotate_job_resume_state(job))
@@ -1990,7 +2036,9 @@ class Manager:
 
     def verify_downloaded_artifact(self, path: Path, *, expected_size: int = 0, expected_sha256: str = "") -> str:
         if expected_size > 0 and path.stat().st_size != expected_size:
-            raise ValueError(f"size mismatch for {path.name}: expected {expected_size} bytes, got {path.stat().st_size}")
+            raise ValueError(
+                f"size mismatch for {path.name}: expected {expected_size} bytes, got {path.stat().st_size}"
+            )
         if expected_sha256:
             actual_sha256 = self.sha256_file(path)
             if actual_sha256 != expected_sha256:
@@ -2012,11 +2060,13 @@ class Manager:
             self._schedule_downloads()
             return
         if bool(job.get("cancel_requested")):
-            job.update({
-                "status": "cancelled",
-                "completed_at": self.iso_now(),
-                "error": "Download was cancelled by operator.",
-            })
+            job.update(
+                {
+                    "status": "cancelled",
+                    "completed_at": self.iso_now(),
+                    "error": "Download was cancelled by operator.",
+                }
+            )
             self.upsert_download_job(job)
             self._clear_download_controls(job_id)
             self._schedule_downloads()
@@ -2024,16 +2074,22 @@ class Manager:
 
         destination_path = Path(str(job.get("destination_path", "")))
         partial_path = Path(str(job.get("partial_path", "")))
-        mmproj_destination_path = Path(str(job.get("mmproj_destination_path", ""))) if str(job.get("mmproj_destination_path", "")) else None
-        mmproj_partial_path = Path(str(job.get("mmproj_partial_path", ""))) if str(job.get("mmproj_partial_path", "")) else None
+        mmproj_destination_path = (
+            Path(str(job.get("mmproj_destination_path", ""))) if str(job.get("mmproj_destination_path", "")) else None
+        )
+        mmproj_partial_path = (
+            Path(str(job.get("mmproj_partial_path", ""))) if str(job.get("mmproj_partial_path", "")) else None
+        )
         primary_reused = False
         mmproj_reused = False
         try:
-            job.update({
-                "status": "running",
-                "started_at": self.iso_now(),
-                "error": "",
-            })
+            job.update(
+                {
+                    "status": "running",
+                    "started_at": self.iso_now(),
+                    "error": "",
+                }
+            )
             self.upsert_download_job(job)
 
             reused_existing = self.maybe_reuse_existing_download(
@@ -2042,11 +2098,13 @@ class Manager:
             )
             if reused_existing:
                 primary_reused = True
-                job.update({
-                    "bytes_downloaded": int(job.get("bytes_total") or destination_path.stat().st_size),
-                    "progress": 1.0,
-                    "reuse_reason": "primary file already existed at destination",
-                })
+                job.update(
+                    {
+                        "bytes_downloaded": int(job.get("bytes_total") or destination_path.stat().st_size),
+                        "progress": 1.0,
+                        "reuse_reason": "primary file already existed at destination",
+                    }
+                )
             else:
                 partial_path.parent.mkdir(parents=True, exist_ok=True)
                 self.streamed_download(str(job.get("download_url", "")), partial_path, job)
@@ -2064,7 +2122,9 @@ class Manager:
             mmproj_path = ""
             if mmproj_destination_path is not None and mmproj_partial_path is not None:
                 mmproj_expected_size = int(job.get("mmproj_bytes_total") or 0)
-                if self.maybe_reuse_existing_download(destination_path=mmproj_destination_path, expected_size=mmproj_expected_size):
+                if self.maybe_reuse_existing_download(
+                    destination_path=mmproj_destination_path, expected_size=mmproj_expected_size
+                ):
                     mmproj_reused = True
                     mmproj_path = str(mmproj_destination_path)
                     job["mmproj_reuse_reason"] = "mmproj file already existed at destination"
@@ -2097,31 +2157,37 @@ class Manager:
                     "notes": f"Imported from {job.get('repo_id', '')}",
                 }
             )
-            job.update({
-                "status": "completed",
-                "completed_at": self.iso_now(),
-                "local_path": str(destination_path),
-                "mmproj_local_path": mmproj_path,
-                "imported_alias": imported_model.get("alias", ""),
-                "notes": imported_model.get("notes", ""),
-            })
+            job.update(
+                {
+                    "status": "completed",
+                    "completed_at": self.iso_now(),
+                    "local_path": str(destination_path),
+                    "mmproj_local_path": mmproj_path,
+                    "imported_alias": imported_model.get("alias", ""),
+                    "notes": imported_model.get("notes", ""),
+                }
+            )
             self._clear_download_controls(job_id)
             self.upsert_download_job(job)
         except Exception as exc:
             was_cancelled = self.is_download_cancelled(job_id)
             if was_cancelled:
-                job.update({
-                    "cancel_requested": True,
-                    "status": "cancelled",
-                    "completed_at": self.iso_now(),
-                    "error": "Download was cancelled by operator.",
-                })
+                job.update(
+                    {
+                        "cancel_requested": True,
+                        "status": "cancelled",
+                        "completed_at": self.iso_now(),
+                        "error": "Download was cancelled by operator.",
+                    }
+                )
             else:
-                job.update({
-                    "status": "failed",
-                    "completed_at": self.iso_now(),
-                    "error": str(exc),
-                })
+                job.update(
+                    {
+                        "status": "failed",
+                        "completed_at": self.iso_now(),
+                        "error": str(exc),
+                    }
+                )
             try:
                 if not was_cancelled and partial_path.exists():
                     partial_path.unlink()
@@ -2172,7 +2238,9 @@ class Manager:
         remote_store = self.normalize_items_store(self.remote_models_file, default_remote_models_store())
         remote_item = self.remote_items_index(remote_store).get((repo_id, artifact_name))
         if remote_item is None:
-            raise ValueError("Remote model is not available in the current search cache. Search again before downloading.")
+            raise ValueError(
+                "Remote model is not available in the current search cache. Search again before downloading."
+            )
 
         # Serialize this lookup/creation window to prevent duplicate starts for the same artifact.
         existing = self.active_download_for(repo_id, artifact_name)
@@ -2205,18 +2273,17 @@ class Manager:
             except OSError:
                 resume_from_bytes = 0
         mmproj_artifact_name = str(remote_item.get("mmproj_artifact_name", "")).strip()
-        if (
-            mmproj_artifact_name
-            and (
-                mmproj_artifact_name in {".", ".."}
-                or "/" in mmproj_artifact_name
-                or "\\" in mmproj_artifact_name
-                or Path(mmproj_artifact_name).name != mmproj_artifact_name
-            )
+        if mmproj_artifact_name and (
+            mmproj_artifact_name in {".", ".."}
+            or "/" in mmproj_artifact_name
+            or "\\" in mmproj_artifact_name
+            or Path(mmproj_artifact_name).name != mmproj_artifact_name
         ):
             mmproj_artifact_name = ""
         mmproj_destination_path = destination_dir / mmproj_artifact_name if mmproj_artifact_name else None
-        mmproj_partial_path = destination_dir / f"{mmproj_artifact_name}.{job_id}.part" if mmproj_artifact_name else None
+        mmproj_partial_path = (
+            destination_dir / f"{mmproj_artifact_name}.{job_id}.part" if mmproj_artifact_name else None
+        )
         alias = str(remote_item.get("alias") or self.sanitize_alias(artifact_name))
         bytes_total = int(remote_item.get("size_bytes") or 0)
 
@@ -2310,7 +2377,9 @@ class Manager:
             status = str(job.get("status", "")).strip()
             if status in {"queued", "running"}:
                 return job
-            if bool(job.get("cancel_requested")) and (job_id in self.download_threads or job_id in self.download_cancel_events):
+            if bool(job.get("cancel_requested")) and (
+                job_id in self.download_threads or job_id in self.download_cancel_events
+            ):
                 return job
 
             repo_id = str(job.get("repo_id", "")).strip()
@@ -2318,11 +2387,13 @@ class Manager:
             if not repo_id or not artifact_name:
                 raise ValueError("Download snapshot missing repo/artifact identifiers")
 
-            return self._start_remote_download_locked(self._download_retry_payload(
-                repo_id=repo_id,
-                artifact_name=artifact_name,
-                destination_root=str(job.get("destination_root", self.discovery_root)),
-            ))
+            return self._start_remote_download_locked(
+                self._download_retry_payload(
+                    repo_id=repo_id,
+                    artifact_name=artifact_name,
+                    destination_root=str(job.get("destination_root", self.discovery_root)),
+                )
+            )
 
     def _download_retry_payload(
         self,
@@ -2371,18 +2442,24 @@ class Manager:
             if not repo_id or not artifact_name:
                 raise ValueError("Download snapshot missing repo/artifact identifiers")
 
-            return self._start_remote_download_locked(self._download_retry_payload(
-                repo_id=repo_id,
-                artifact_name=artifact_name,
-                destination_root=str(job.get("destination_root", self.discovery_root)),
-                resume_partial_path=str(partial_path),
-                resume_source_job_id=job_id,
-            ))
+            return self._start_remote_download_locked(
+                self._download_retry_payload(
+                    repo_id=repo_id,
+                    artifact_name=artifact_name,
+                    destination_root=str(job.get("destination_root", self.discovery_root)),
+                    resume_partial_path=str(partial_path),
+                    resume_source_job_id=job_id,
+                )
+            )
 
-    def integration_state(self, defaults: dict[str, str], current: dict[str, str], mode: dict[str, str]) -> dict[str, Any]:
+    def integration_state(
+        self, defaults: dict[str, str], current: dict[str, str], mode: dict[str, str]
+    ) -> dict[str, Any]:
         current_model_name = Path(current.get("model", "")).name if current.get("model") else ""
         current_alias = current.get("alias", "") if current.get("alias") and current.get("alias") != "custom" else ""
-        backend_api_base = f"http://{defaults.get('LLAMA_SERVER_HOST', '127.0.0.1')}:{defaults.get('LLAMA_SERVER_PORT', '8081')}/v1"
+        backend_api_base = (
+            f"http://{defaults.get('LLAMA_SERVER_HOST', '127.0.0.1')}:{defaults.get('LLAMA_SERVER_PORT', '8081')}/v1"
+        )
         gateway_host = defaults.get("LLAMA_MODEL_GATEWAY_HOST", "127.0.0.1").strip() or "127.0.0.1"
         gateway_port = defaults.get("LLAMA_MODEL_GATEWAY_PORT", "4010").strip() or "4010"
         gateway_api_base = f"http://{gateway_host}:{gateway_port}/v1"
@@ -2395,14 +2472,36 @@ class Manager:
                 gateway_status = {}
         gateway_requests = self.load_json_file(self.gateway_requests_file)
         opencode_config = self.load_json_file(self.opencode_config_file)
-        opencode_provider = opencode_config.get("provider", {}).get("llamacpp", {}) if isinstance(opencode_config.get("provider"), dict) else {}
-        opencode_options = opencode_provider.get("options", {}) if isinstance(opencode_provider.get("options"), dict) else {}
+        opencode_provider = (
+            opencode_config.get("provider", {}).get("llamacpp", {})
+            if isinstance(opencode_config.get("provider"), dict)
+            else {}
+        )
+        opencode_options = (
+            opencode_provider.get("options", {}) if isinstance(opencode_provider.get("options"), dict) else {}
+        )
         opencode_api_base = str(opencode_options.get("baseURL", "")).strip()
-        opencode_route_mode = "routed" if opencode_api_base.rstrip("/") == gateway_api_base.rstrip("/") else "direct" if opencode_api_base.rstrip("/") == backend_api_base.rstrip("/") else "custom" if opencode_api_base else ""
-        opencode_timeout = str(opencode_options.get("timeout", "")) if opencode_options.get("timeout") is not None else ""
-        opencode_chunk_timeout = str(opencode_options.get("chunkTimeout", "")) if opencode_options.get("chunkTimeout") is not None else ""
-        opencode_compaction = opencode_config.get("compaction", {}) if isinstance(opencode_config.get("compaction"), dict) else {}
-        opencode_compaction_reserved = str(opencode_compaction.get("reserved", "")) if opencode_compaction.get("reserved") is not None else ""
+        opencode_route_mode = (
+            "routed"
+            if opencode_api_base.rstrip("/") == gateway_api_base.rstrip("/")
+            else "direct"
+            if opencode_api_base.rstrip("/") == backend_api_base.rstrip("/")
+            else "custom"
+            if opencode_api_base
+            else ""
+        )
+        opencode_timeout = (
+            str(opencode_options.get("timeout", "")) if opencode_options.get("timeout") is not None else ""
+        )
+        opencode_chunk_timeout = (
+            str(opencode_options.get("chunkTimeout", "")) if opencode_options.get("chunkTimeout") is not None else ""
+        )
+        opencode_compaction = (
+            opencode_config.get("compaction", {}) if isinstance(opencode_config.get("compaction"), dict) else {}
+        )
+        opencode_compaction_reserved = (
+            str(opencode_compaction.get("reserved", "")) if opencode_compaction.get("reserved") is not None else ""
+        )
         opencode_lmm_state = self.load_json_file(self.opencode_model_state_file).get("llamaModelManager", {})
         opencode_sync_state = opencode_lmm_state.get("opencodeSync", {}) if isinstance(opencode_lmm_state, dict) else {}
         if opencode_timeout == "7200000" and opencode_chunk_timeout == "300000":
@@ -2426,10 +2525,24 @@ class Manager:
         else:
             openclaw_config_file = self.home / f".openclaw-{openclaw_profile}" / "openclaw.json"
         openclaw_config = self.load_json_file(openclaw_config_file)
-        openclaw_providers = openclaw_config.get("models", {}).get("providers", {}) if isinstance(openclaw_config.get("models"), dict) else {}
+        openclaw_providers = (
+            openclaw_config.get("models", {}).get("providers", {})
+            if isinstance(openclaw_config.get("models"), dict)
+            else {}
+        )
         openclaw_llamacpp = openclaw_providers.get("llamacpp", {}) if isinstance(openclaw_providers, dict) else {}
-        openclaw_api_base = str(openclaw_llamacpp.get("baseUrl", "")).strip() if isinstance(openclaw_llamacpp, dict) else ""
-        openclaw_route_mode = "routed" if openclaw_api_base.rstrip("/") == gateway_api_base.rstrip("/") else "direct" if openclaw_api_base.rstrip("/") == backend_api_base.rstrip("/") else "custom" if openclaw_api_base else ""
+        openclaw_api_base = (
+            str(openclaw_llamacpp.get("baseUrl", "")).strip() if isinstance(openclaw_llamacpp, dict) else ""
+        )
+        openclaw_route_mode = (
+            "routed"
+            if openclaw_api_base.rstrip("/") == gateway_api_base.rstrip("/")
+            else "direct"
+            if openclaw_api_base.rstrip("/") == backend_api_base.rstrip("/")
+            else "custom"
+            if openclaw_api_base
+            else ""
+        )
         claude_gateway_status: dict[str, str] = {}
         if not self.demo:
             try:
@@ -2437,7 +2550,10 @@ class Manager:
             except Exception:
                 claude_gateway_status = {}
         claude_model_id = defaults.get("CLAUDE_MODEL_ID", "").strip() or current_alias
-        claude_base_url = defaults.get("CLAUDE_BASE_URL", "").strip() or f"http://{defaults.get('CLAUDE_GATEWAY_HOST', '127.0.0.1')}:{defaults.get('CLAUDE_GATEWAY_PORT', '4000')}"
+        claude_base_url = (
+            defaults.get("CLAUDE_BASE_URL", "").strip()
+            or f"http://{defaults.get('CLAUDE_GATEWAY_HOST', '127.0.0.1')}:{defaults.get('CLAUDE_GATEWAY_PORT', '4000')}"
+        )
         glyphos_telemetry = self.glyphos_telemetry_snapshot(limit=12)
         context_mode_mcp = self.context_mode_mcp_state()
         context_glyphos_pipeline = self.context_glyphos_pipeline_state(
@@ -2458,12 +2574,18 @@ class Manager:
             "opencode_timeout_ms": opencode_timeout,
             "opencode_chunk_timeout_ms": opencode_chunk_timeout,
             "opencode_compaction_reserved": opencode_compaction_reserved,
-            "opencode_timeout_source_note": str(opencode_sync_state.get("timeoutSource", "")) if isinstance(opencode_sync_state, dict) else "",
+            "opencode_timeout_source_note": str(opencode_sync_state.get("timeoutSource", ""))
+            if isinstance(opencode_sync_state, dict)
+            else "",
             "opencode_preset": opencode_preset,
             "opencode_note": opencode_note,
             "openclaw_model": f"llamacpp/{current_alias}" if current_alias else "",
             "openclaw_profile": openclaw_profile,
-            "openclaw_sync_note": "routed through LMM gateway" if openclaw_route_mode == "routed" else "direct llama.cpp provider" if openclaw_route_mode == "direct" else "not yet synced",
+            "openclaw_sync_note": "routed through LMM gateway"
+            if openclaw_route_mode == "routed"
+            else "direct llama.cpp provider"
+            if openclaw_route_mode == "direct"
+            else "not yet synced",
             "openclaw_api_base": openclaw_api_base,
             "openclaw_route_mode": openclaw_route_mode,
             "openclaw_config_file": str(openclaw_config_file),
@@ -2510,7 +2632,12 @@ class Manager:
         glyphos_telemetry: dict[str, Any] | None = None,
         gateway_requests: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        enabled = str(defaults.get("LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE", "")).strip().lower() in {"1", "true", "yes", "on"}
+        enabled = str(defaults.get("LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         glyphos_ready = self.glyphos_config_file.exists()
         glyphos_integration_ready = bool((glyphos_telemetry or {}).get("available"))
         context_ready = bool(context_mode_mcp.get("available"))
@@ -2525,15 +2652,31 @@ class Manager:
         if not context_ready:
             blockers.append("Context Mode MCP package missing")
         recent_gateway = (gateway_requests or {}).get("recent_requests")
-        latest_trace = recent_gateway[0] if isinstance(recent_gateway, list) and recent_gateway and isinstance(recent_gateway[0], dict) else {}
+        latest_trace = (
+            recent_gateway[0]
+            if isinstance(recent_gateway, list) and recent_gateway and isinstance(recent_gateway[0], dict)
+            else {}
+        )
         trace_summary = ""
         if latest_trace:
-            trace_summary = " | ".join(part for part in [
-                "Context enriched" if latest_trace.get("context_used") else f"Context {latest_trace.get('context_status', 'skipped')}",
-                "Glyph encoded" if latest_trace.get("glyph_encoding_used") else f"Glyph Encoding {latest_trace.get('glyph_encoding_status', 'skipped')}",
-                f"Glyph-routed {latest_trace.get('route_target')}" if latest_trace.get("route_target") else "",
-                "Backend completed" if latest_trace.get("success") is True else "Backend error" if latest_trace.get("success") is False else "",
-            ] if part)
+            trace_summary = " | ".join(
+                part
+                for part in [
+                    "Context enriched"
+                    if latest_trace.get("context_used")
+                    else f"Context {latest_trace.get('context_status', 'skipped')}",
+                    "Glyph encoded"
+                    if latest_trace.get("glyph_encoding_used")
+                    else f"Glyph Encoding {latest_trace.get('glyph_encoding_status', 'skipped')}",
+                    f"Glyph-routed {latest_trace.get('route_target')}" if latest_trace.get("route_target") else "",
+                    "Backend completed"
+                    if latest_trace.get("success") is True
+                    else "Backend error"
+                    if latest_trace.get("success") is False
+                    else "",
+                ]
+                if part
+            )
         return {
             "enabled": enabled,
             "ready": ready,
@@ -2584,6 +2727,7 @@ class Manager:
                     for name in list(saved_modules):
                         sys.modules.pop(name, None)
                 from glyphos_ai.ai_compute.router import routing_telemetry_snapshot  # type: ignore
+
                 routing = routing_telemetry_snapshot(limit=int(limit))
                 if not isinstance(routing, dict):
                     routing = dict(baseline_routing)
@@ -2601,7 +2745,9 @@ class Manager:
             except Exception as exc:
                 last_error = exc
                 if prepend and saved_modules:
-                    for name in [key for key in list(sys.modules) if key == "glyphos_ai" or key.startswith("glyphos_ai.")]:
+                    for name in [
+                        key for key in list(sys.modules) if key == "glyphos_ai" or key.startswith("glyphos_ai.")
+                    ]:
                         sys.modules.pop(name, None)
                     sys.modules.update(saved_modules)
             finally:
@@ -2778,16 +2924,50 @@ class Manager:
                 "claude_settings_exists": True,
                 "claude_model_id": "qwen35-9b-q8",
                 "claude_base_url": "http://127.0.0.1:4000",
-                "claude_gateway": {"running": "yes", "url": "http://127.0.0.1:4000", "model_id": "qwen35-9b-q8", "log": "/var/log/claude-gateway.log", "upstream_timeout_seconds": "1800"},
-                "gateway": {"running": "yes", "health": "yes", "url": "http://127.0.0.1:4010/v1", "backend_api_base": "http://127.0.0.1:8081/v1", "mode_default": "routed"},
+                "claude_gateway": {
+                    "running": "yes",
+                    "url": "http://127.0.0.1:4000",
+                    "model_id": "qwen35-9b-q8",
+                    "log": "/var/log/claude-gateway.log",
+                    "upstream_timeout_seconds": "1800",
+                },
+                "gateway": {
+                    "running": "yes",
+                    "health": "yes",
+                    "url": "http://127.0.0.1:4010/v1",
+                    "backend_api_base": "http://127.0.0.1:8081/v1",
+                    "mode_default": "routed",
+                },
                 "gateway_api_base": "http://127.0.0.1:4010/v1",
                 "gateway_backend_api_base": "http://127.0.0.1:8081/v1",
                 "gateway_harness_mode_default": "routed",
                 "gateway_requests": {"recent_requests": [], "counters": {}},
                 "run_history": {"records": [], "total": 0, "by_status": {}},
-                "glyphos_telemetry": {"available": False, "routing": {"attempts_by_target": {}, "fallback_reason_counts": {}, "total_attempts": 0, "recent_attempts": []}},
-                "context_mode_mcp": {"available": True, "root": str(self.context_mode_mcp_root), "dashboard_source_exists": True, "dashboard_build_exists": False, "lifecycle_matrix_exists": True, "typecheck_script_exists": True},
-                "context_glyphos_pipeline": {"enabled": True, "ready": True, "status": "ready", "label": "Ready", "blockers": [], "benefit": "retrieved context + glyph-routed local inference"},
+                "glyphos_telemetry": {
+                    "available": False,
+                    "routing": {
+                        "attempts_by_target": {},
+                        "fallback_reason_counts": {},
+                        "total_attempts": 0,
+                        "recent_attempts": [],
+                    },
+                },
+                "context_mode_mcp": {
+                    "available": True,
+                    "root": str(self.context_mode_mcp_root),
+                    "dashboard_source_exists": True,
+                    "dashboard_build_exists": False,
+                    "lifecycle_matrix_exists": True,
+                    "typecheck_script_exists": True,
+                },
+                "context_glyphos_pipeline": {
+                    "enabled": True,
+                    "ready": True,
+                    "status": "ready",
+                    "label": "Ready",
+                    "blockers": [],
+                    "benefit": "retrieved context + glyph-routed local inference",
+                },
             }
 
         current = self.parse_key_values(self.run_cli("current"))
@@ -2824,7 +3004,6 @@ class Manager:
             "defaults_exists": self.defaults_file.exists(),
             "run_history": run_history,
         }
-
 
 
 REMOTE_AND_DOWNLOAD_POST_ROUTES = {
@@ -2875,7 +3054,9 @@ REMOTE_AND_DOWNLOAD_POST_ROUTES = {
 }
 
 
-def remote_and_download_post_route_payload(path: str, manager: Manager, payload: dict[str, Any]) -> dict[str, Any] | None:
+def remote_and_download_post_route_payload(
+    path: str, manager: Manager, payload: dict[str, Any]
+) -> dict[str, Any] | None:
     handler = REMOTE_AND_DOWNLOAD_POST_ROUTES.get(path)
     if handler is None:
         return None
@@ -3008,13 +3189,13 @@ class AppHandler(BaseHTTPRequestHandler):
                 continue
             try:
                 payload[field] = int(payload[field])
-            except (TypeError, ValueError):
-                raise ValidationError("invalid_field_type", f"Field '{field}' must be an integer")
+            except (TypeError, ValueError) as exc:
+                raise ValidationError("invalid_field_type", f"Field '{field}' must be an integer") from exc
 
         return payload
 
     def _parse_lines_query(self, raw_lines: str | None, *, default: int = 80) -> int:
-        value_text = (str(raw_lines).strip() if raw_lines is not None else str(default))
+        value_text = str(raw_lines).strip() if raw_lines is not None else str(default)
         try:
             value = int(value_text)
         except ValueError as exc:
@@ -3096,11 +3277,7 @@ class AppHandler(BaseHTTPRequestHandler):
             self.manager.run_cli("set-mode", target_mode, "--restart")
             return {"ok": True}
         if route == "/api/defaults/save":
-            updates = {
-                key: str(payload.get(key, ""))
-                for key in KNOWN_DEFAULT_KEYS
-                if key in payload
-            }
+            updates = {key: str(payload.get(key, "")) for key in KNOWN_DEFAULT_KEYS if key in payload}
             self.manager.save_defaults(updates)
             return {"ok": True}
         if route == "/api/dashboard-service":
@@ -3292,7 +3469,9 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--host", default=os.environ.get("LLAMA_MODEL_WEB_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("LLAMA_MODEL_WEB_PORT", "8765")))
     parser.add_argument("--no-browser", action="store_true")
-    parser.add_argument("--require-bind", action="store_true", help="exit non-zero if the dashboard port is already occupied")
+    parser.add_argument(
+        "--require-bind", action="store_true", help="exit non-zero if the dashboard port is already occupied"
+    )
     parser.add_argument("--demo", action="store_true", help="Serve sanitized demo data for screenshots and public docs")
     args = parser.parse_args(argv)
 
