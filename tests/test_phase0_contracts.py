@@ -513,6 +513,64 @@ class Phase0ContractTests(unittest.TestCase):
             self.assertTrue(started_at)
             self.assertEqual(started_at, manager.started_at)
 
+    def test_demo_state_loads_from_json_file(self) -> None:
+        demo_path = ROOT_DIR / "web" / "demo_state.json"
+        self.assertTrue(demo_path.is_file())
+
+        payload = json.loads(demo_path.read_text(encoding="utf-8"))
+
+        self.assertIn("state", payload)
+        self.assertIn("discovery", payload)
+        self.assertIn("log", payload)
+        self.assertEqual(payload["state"]["title"], "LLM Model Manager")
+        self.assertEqual(len(payload["discovery"]), 2)
+        self.assertIn("model loaded", payload["log"])
+
+    def test_demo_state_matches_hardcoded_values(self) -> None:
+        demo_path = ROOT_DIR / "web" / "demo_state.json"
+        payload = json.loads(demo_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["state"]["title"], WEB_APP.DEMO_STATE["title"])
+        self.assertEqual(payload["state"]["brand"], WEB_APP.DEMO_STATE["brand"])
+        self.assertEqual(len(payload["state"]["models"]), len(WEB_APP.DEMO_STATE["models"]))
+
+    def test_manager_load_run_history_returns_empty_when_no_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing = Path(tmpdir) / "missing-run-records.json"
+            with mock.patch.dict(os.environ, {"LMM_RUN_RECORDS_FILE": str(missing)}, clear=False):
+                manager = self.make_manager(tmpdir)
+
+                run_history = manager._load_run_history()
+
+            self.assertEqual(run_history["records"], [])
+            self.assertEqual(run_history["total"], 0)
+            self.assertEqual(run_history["by_status"], {})
+            self.assertNotIn("error", run_history)
+
+    def test_manager_load_run_history_returns_records_when_file_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            records_path = Path(tmpdir) / "run-records.json"
+            storage = self.load_script_module("llama_model_manager_storage_task3", LMM_STORAGE_PATH)
+            store = storage.JsonRunRecordStore(records_path)
+            store.append_record({"id": "completed-1", "status": "completed", "model": "m1"})
+            store.append_record({"id": "failed-1", "status": "failed", "model": "m2"})
+
+            with mock.patch.dict(os.environ, {"LMM_RUN_RECORDS_FILE": str(records_path)}, clear=False):
+                manager = self.make_manager(tmpdir)
+                run_history = manager._load_run_history()
+
+            self.assertEqual(run_history["total"], 2)
+            self.assertEqual([item["id"] for item in run_history["records"]], ["failed-1", "completed-1"])
+            self.assertEqual(run_history["by_status"], {"completed": 1, "failed": 1})
+            self.assertEqual(run_history["latest_completed"]["id"], "completed-1")
+
+    def test_demo_mode_state_includes_run_history_key(self) -> None:
+        manager = WEB_APP.Manager(ROOT_DIR / "web", demo=True)
+        state = manager.state()
+
+        self.assertTrue(state["demo"])
+        self.assertEqual(state["run_history"], {"records": [], "total": 0, "by_status": {}})
+
     def test_dashboard_markup_separates_glyph_routes_from_control_activity(self) -> None:
         html = (ROOT_DIR / "web" / "index.html").read_text(encoding="utf-8")
 
