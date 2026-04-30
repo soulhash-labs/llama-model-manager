@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
-import fcntl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
@@ -22,9 +20,16 @@ from urllib.error import HTTPError, URLError
 
 
 APP_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_ROOT = Path(__file__).resolve().parent
+if str(SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT))
 INTEGRATION_ROOT = APP_ROOT / "integrations" / "public-glyphos-ai-compute"
 if str(INTEGRATION_ROOT) not in sys.path:
     sys.path.insert(0, str(INTEGRATION_ROOT))
+
+from lmm_config import load_lmm_config_from_env  # noqa: E402
+from lmm_errors import GatewayError, InvalidRequestError  # noqa: E402
+from lmm_storage import JsonGatewayTelemetryStore  # noqa: E402
 
 
 def now() -> float:
@@ -40,10 +45,6 @@ def json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[st
         handler.send_header(key, value)
     handler.end_headers()
     handler.wfile.write(raw)
-
-
-class InvalidRequestError(ValueError):
-    pass
 
 
 def read_json(handler: BaseHTTPRequestHandler, *, max_bytes: int = 2_000_000) -> dict[str, Any]:
@@ -135,64 +136,20 @@ def run_context_command(command: list[str], *, input_text: str, timeout_seconds:
 
 
 def state_file() -> Path:
-    configured = os.environ.get("LMM_GATEWAY_STATE_FILE", "").strip()
-    if configured:
-        return Path(configured).expanduser()
-    state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")).expanduser()
-    return state_home / "llama-server" / "lmm-gateway-requests.json"
+    return load_lmm_config_from_env().gateway.state_file
+
+
+def telemetry_store() -> JsonGatewayTelemetryStore:
+    config = load_lmm_config_from_env().gateway
+    return JsonGatewayTelemetryStore(config.state_file, recent_limit=config.telemetry_recent_limit)
 
 
 def load_gateway_state() -> dict[str, Any]:
-    path = state_file()
-    if not path.exists():
-        return {"recent_requests": [], "counters": {}}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {"recent_requests": [], "counters": {}}
-    return payload if isinstance(payload, dict) else {"recent_requests": [], "counters": {}}
-
-
-def save_gateway_state(payload: dict[str, Any]) -> None:
-    path = state_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    temp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    temp.replace(path)
-
-
-@contextmanager
-def gateway_state_lock():
-    path = state_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = path.with_name(f".{path.name}.lock")
-    with lock_path.open("a", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    return telemetry_store().read_state()
 
 
 def record_gateway_request(record: dict[str, Any]) -> None:
-    with gateway_state_lock():
-        state = load_gateway_state()
-        counters = state.get("counters")
-        if not isinstance(counters, dict):
-            counters = {}
-        for key in ("mode", "route_target", "context_status", "success"):
-            value = str(record.get(key, "unknown"))
-            counter_key = f"{key}:{value}"
-            counters[counter_key] = int(counters.get(counter_key, 0)) + 1
-        recent = state.get("recent_requests")
-        if not isinstance(recent, list):
-            recent = []
-        recent.insert(0, record)
-        del recent[40:]
-        state["counters"] = counters
-        state["recent_requests"] = recent
-        state["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        save_gateway_state(state)
+    telemetry_store().append_event(record)
 
 
 def safe_record_gateway_request(record: dict[str, Any]) -> None:
@@ -227,7 +184,7 @@ def messages_to_prompt(messages: Any) -> str:
 
 
 def context_pipeline_enabled() -> bool:
-    return os.environ.get("LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE", "").strip().lower() in {"1", "true", "yes", "on"}
+    return load_lmm_config_from_env().context.enabled
 
 
 def context_mcp_root() -> Path:
@@ -239,13 +196,13 @@ def context_mcp_bridge_path() -> Path:
 
 
 def context_status() -> tuple[str, bool]:
-    enabled = context_pipeline_enabled()
-    if not enabled:
+    context_config = load_lmm_config_from_env().context
+    if not context_config.enabled:
         return "disabled", False
     root = context_mcp_root()
     if not (root / "package.json").is_file():
         return "missing", False
-    if os.environ.get("LMM_CONTEXT_MCP_COMMAND", "").strip():
+    if context_config.command:
         return "command_configured", False
     if not context_mcp_bridge_path().is_file():
         return "missing_bridge", False
@@ -350,7 +307,7 @@ def command_context_from_output(raw: str) -> Any:
 
 
 def retrieve_context(payload: dict[str, Any], prompt: str, *, model: str, stream: bool) -> dict[str, Any]:
-    enabled = os.environ.get("LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE", "").strip().lower() in {"1", "true", "yes", "on"}
+    context_config = load_lmm_config_from_env().context
     started = time.perf_counter()
     result: dict[str, Any] = {
         "status": "disabled",
@@ -360,7 +317,7 @@ def retrieve_context(payload: dict[str, Any], prompt: str, *, model: str, stream
         "error": "",
         "latency_ms": 0,
     }
-    if not enabled:
+    if not context_config.enabled:
         return result
     root = context_mcp_root()
     if not (root / "package.json").is_file():
@@ -379,7 +336,7 @@ def retrieve_context(payload: dict[str, Any], prompt: str, *, model: str, stream
         })
         return result
 
-    command = os.environ.get("LMM_CONTEXT_MCP_COMMAND", "").strip()
+    command = context_config.command
     if not command:
         bridge = context_mcp_bridge_path()
         if not bridge.is_file():
@@ -405,7 +362,7 @@ def retrieve_context(payload: dict[str, Any], prompt: str, *, model: str, stream
         })
         return result
 
-    timeout_ms = request_int({"timeout": os.environ.get("LMM_CONTEXT_MCP_TIMEOUT_MS", "1500")}, "timeout", 1500)
+    timeout_ms = context_config.timeout_ms
     request_payload = {
         "tool": "ctx_search",
         "query": prompt[-4000:],
@@ -500,10 +457,11 @@ def glyph_encode_context(context: str) -> dict[str, Any]:
     try:
         if not raw:
             return result
-        if os.environ.get("LMM_GLYPH_ENCODING_DISABLED", "").strip().lower() in {"1", "true", "yes", "on"}:
+        encoding_config = load_lmm_config_from_env().glyph_encoding
+        if encoding_config.disabled:
             result["status"] = "disabled"
             return result
-        if os.environ.get("LMM_GLYPH_ENCODING_FORCE_ERROR", "").strip():
+        if encoding_config.force_error:
             raise RuntimeError("forced glyph encoding failure")
         encoded = ""
         try:
@@ -639,7 +597,7 @@ def route_prompt(prompt: str, model: str, max_tokens: int, temperature: float) -
     result = router.route(packet, prompt=prompt, model=model, max_tokens=max_tokens, temperature=temperature)
     latency_ms = round((time.perf_counter() - start) * 1000)
     if result.target.value == "fallback" or str(result.routing_reason_code).endswith(".error"):
-        raise RuntimeError(f"{result.target.value} route failed: {result.response}")
+        raise GatewayError(f"{result.target.value} route failed: {result.response}", target=result.target.value)
     headers = {
         "X-LMM-Route-Mode": "routed",
         "X-LMM-GlyphOS-Target": result.target.value,
@@ -745,10 +703,7 @@ def stream_completion(
     }
 
     if heartbeat_seconds is None:
-        try:
-            heartbeat_seconds = float(os.environ.get("LMM_GATEWAY_SSE_HEARTBEAT_SECONDS", "5"))
-        except ValueError:
-            heartbeat_seconds = 5.0
+        heartbeat_seconds = load_lmm_config_from_env().gateway.sse_heartbeat_seconds
     heartbeat_seconds = max(0.01, heartbeat_seconds)
 
     def pump_chunks() -> None:
@@ -814,24 +769,51 @@ def stream_completion(
         return "".join(collected), False, error_message, round((now() - started) * 1000)
 
 
+class LMMOpenAIGateway:
+    def __init__(self, *, backend_base_url: str, model_id: str = "") -> None:
+        self.backend_base_url = backend_base_url.rstrip("/")
+        self.model_id = model_id
+
+    def health(self) -> dict[str, Any]:
+        return {"ok": True, "service": "lmm-glyphos-openai-gateway"}
+
+    def list_models(self) -> tuple[int, dict[str, Any]]:
+        try:
+            return http_json("GET", f"{self.backend_base_url}/models", timeout=5)
+        except Exception as exc:
+            model = self.model_id or "local-llama"
+            return 200, {
+                "object": "list",
+                "data": [{"id": model, "object": "model", "owned_by": "lmm"}],
+                "warning": str(exc),
+            }
+
+    def telemetry(self) -> dict[str, Any]:
+        return load_gateway_state()
+
+
 class GatewayHandler(BaseHTTPRequestHandler):
     server_version = "LMMGlyphOSGateway/1.0"
+
+    def gateway(self) -> LMMOpenAIGateway:
+        existing = getattr(self.server, "gateway", None)
+        if isinstance(existing, LMMOpenAIGateway):
+            return existing
+        backend_base_url = getattr(self.server, "backend_base_url", "http://127.0.0.1:8081/v1")
+        model_id = getattr(self.server, "model_id", "")
+        return LMMOpenAIGateway(backend_base_url=str(backend_base_url), model_id=str(model_id))
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         if path in {"/healthz", "/v1", "/v1/health"}:
-            json_response(self, 200, {"ok": True, "service": "lmm-glyphos-openai-gateway"})
+            json_response(self, 200, self.gateway().health())
             return
         if path == "/v1/models":
-            try:
-                status, payload = http_json("GET", f"{self.server.backend_base_url.rstrip('/')}/models", timeout=5)  # type: ignore[attr-defined]
-                json_response(self, status, payload)
-            except Exception as exc:
-                model = self.server.model_id or "local-llama"  # type: ignore[attr-defined]
-                json_response(self, 200, {"object": "list", "data": [{"id": model, "object": "model", "owned_by": "lmm"}], "warning": str(exc)})
+            status, payload = self.gateway().list_models()
+            json_response(self, status, payload)
             return
         if path == "/v1/telemetry":
-            json_response(self, 200, load_gateway_state())
+            json_response(self, 200, self.gateway().telemetry())
             return
         json_response(self, 404, {"error": {"message": "unknown route", "type": "not_found"}})
 
@@ -944,23 +926,48 @@ class GatewayHandler(BaseHTTPRequestHandler):
             record["error"] = str(exc)
             record["latency_ms"] = round((now() - started) * 1000)
             safe_record_gateway_request(record)
-            json_response(self, 503, {"error": {"message": str(exc), "type": "lmm_gateway_error"}, "lmm": record})
+            error_payload = exc.to_dict() if isinstance(exc, GatewayError) else {"message": str(exc), "type": "lmm_gateway_error"}
+            json_response(self, 503, {"error": error_payload, "lmm": record})
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
         sys.stderr.write("%s - %s\n" % (self.log_date_time_string(), format % args))
 
 
+def create_gateway_server(
+    host: str = "127.0.0.1",
+    port: int = 4010,
+    backend_base_url: str = "http://127.0.0.1:8081/v1",
+    model_id: str = "",
+) -> ThreadingHTTPServer:
+    """Create a configured ThreadingHTTPServer for the LMM OpenAI gateway.
+
+    Returns a server with ``GatewayHandler`` and the following attributes:
+    - ``server.backend_base_url`` (str)
+    - ``server.model_id`` (str)
+    - ``server.gateway`` (LMMOpenAIGateway)
+    """
+    server = ThreadingHTTPServer((host, port), GatewayHandler)
+    server.backend_base_url = backend_base_url  # type: ignore[attr-defined]
+    server.model_id = model_id  # type: ignore[attr-defined]
+    server.gateway = LMMOpenAIGateway(backend_base_url=backend_base_url, model_id=model_id)  # type: ignore[attr-defined]
+    return server
+
+
 def main(argv: list[str]) -> int:
+    config = load_lmm_config_from_env().gateway
     parser = argparse.ArgumentParser(description="LMM OpenAI-compatible gateway through GlyphOS AI Compute")
-    parser.add_argument("--host", default=os.environ.get("LLAMA_MODEL_GATEWAY_HOST", "127.0.0.1"))
-    parser.add_argument("--port", type=int, default=int(os.environ.get("LLAMA_MODEL_GATEWAY_PORT", "4010")))
-    parser.add_argument("--backend-base-url", default=os.environ.get("LLAMA_MODEL_BACKEND_BASE_URL", "http://127.0.0.1:8081/v1"))
-    parser.add_argument("--model-id", default=os.environ.get("LLAMA_MODEL_GATEWAY_MODEL_ID", ""))
+    parser.add_argument("--host", default=config.host)
+    parser.add_argument("--port", type=int, default=config.port)
+    parser.add_argument("--backend-base-url", default=config.backend_base_url)
+    parser.add_argument("--model-id", default=config.model_id)
     args = parser.parse_args(argv)
 
-    server = ThreadingHTTPServer((args.host, args.port), GatewayHandler)
-    server.backend_base_url = args.backend_base_url  # type: ignore[attr-defined]
-    server.model_id = args.model_id  # type: ignore[attr-defined]
+    server = create_gateway_server(
+        host=args.host,
+        port=args.port,
+        backend_base_url=args.backend_base_url,
+        model_id=args.model_id,
+    )
     print(f"LMM GlyphOS gateway listening on http://{args.host}:{args.port}/v1 -> {args.backend_base_url}", flush=True)
     try:
         server.serve_forever()

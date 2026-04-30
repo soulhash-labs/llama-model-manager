@@ -300,6 +300,16 @@ These integrations are optional. The default product behavior remains the local 
 - post-switch sync is non-fatal; a client-config error warns but does not roll back a successfully started local model.
 - the dashboard exposes direct sync actions for all three tools, LMM Gateway controls for routed harness traffic, and separate Claude Gateway controls for Claude Code compatibility.
 
+### Gateway foundation modules
+
+The gateway Python surfaces share small stdlib-only foundation modules under `scripts/`:
+
+- `lmm_config.py` loads and validates gateway/context environment settings with dataclasses instead of ad-hoc parsing.
+- `lmm_errors.py` provides machine-readable error payloads for configuration, gateway, provider, routing, and storage failures.
+- `lmm_storage.py` owns gateway telemetry persistence behind a storage adapter so handlers do not mutate state files directly.
+
+These modules are intentionally dependency-free and can coexist with the existing `defaults.env` shell configuration while LMM migrates more code paths onto structured config and storage.
+
 ## Context Mode MCP
 
 The optional Context Mode MCP package lives under `integrations/context-mode-mcp/`. It is intended for local development workflows that need indexed context, compact retrieval, lifecycle diagnostics, and MCP tool execution helpers.

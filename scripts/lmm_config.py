@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+from dataclasses import dataclass
+import os
+from pathlib import Path
+from urllib.parse import urlparse
+
+# Self-contained import: ensure sibling lmm_errors is reachable when this
+# module is loaded directly (e.g. by web/app.py without scripts/ on sys.path).
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in __import__("sys").path:
+    __import__("sys").path.insert(0, str(_SCRIPT_DIR))
+
+from lmm_errors import ConfigurationError  # noqa: E402
+
+
+def _env(name: str, default: str = "") -> str:
+    value = os.environ.get(name)
+    return default if value is None else value.strip()
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    value = _env(name)
+    if not value:
+        return default
+    lowered = value.lower()
+    if lowered in {"1", "true", "yes", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(f"{name} must be boolean-like", variable=name, value=value)
+
+
+def _int_env(name: str, default: int, *, minimum: int | None = None, maximum: int | None = None) -> int:
+    value = _env(name)
+    if not value:
+        number = default
+    else:
+        try:
+            number = int(value)
+        except ValueError as exc:
+            raise ConfigurationError(f"{name} must be an integer", variable=name, value=value) from exc
+    if minimum is not None and number < minimum:
+        raise ConfigurationError(f"{name} must be >= {minimum}", variable=name, value=number)
+    if maximum is not None and number > maximum:
+        raise ConfigurationError(f"{name} must be <= {maximum}", variable=name, value=number)
+    return number
+
+
+def _float_env(name: str, default: float, *, minimum: float | None = None) -> float:
+    value = _env(name)
+    if not value:
+        number = default
+    else:
+        try:
+            number = float(value)
+        except ValueError as exc:
+            raise ConfigurationError(f"{name} must be a number", variable=name, value=value) from exc
+    if minimum is not None and number < minimum:
+        raise ConfigurationError(f"{name} must be >= {minimum}", variable=name, value=number)
+    return number
+
+
+def _url(value: str, *, field: str) -> str:
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ConfigurationError(f"{field} must be an http(s) URL", field=field, value=value)
+    return value.rstrip("/")
+
+
+@dataclass(frozen=True)
+class GatewayConfig:
+    host: str = "127.0.0.1"
+    port: int = 4010
+    backend_base_url: str = "http://127.0.0.1:8081/v1"
+    model_id: str = ""
+    state_file: Path = Path.home() / ".local" / "state" / "llama-server" / "lmm-gateway-requests.json"
+    sse_heartbeat_seconds: float = 5.0
+    telemetry_recent_limit: int = 40
+
+    def __post_init__(self) -> None:
+        if not self.host.strip():
+            raise ConfigurationError("gateway host cannot be empty", field="host")
+        if self.port < 1 or self.port > 65535:
+            raise ConfigurationError("gateway port out of range", field="port", value=self.port)
+        _url(self.backend_base_url, field="backend_base_url")
+        if self.sse_heartbeat_seconds <= 0:
+            raise ConfigurationError("SSE heartbeat must be positive", field="sse_heartbeat_seconds")
+        if self.telemetry_recent_limit < 1:
+            raise ConfigurationError("telemetry recent limit must be positive", field="telemetry_recent_limit")
+
+
+@dataclass(frozen=True)
+class ContextConfig:
+    enabled: bool = False
+    timeout_ms: int = 1500
+    command: str = ""
+
+    def __post_init__(self) -> None:
+        if self.timeout_ms < 1:
+            raise ConfigurationError("Context MCP timeout must be positive", field="timeout_ms", value=self.timeout_ms)
+
+
+@dataclass(frozen=True)
+class GlyphEncodingConfig:
+    disabled: bool = False
+    force_error: bool = False
+
+
+@dataclass(frozen=True)
+class LMMConfig:
+    gateway: GatewayConfig
+    context: ContextConfig
+    glyph_encoding: GlyphEncodingConfig
+
+
+def default_state_file() -> Path:
+    state_home = Path(_env("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))).expanduser()
+    return state_home / "llama-server" / "lmm-gateway-requests.json"
+
+
+def load_lmm_config_from_env() -> LMMConfig:
+    gateway = GatewayConfig(
+        host=_env("LLAMA_MODEL_GATEWAY_HOST", "127.0.0.1"),
+        port=_int_env("LLAMA_MODEL_GATEWAY_PORT", 4010, minimum=1, maximum=65535),
+        backend_base_url=_url(_env("LLAMA_MODEL_BACKEND_BASE_URL", "http://127.0.0.1:8081/v1"), field="backend_base_url"),
+        model_id=_env("LLAMA_MODEL_GATEWAY_MODEL_ID", ""),
+        state_file=Path(_env("LMM_GATEWAY_STATE_FILE", str(default_state_file()))).expanduser(),
+        sse_heartbeat_seconds=_float_env("LMM_GATEWAY_SSE_HEARTBEAT_SECONDS", 5.0, minimum=0.01),
+        telemetry_recent_limit=_int_env("LMM_GATEWAY_RECENT_LIMIT", 40, minimum=1, maximum=500),
+    )
+    context = ContextConfig(
+        enabled=_bool_env("LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE", False),
+        timeout_ms=_int_env("LMM_CONTEXT_MCP_TIMEOUT_MS", 1500, minimum=1),
+        command=_env("LMM_CONTEXT_MCP_COMMAND", ""),
+    )
+    glyph_encoding = GlyphEncodingConfig(
+        disabled=_bool_env("LMM_GLYPH_ENCODING_DISABLED", False),
+        force_error=bool(_env("LMM_GLYPH_ENCODING_FORCE_ERROR", "")),
+    )
+    return LMMConfig(gateway=gateway, context=context, glyph_encoding=glyph_encoding)

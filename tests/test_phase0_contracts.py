@@ -30,6 +30,9 @@ SPEC.loader.exec_module(WEB_APP)
 
 GATEWAY_PATH = ROOT_DIR / "scripts" / "glyphos_openai_gateway.py"
 CONTEXT_BRIDGE_PATH = ROOT_DIR / "scripts" / "context_mcp_bridge.py"
+LMM_CONFIG_PATH = ROOT_DIR / "scripts" / "lmm_config.py"
+LMM_ERRORS_PATH = ROOT_DIR / "scripts" / "lmm_errors.py"
+LMM_STORAGE_PATH = ROOT_DIR / "scripts" / "lmm_storage.py"
 
 
 class Phase0ContractTests(unittest.TestCase):
@@ -44,12 +47,144 @@ class Phase0ContractTests(unittest.TestCase):
             sys.path[:] = original_path
         return gateway
 
+    def load_script_module(self, module_name: str, path: Path) -> object:
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        original_path = list(sys.path)
+        original_module = sys.modules.get(module_name)
+        try:
+            sys.path.insert(0, str(ROOT_DIR / "scripts"))
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+        finally:
+            sys.path[:] = original_path
+            if original_module is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = original_module
+        return module
+
     def load_context_bridge_module(self) -> object:
         bridge_spec = importlib.util.spec_from_file_location("llama_model_manager_context_bridge", CONTEXT_BRIDGE_PATH)
         assert bridge_spec and bridge_spec.loader
         bridge = importlib.util.module_from_spec(bridge_spec)
         bridge_spec.loader.exec_module(bridge)
         return bridge
+
+    def test_lmm_config_validates_gateway_environment(self) -> None:
+        config_module = self.load_script_module("llama_model_manager_config", LMM_CONFIG_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_file = Path(tmpdir) / "gateway-state.json"
+            with mock.patch.dict(os.environ, {
+                "LLAMA_MODEL_GATEWAY_HOST": "127.0.0.9",
+                "LLAMA_MODEL_GATEWAY_PORT": "4510",
+                "LLAMA_MODEL_BACKEND_BASE_URL": "http://127.0.0.1:8089/v1",
+                "LMM_GATEWAY_STATE_FILE": str(state_file),
+                "LMM_GATEWAY_SSE_HEARTBEAT_SECONDS": "2.5",
+                "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
+                "LMM_CONTEXT_MCP_TIMEOUT_MS": "2500",
+            }, clear=False):
+                config = config_module.load_lmm_config_from_env()
+
+        self.assertEqual(config.gateway.host, "127.0.0.9")
+        self.assertEqual(config.gateway.port, 4510)
+        self.assertEqual(config.gateway.backend_base_url, "http://127.0.0.1:8089/v1")
+        self.assertEqual(config.gateway.state_file, state_file)
+        self.assertEqual(config.gateway.sse_heartbeat_seconds, 2.5)
+        self.assertTrue(config.context.enabled)
+        self.assertEqual(config.context.timeout_ms, 2500)
+
+    def test_lmm_config_rejects_invalid_gateway_values(self) -> None:
+        config_module = self.load_script_module("llama_model_manager_config_invalid", LMM_CONFIG_PATH)
+        with mock.patch.dict(os.environ, {
+            "LLAMA_MODEL_GATEWAY_PORT": "70000",
+            "LLAMA_MODEL_BACKEND_BASE_URL": "not-a-url",
+        }, clear=False):
+            with self.assertRaises(Exception) as raised:
+                config_module.load_lmm_config_from_env()
+        self.assertIn("configuration", raised.exception.__class__.__name__.lower())
+
+    def test_lmm_error_payloads_are_machine_readable(self) -> None:
+        errors_module = self.load_script_module("llama_model_manager_errors", LMM_ERRORS_PATH)
+        exc = errors_module.ProviderTimeoutError("llama.cpp", 1800)
+        payload = exc.to_dict()
+        self.assertEqual(payload["type"], "provider_timeout_error")
+        self.assertEqual(payload["details"]["provider"], "llama.cpp")
+        self.assertEqual(payload["details"]["timeout_seconds"], 1800)
+
+    def test_json_gateway_storage_adapter_caps_recent_requests_and_counts(self) -> None:
+        storage_module = self.load_script_module("llama_model_manager_storage", LMM_STORAGE_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "gateway-state.json"
+            store = storage_module.JsonGatewayTelemetryStore(path, recent_limit=2)
+            store.append_event({"mode": "routed-basic", "route_target": "llamacpp", "context_status": "empty", "success": True, "n": 1})
+            store.append_event({"mode": "routed-full", "route_target": "llamacpp", "context_status": "retrieved", "success": True, "n": 2})
+            state = store.append_event({"mode": "routed-basic", "route_target": "fallback", "context_status": "timeout", "success": False, "n": 3})
+
+        self.assertEqual([item["n"] for item in state["recent_requests"]], [3, 2])
+        self.assertEqual(state["counters"]["mode:routed-basic"], 2)
+        self.assertEqual(state["counters"]["success:True"], 2)
+        self.assertEqual(state["counters"]["success:False"], 1)
+
+    def test_lmm_config_imports_without_scripts_on_sys_path(self) -> None:
+        """Verify lmm_config.py is self-contained when loaded directly."""
+        config_spec = importlib.util.spec_from_file_location(
+            "lmm_config_isolated_test", LMM_CONFIG_PATH,
+        )
+        assert config_spec and config_spec.loader
+        config_module = importlib.util.module_from_spec(config_spec)
+        # Temporarily strip scripts/ from sys.path before exec
+        scripts_entry = str(ROOT_DIR / "scripts")
+        original_path = list(sys.path)
+        cleaned_path = [p for p in sys.path if p != scripts_entry]
+        try:
+            sys.path[:] = cleaned_path
+            # dataclass decorator in Python 3.12 requires the module to be
+            # registered in sys.modules during exec, so we register it
+            # temporarily and clean up afterward.
+            sys.modules[config_spec.name] = config_module
+            config_spec.loader.exec_module(config_module)
+        finally:
+            sys.path[:] = original_path
+            sys.modules.pop(config_spec.name, None)
+
+        config = config_module.load_lmm_config_from_env()
+        self.assertIsInstance(config.gateway.port, int)
+        self.assertGreater(config.gateway.port, 0)
+
+    def test_gateway_server_factory_returns_configured_server(self) -> None:
+        """Verify create_gateway_server() attaches expected attributes."""
+        gateway = self.load_gateway_module()
+        server = gateway.create_gateway_server(
+            host="127.0.0.1",
+            port=0,  # ephemeral — test doesn't bind long
+            backend_base_url="http://test:9999/v1",
+            model_id="test-model",
+        )
+
+        try:
+            self.assertEqual(server.backend_base_url, "http://test:9999/v1")  # type: ignore[attr-defined]
+            self.assertEqual(server.model_id, "test-model")  # type: ignore[attr-defined]
+            self.assertIsInstance(server.gateway, gateway.LMMOpenAIGateway)  # type: ignore[attr-defined]
+            self.assertEqual(server.gateway.backend_base_url, "http://test:9999/v1")
+            self.assertEqual(server.gateway.model_id, "test-model")
+        finally:
+            server.server_close()
+
+    def test_gateway_server_factory_defaults_match_config(self) -> None:
+        """Verify create_gateway_server() defaults align with load_lmm_config_from_env()."""
+        gateway = self.load_gateway_module()
+        config_module = self.load_script_module("llama_model_manager_config_defaults", LMM_CONFIG_PATH)
+        config = config_module.load_lmm_config_from_env()
+        # Use ephemeral port (0) to avoid address conflicts with existing tests
+        server = gateway.create_gateway_server(host=config.gateway.host, port=0)
+
+        try:
+            self.assertEqual(server.server_address[0], config.gateway.host)
+            self.assertEqual(server.backend_base_url, config.gateway.backend_base_url)  # type: ignore[attr-defined]
+        finally:
+            server.server_close()
 
     def test_gateway_context_status_reports_bridge_readiness(self) -> None:
         gateway = self.load_gateway_module()
