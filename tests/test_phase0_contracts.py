@@ -1729,6 +1729,10 @@ class Phase0ContractTests(unittest.TestCase):
                         "LLAMA_SERVER_BIN=/custom/bin/llama-server",
                         "LLAMA_SERVER_WAIT_SECONDS=45",
                         "LLAMA_SERVER_EXTRA_ARGS='--jinja --system-prompt \"hello world\"'",
+                        "LLAMA_MODEL_HARNESS_MODE=direct",
+                        "LLAMA_MODEL_GATEWAY_HOST=127.0.0.2",
+                        "LLAMA_MODEL_GATEWAY_PORT=4510",
+                        "LLAMA_MODEL_GATEWAY_LOG=$HOME/models/custom-gateway.log",
                     ]
                 )
                 + "\n",
@@ -1740,6 +1744,10 @@ class Phase0ContractTests(unittest.TestCase):
             self.assertEqual(defaults["LLAMA_SERVER_BIN"], "/custom/bin/llama-server")
             self.assertEqual(defaults["LLAMA_SERVER_WAIT_SECONDS"], "45")
             self.assertEqual(defaults["LLAMA_SERVER_EXTRA_ARGS"], '--jinja --system-prompt "hello world"')
+            self.assertEqual(defaults["LLAMA_MODEL_HARNESS_MODE"], "direct")
+            self.assertEqual(defaults["LLAMA_MODEL_GATEWAY_HOST"], "127.0.0.2")
+            self.assertEqual(defaults["LLAMA_MODEL_GATEWAY_PORT"], "4510")
+            self.assertEqual(defaults["LLAMA_MODEL_GATEWAY_LOG"], "$HOME/models/custom-gateway.log")
             self.assertEqual(defaults["LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE"], "")
 
     def test_context_glyphos_pipeline_reports_toggle_and_readiness(self) -> None:
