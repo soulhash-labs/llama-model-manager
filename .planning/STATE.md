@@ -6,16 +6,16 @@ current_phase: 2
 current_phase_name: run-records
 current_plan: 3
 status: paused
-stopped_at: Completed 03-receipts-notifications-01-PLAN.md
+stopped_at: Completed 03-receipts-notifications-02-PLAN.md
 paused_at: None
-last_updated: "2026-04-30T20:31:30.384Z"
+last_updated: "2026-04-30T20:33:30.249Z"
 last_activity: 2026-04-30
 progress:
   total_phases: 1
   completed_phases: 1
   total_plans: 3
   completed_plans: 3
-  percent: 86
+  percent: 100
 ---
 
 # Project State
@@ -30,7 +30,7 @@ progress:
 **Status:** Phase complete — ready for verification
 **Last Activity:** 2026-04-30
 **Last Activity Description:** completed 02-run-records-01
-**Progress:** [█████████░] 86%
+**Progress:** [██████████] 100%
 **Paused At:** None
 
 ## Performance Metrics
@@ -50,6 +50,7 @@ progress:
 | Phase 02-run-records P03 | 360 | 3 tasks | 3 files |
 | Phase 05-devex P01 | 1m | 3 tasks | 6 files |
 | Phase 03-receipts-notifications P01 | 0m | 2 tasks | 3 files |
+| Phase 03-receipts-notifications P02 | 1 | 3 tasks | 3 files |
 
 ## Decisions
 
@@ -68,6 +69,8 @@ progress:
 - [Phase 03-receipts-notifications]: Use digest-only receipts to avoid storing full request/response payloads
 - [Phase 03-receipts-notifications]: Reuse _FileLockedJsonStore lock pattern for receipt writes
 - [Phase 03-receipts-notifications]: Return newest-first receipts from read_recent() for audit viewers
+- [Phase 03-receipts-notifications]: Use desktop notification first with log fallback for notification delivery.
+- [Phase 03-receipts-notifications]: Gate notifications behind 30s completion threshold and cooldown defaults.
 
 ## Blockers
 
@@ -75,9 +78,10 @@ progress:
 - requirements.mark-complete for RUNREC-02 could not run because requirement id is not defined in .planning/REQUIREMENTS.md (only RUNREC-01 exists).
 - requirements mark-complete failed for DEVEX-01: ID not found in requirements registry. Manual check needed before planning tools can treat this requirement as complete.
 - requirements mark-complete for RECEIPT-01 is blocked: ID not present in REQUIREMENTS.md
+- requirements mark-complete for NOTIFY-01 failed: requirement ID not in REQUIREMENTS.md
 
 ## Session
 
-**Last Date:** 2026-04-30T20:31:26.273Z
-**Stopped At:** Completed 03-receipts-notifications-01-PLAN.md
+**Last Date:** 2026-04-30T20:33:27.226Z
+**Stopped At:** Completed 03-receipts-notifications-02-PLAN.md
 **Resume File:** None
