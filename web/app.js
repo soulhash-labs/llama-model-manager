@@ -509,14 +509,28 @@ function renderStatus(data) {
       doctor.binary_guidance || "",
     ]),
   );
-  setText("#api-base", data.api_base || "-");
-  setText("#integration-endpoint-note", "OpenAI-compatible local endpoint.");
+  setText("#api-base", data.gateway_api_base || data.api_base || "-");
+  setText("#integration-endpoint-note", joinNotes([
+    "Default routed harness endpoint.",
+    data.gateway_backend_api_base ? `backend ${data.gateway_backend_api_base}` : "",
+    data.gateway_harness_mode_default ? `default ${data.gateway_harness_mode_default}` : "",
+  ]));
+  const gateway = data.gateway || {};
+  const gatewayRunning = gateway.running === "yes" || gateway.health === "yes";
+  setText("#gateway-status", gatewayRunning ? "Running" : "Stopped");
+  setText("#gateway-route", joinNotes([
+    data.gateway_api_base || "",
+    data.gateway_backend_api_base ? `backend ${data.gateway_backend_api_base}` : "",
+    gateway.health ? `health ${gateway.health}` : "",
+  ]) || "-");
   setText("#opencode-model", data.opencode_model || "-");
   setText("#opencode-path", joinNotes([
     data.opencode_config_exists ? "config present" : "config missing",
     displayPath(data.opencode_config_file || ""),
   ]) || "-");
   setText("#opencode-state", joinNotes([
+    data.opencode_route_mode ? `${data.opencode_route_mode} mode` : "",
+    data.opencode_api_base || "",
     data.opencode_preset ? `${data.opencode_preset} preset` : "not yet synced",
     data.opencode_timeout_ms ? `timeout ${Math.round(Number(data.opencode_timeout_ms) / 1000)}s` : "",
     data.opencode_chunk_timeout_ms ? `chunk ${Math.round(Number(data.opencode_chunk_timeout_ms) / 1000)}s` : "",
@@ -534,6 +548,11 @@ function renderStatus(data) {
     `profile ${data.openclaw_profile || "main"}`,
     data.openclaw_config_exists ? "config present" : "config missing",
     displayPath(data.openclaw_config_file || ""),
+  ]) || "-");
+  setText("#openclaw-state", joinNotes([
+    data.openclaw_route_mode ? `${data.openclaw_route_mode} mode` : "",
+    data.openclaw_api_base || "",
+    data.openclaw_sync_note || "",
   ]) || "-");
   setText("#claude-model", data.claude_model_id || "-");
   setText("#claude-path", joinNotes([
@@ -1492,6 +1511,8 @@ function renderDefaults(defaults) {
   $("#default-sync-claude").value = defaults.LLAMA_MODEL_SYNC_CLAUDE || "0";
   $("#default-sync-openclaw").value = defaults.LLAMA_MODEL_SYNC_OPENCLAW || "0";
   $("#default-sync-glyphos").value = defaults.LLAMA_MODEL_SYNC_GLYPHOS || "0";
+  $("#default-harness-mode").value = defaults.LLAMA_MODEL_HARNESS_MODE || "routed";
+  $("#default-gateway-port").value = defaults.LLAMA_MODEL_GATEWAY_PORT || "4010";
   $("#default-context-glyphos-pipeline").checked = isTruthySetting(defaults.LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE) || contextGlyphosLocallyActivated();
   $("#default-openclaw-profile").value = defaults.OPENCLAW_PROFILE || "";
   $("#default-openclaw-api-key").value = defaults.OPENCLAW_API_KEY || "";
@@ -1641,6 +1662,8 @@ function collectDefaultsPayload() {
     LLAMA_MODEL_SYNC_CLAUDE: $("#default-sync-claude").value.trim(),
     LLAMA_MODEL_SYNC_OPENCLAW: $("#default-sync-openclaw").value.trim(),
     LLAMA_MODEL_SYNC_GLYPHOS: $("#default-sync-glyphos").value.trim(),
+    LLAMA_MODEL_HARNESS_MODE: $("#default-harness-mode").value.trim(),
+    LLAMA_MODEL_GATEWAY_PORT: $("#default-gateway-port").value.trim(),
     LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE: $("#default-context-glyphos-pipeline").checked ? "1" : "",
     OPENCLAW_PROFILE: $("#default-openclaw-profile").value.trim(),
     OPENCLAW_API_KEY: $("#default-openclaw-api-key").value.trim(),
@@ -1691,6 +1714,19 @@ async function activateContextGlyphos(button) {
 async function performClaudeGatewayAction(action, button, options = {}) {
   await withButtonBusy(button, options.pendingLabel || "Working...", async () => {
     await api("/api/claude-gateway", {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    });
+    await refreshState();
+  }, {
+    successMessage: options.successMessage,
+    successKind: options.successKind || "info",
+  });
+}
+
+async function performGatewayAction(action, button, options = {}) {
+  await withButtonBusy(button, options.pendingLabel || "Working...", async () => {
+    await api("/api/gateway", {
       method: "POST",
       body: JSON.stringify({ action }),
     });
@@ -2174,6 +2210,9 @@ function bindEvents() {
   $("#sync-claude").addEventListener("click", (event) => performIntegrationSync("/api/claude/sync", event.currentTarget, "Syncing...", "Claude Code settings synced.").catch(showError));
   $("#sync-glyphos").addEventListener("click", (event) => performIntegrationSync("/api/glyphos/sync", event.currentTarget, "Syncing...", "GlyphOS config synced.").catch(showError));
   $("#sync-glyphos-combined").addEventListener("click", (event) => activateContextGlyphos(event.currentTarget).catch(showError));
+  $("#gateway-start").addEventListener("click", (event) => performGatewayAction("start", event.currentTarget, { pendingLabel: "Starting...", successMessage: "LMM gateway started." }).catch(showError));
+  $("#gateway-restart").addEventListener("click", (event) => performGatewayAction("restart", event.currentTarget, { pendingLabel: "Restarting...", successMessage: "LMM gateway restarted." }).catch(showError));
+  $("#gateway-stop").addEventListener("click", (event) => performGatewayAction("stop", event.currentTarget, { pendingLabel: "Stopping...", successMessage: "LMM gateway stopped." }).catch(showError));
   $("#claude-gateway-start").addEventListener("click", (event) => performClaudeGatewayAction("start", event.currentTarget, { pendingLabel: "Starting...", successMessage: "Claude gateway started." }).catch(showError));
   $("#claude-gateway-restart").addEventListener("click", (event) => performClaudeGatewayAction("restart", event.currentTarget, { pendingLabel: "Restarting...", successMessage: "Claude gateway restarted." }).catch(showError));
   $("#claude-gateway-stop").addEventListener("click", (event) => performClaudeGatewayAction("stop", event.currentTarget, { pendingLabel: "Stopping...", successMessage: "Claude gateway stopped." }).catch(showError));

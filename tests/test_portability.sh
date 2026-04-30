@@ -182,6 +182,8 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$readme" "backend-, platform-, and architecture-specific"
     assert_contains "$readme" "shows the install commands it plans to run"
     assert_contains "$readme" "llama-model sync-opencode --preset long-run"
+    assert_contains "$readme" "llama-model gateway start|stop|restart|status|logs"
+    assert_contains "$readme" "sync-opencode --mode direct"
     assert_contains "$readme" "compaction.reserved"
     assert_contains "$readme" "OPENCODE_COMPACTION_RESERVED"
     assert_contains "$readme" "llama-model sync-openclaw"
@@ -189,6 +191,7 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$readme" "llama-model sync-glyphos"
     assert_contains "$help" "llama-model build-runtime --backend auto"
     assert_contains "$help" "llama-model sync-opencode --preset balanced|long-run"
+    assert_contains "$help" "llama-model gateway start|stop|restart|status|logs"
     assert_contains "$help" "compaction.reserved"
     assert_contains "$help" "llama-model sync-openclaw"
     assert_contains "$help" "llama-model sync-claude"
@@ -198,6 +201,8 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$help" "llama-model download-cancel <job_id>"
     assert_contains "$defaults" "OPENCLAW_PROFILE="
     assert_contains "$defaults" "CLAUDE_GATEWAY_PORT=4000"
+    assert_contains "$defaults" "LLAMA_MODEL_HARNESS_MODE=routed"
+    assert_contains "$defaults" "LLAMA_MODEL_GATEWAY_PORT=4010"
     assert_contains "$defaults" "CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS=1800"
     assert_contains "$defaults" "GGML_CUDA_ENABLE_UNIFIED_MEMORY="
     assert_not_contains "$defaults" "LLAMA_SERVER_DEVICE=cuda0"
@@ -205,6 +210,8 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$web_index" "Remote Models"
     assert_contains "$web_index" "Download Jobs"
     assert_contains "$web_index" "Observed Glyph Routes"
+    assert_contains "$web_index" "Harness Gateway"
+    assert_contains "$web_index" "Start Gateway"
     assert_contains "$web_index" "Control-plane actions only"
     assert_contains "$web_index" "toggle-activity-panel"
     assert_contains "$web_index" "glyphos-badge"
@@ -212,6 +219,7 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_not_contains "$web_index" "GPU-aware defaults"
     assert_contains "$install_script" "Would you like to check/install build dependencies"
     assert_contains "$install_script" "llama-model sync-opencode"
+    assert_contains "$install_script" "glyphos_openai_gateway.py"
     assert_contains "$install_script" "llama-model sync-openclaw"
     assert_contains "$install_script" "llama-model sync-claude"
     assert_contains "$install_script" "llama-model sync-glyphos"
@@ -835,6 +843,7 @@ test_doctor_reports_install_health() {
     output="$(LLAMA_MODEL_WEB_PORT=9 run_doctor "$tmp")"
     assert_contains "$output" "installed_web_launcher: no"
     assert_contains "$output" "installed_web_app: no"
+    assert_contains "$output" "installed_gateway_script: no"
     assert_contains "$output" "bundled_glyphos_integration: no"
     assert_contains "$output" "context_mode_mcp_installed: no"
     assert_contains "$output" "install_ok: no"
@@ -842,16 +851,19 @@ test_doctor_reports_install_health() {
 
     mkdir -p "$tmp/home/.local/bin" \
         "$tmp/home/.local/share/llama-model-manager/web" \
+        "$tmp/home/.local/share/llama-model-manager/scripts" \
         "$tmp/home/.local/share/llama-model-manager/integrations/public-glyphos-ai-compute/glyphos_ai" \
         "$tmp/home/.local/share/llama-model-manager/integrations/context-mode-mcp"
     : >"$tmp/home/.local/bin/llama-model-web"
     chmod +x "$tmp/home/.local/bin/llama-model-web"
     : >"$tmp/home/.local/share/llama-model-manager/web/app.py"
+    : >"$tmp/home/.local/share/llama-model-manager/scripts/glyphos_openai_gateway.py"
     : >"$tmp/home/.local/share/llama-model-manager/integrations/context-mode-mcp/package.json"
 
     output="$(LLAMA_MODEL_WEB_PORT=9 run_doctor "$tmp")"
     assert_contains "$output" "installed_web_launcher: yes"
     assert_contains "$output" "installed_web_app: yes"
+    assert_contains "$output" "installed_gateway_script: yes"
     assert_contains "$output" "bundled_glyphos_integration: yes"
     assert_contains "$output" "bundled_glyphos_importable: no"
     assert_contains "$output" "context_mode_mcp_installed: yes"
@@ -878,6 +890,9 @@ PY
     assert_contains "$output" "bundled_glyphos_importable: yes"
     assert_contains "$output" "context_mode_mcp_installed: yes"
     assert_contains "$output" "install_ok: yes"
+    assert_contains "$output" "gateway_url: http://127.0.0.1:4010/v1"
+    assert_contains "$output" "gateway_backend_api_base: http://127.0.0.1:19081/v1"
+    assert_contains "$output" "gateway_mode_default: routed"
     assert_contains "$output" "dashboard_api_reachable: no"
 
     api_port_file="$tmp/dashboard-api.port"
@@ -1043,6 +1058,9 @@ EOF
     assert_contains "$output" "status: synced"
     assert_contains "$output" "preset: balanced"
     assert_contains "$output" "opencode_model: llamacpp/Qwen3.5-9B-Q8_0.gguf"
+    assert_contains "$output" "route_mode: routed"
+    assert_contains "$output" "api_base: http://127.0.0.1:4010/v1"
+    assert_contains "$output" "backend_api_base: http://127.0.0.1:19081/v1"
     assert_contains "$output" "timeout_ms: 1800000"
     assert_contains "$output" "chunk_timeout_ms: 60000"
     assert_contains "$output" "compaction_reserved: 16384"
@@ -1052,7 +1070,7 @@ EOF
     config="$(cat "$tmp/config/opencode/opencode.json")"
     state_json="$(cat "$tmp/state/opencode/model.json")"
     assert_contains "$config" '"model": "llamacpp/Qwen3.5-9B-Q8_0.gguf"'
-    assert_contains "$config" '"baseURL": "http://127.0.0.1:19081/v1"'
+    assert_contains "$config" '"baseURL": "http://127.0.0.1:4010/v1"'
     assert_contains "$config" '"timeout": 1800000'
     assert_contains "$config" '"chunkTimeout": 60000'
     assert_contains "$config" '"auto": true'
@@ -1064,6 +1082,7 @@ EOF
     assert_contains "$state_json" '"id": "llamacpp/Qwen3.5-9B-Q8_0.gguf"'
     assert_contains "$state_json" '"llamacpp/Qwen3.5-9B-Q8_0.gguf"'
     assert_contains "$state_json" '"compactionReserved": 16384'
+    assert_contains "$state_json" '"routeMode": "routed"'
     assert_contains "$state_json" '"sessionTimeoutObservedMs": 1800000'
     assert_contains "$state_json" '"pendingToolAbortGuidance"'
     assert_contains "$state_json" '"favorite"'
@@ -1115,6 +1134,29 @@ EOF
 
     config="$(cat "$tmp/config/opencode/opencode.json")"
     assert_contains "$config" '"reserved": 24576'
+}
+
+test_sync_opencode_direct_mode() {
+    local tmp
+    local output
+    local config
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    mkdir -p "$tmp/models" "$tmp/config/opencode" "$tmp/state/opencode"
+    : >"$tmp/models/Qwen3.5-9B-Q8_0.gguf"
+    cat >"$tmp/config/llama-server/models.tsv" <<EOF
+# alias<TAB>model_path<TAB>extra_args<TAB>context<TAB>ngl<TAB>batch<TAB>threads<TAB>parallel<TAB>device<TAB>notes
+qwen35-9b-q8	$tmp/models/Qwen3.5-9B-Q8_0.gguf		32768
+EOF
+
+    output="$(run_cli "$tmp" sync-opencode --mode direct --preset balanced qwen35-9b-q8)"
+    assert_contains "$output" "route_mode: direct"
+    assert_contains "$output" "api_base: http://127.0.0.1:19081/v1"
+    assert_contains "$output" "gateway_api_base: http://127.0.0.1:4010/v1"
+
+    config="$(cat "$tmp/config/opencode/opencode.json")"
+    assert_contains "$config" '"baseURL": "http://127.0.0.1:19081/v1"'
 }
 
 test_switch_auto_syncs_opencode_by_default() {
@@ -1177,8 +1219,9 @@ test_switch_auto_syncs_opencode_by_default() {
     state_json="$(cat "$OPENCODE_MODEL_STATE_FILE")"
     assert_contains "$config" '"model": "llamacpp/Qwen3.5-4B-Q6_K.gguf"'
     assert_contains "$config" '"Qwen3.5-4B-Q6_K.gguf"'
-    assert_contains "$config" '"baseURL": "http://127.0.0.1:19081/v1"'
+    assert_contains "$config" '"baseURL": "http://127.0.0.1:4010/v1"'
     assert_contains "$state_json" '"llamacpp/Qwen3.5-4B-Q6_K.gguf"'
+    assert_contains "$state_json" '"routeMode": "routed"'
 }
 
 test_switch_skips_opencode_when_auto_sync_disabled() {
@@ -1315,10 +1358,11 @@ EOF
 
     output="$(run_cli "$tmp" sync-openclaw --profile lmm-eval qwen35-9b-q8)"
     assert_contains "$output" "openclaw_model: llamacpp/qwen35-9b-q8"
+    assert_contains "$output" "route_mode: routed"
 
     config="$(cat "$tmp/home/.openclaw-lmm-eval/openclaw.json")"
     assert_contains "$config" '"primary": "llamacpp/qwen35-9b-q8"'
-    assert_contains "$config" '"baseUrl": "http://127.0.0.1:19081/v1"'
+    assert_contains "$config" '"baseUrl": "http://127.0.0.1:4010/v1"'
     assert_contains "$config" '"apiKey": "llama-local"'
     assert_contains "$config" '"telemetry"'
     assert_contains "$config" '"ollama"'
@@ -1350,7 +1394,7 @@ test_integration_sync_cli_glyphos_entrypoint() {
     python3 "$ROOT_DIR/scripts/integration_sync.py" glyphos         --config-file "$tmp/config.yaml"         --model-name "Qwen3.5-9B-Q8_0.gguf"         --api-base "http://127.0.0.1:8081/v1"         --timeout-seconds 300 >/dev/null
 
     config="$(cat "$tmp/config.yaml")"
-    assert_contains "$config" 'preferred_local_backend: llamacpp'
+    assert_not_contains "$config" 'preferred_local_backend: llamacpp'
     assert_contains "$config" 'url: http://127.0.0.1:8081/v1'
     assert_contains "$config" 'model: Qwen3.5-9B-Q8_0.gguf'
     assert_contains "$config" 'timeout: 300'
@@ -1384,7 +1428,7 @@ EOF
     assert_contains "$output" "routing_preference: llamacpp"
 
     config="$(cat "$tmp/home/.glyphos/config.yaml")"
-    assert_contains "$config" 'preferred_local_backend: llamacpp'
+    assert_not_contains "$config" 'preferred_local_backend: llamacpp'
     assert_contains "$config" 'url: http://127.0.0.1:19081/v1'
     assert_contains "$config" 'model: Qwen3.5-9B-Q8_0.gguf'
     assert_contains "$config" 'timeout: 300'
@@ -1630,6 +1674,7 @@ main() {
     test_sync_opencode_updates_config_and_state
     test_sync_opencode_long_run_preset
     test_sync_opencode_compaction_override
+    test_sync_opencode_direct_mode
     test_switch_auto_syncs_opencode_by_default
     test_switch_skips_opencode_when_auto_sync_disabled
     test_switch_opencode_sync_failure_is_non_fatal

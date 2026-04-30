@@ -116,6 +116,7 @@ def sync_opencode(args: argparse.Namespace) -> None:
         diagnostics = {}
     diagnostics["opencodeSync"] = {
         "preset": args.preset,
+        "routeMode": args.route_mode,
         "providerTimeoutMs": int(args.timeout_ms),
         "chunkTimeoutMs": int(args.chunk_timeout_ms),
         "compactionReserved": compaction_reserved,
@@ -241,6 +242,7 @@ def main() -> int:
     op.add_argument("--compaction-reserved", default=16384, type=int)
     op.add_argument("--context-window", default=0, type=int)
     op.add_argument("--preset", default="balanced")
+    op.add_argument("--route-mode", default="routed")
     op.set_defaults(func=sync_opencode)
 
     oc = sub.add_parser("openclaw")
@@ -305,7 +307,7 @@ def sync_glyphos(args: argparse.Namespace) -> None:
     routing.setdefault('high_coherence_threshold', 0.8)
     routing.setdefault('low_coherence_threshold', 0.3)
     routing.setdefault('complex_actions', ['ANALYZE', 'SYNTHESIZE', 'PREDICT', 'LEARN', 'TEACH'])
-    routing['preferred_local_backend'] = 'llamacpp'
+    routing.pop('preferred_local_backend', None)
     ai_compute['routing'] = routing
 
     llamacpp = ai_compute.get('llamacpp')

@@ -51,6 +51,10 @@ KNOWN_DEFAULT_KEYS = [
     "LLAMA_MODEL_SYNC_CLAUDE",
     "LLAMA_MODEL_SYNC_OPENCLAW",
     "LLAMA_MODEL_SYNC_GLYPHOS",
+    "LLAMA_MODEL_HARNESS_MODE",
+    "LLAMA_MODEL_GATEWAY_HOST",
+    "LLAMA_MODEL_GATEWAY_PORT",
+    "LLAMA_MODEL_GATEWAY_LOG",
     "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE",
     "OPENCLAW_PROFILE",
     "OPENCLAW_API_KEY",
@@ -164,10 +168,10 @@ API_POST_PAYLOAD_SCHEMAS: dict[str, dict[str, Any]] = {
         "required": set(),
     },
     "/api/opencode/sync": {
-        "allowed": {"preset"},
+        "allowed": {"preset", "mode"},
     },
     "/api/openclaw/sync": {
-        "allowed": set(),
+        "allowed": {"mode"},
     },
     "/api/claude/sync": {
         "allowed": set(),
@@ -179,6 +183,9 @@ API_POST_PAYLOAD_SCHEMAS: dict[str, dict[str, Any]] = {
         "allowed": set(),
     },
     "/api/claude-gateway": {
+        "allowed": {"action"},
+    },
+    "/api/gateway": {
         "allowed": {"action"},
     },
     "/api/downloads/start": {
@@ -478,6 +485,7 @@ class Manager:
         self.download_jobs_file = self.xdg_state_home / "llama-server" / "download-jobs.json"
         self.download_policy_file = self.xdg_state_home / "llama-server" / "download-policy.json"
         self.operation_activity_file = self.xdg_state_home / "llama-server" / "operation-activity.json"
+        self.gateway_requests_file = Path(os.environ.get("LMM_GATEWAY_STATE_FILE", self.xdg_state_home / "llama-server" / "lmm-gateway-requests.json"))
         self.runtime_profiles_file = self.config_dir / "runtime-profiles.json"
         self.validation_results_file = self.xdg_state_home / "llama-server" / "validation-results.json"
         self.host_capability_file = self.xdg_state_home / "llama-server" / "host-capability.json"
@@ -2501,9 +2509,23 @@ class Manager:
     def integration_state(self, defaults: dict[str, str], current: dict[str, str], mode: dict[str, str]) -> dict[str, Any]:
         current_model_name = Path(current.get("model", "")).name if current.get("model") else ""
         current_alias = current.get("alias", "") if current.get("alias") and current.get("alias") != "custom" else ""
+        backend_api_base = f"http://{defaults.get('LLAMA_SERVER_HOST', '127.0.0.1')}:{defaults.get('LLAMA_SERVER_PORT', '8081')}/v1"
+        gateway_host = defaults.get("LLAMA_MODEL_GATEWAY_HOST", "127.0.0.1").strip() or "127.0.0.1"
+        gateway_port = defaults.get("LLAMA_MODEL_GATEWAY_PORT", "4010").strip() or "4010"
+        gateway_api_base = f"http://{gateway_host}:{gateway_port}/v1"
+        harness_mode_default = defaults.get("LLAMA_MODEL_HARNESS_MODE", "routed").strip() or "routed"
+        gateway_status: dict[str, str] = {}
+        if not self.demo:
+            try:
+                gateway_status = self.parse_key_values(self.run_cli("gateway", "status"))
+            except Exception:
+                gateway_status = {}
+        gateway_requests = self.load_json_file(self.gateway_requests_file)
         opencode_config = self.load_json_file(self.opencode_config_file)
         opencode_provider = opencode_config.get("provider", {}).get("llamacpp", {}) if isinstance(opencode_config.get("provider"), dict) else {}
         opencode_options = opencode_provider.get("options", {}) if isinstance(opencode_provider.get("options"), dict) else {}
+        opencode_api_base = str(opencode_options.get("baseURL", "")).strip()
+        opencode_route_mode = "routed" if opencode_api_base.rstrip("/") == gateway_api_base.rstrip("/") else "direct" if opencode_api_base.rstrip("/") == backend_api_base.rstrip("/") else "custom" if opencode_api_base else ""
         opencode_timeout = str(opencode_options.get("timeout", "")) if opencode_options.get("timeout") is not None else ""
         opencode_chunk_timeout = str(opencode_options.get("chunkTimeout", "")) if opencode_options.get("chunkTimeout") is not None else ""
         opencode_compaction = opencode_config.get("compaction", {}) if isinstance(opencode_config.get("compaction"), dict) else {}
@@ -2530,6 +2552,11 @@ class Manager:
             openclaw_config_file = self.home / ".openclaw" / "openclaw.json"
         else:
             openclaw_config_file = self.home / f".openclaw-{openclaw_profile}" / "openclaw.json"
+        openclaw_config = self.load_json_file(openclaw_config_file)
+        openclaw_providers = openclaw_config.get("models", {}).get("providers", {}) if isinstance(openclaw_config.get("models"), dict) else {}
+        openclaw_llamacpp = openclaw_providers.get("llamacpp", {}) if isinstance(openclaw_providers, dict) else {}
+        openclaw_api_base = str(openclaw_llamacpp.get("baseUrl", "")).strip() if isinstance(openclaw_llamacpp, dict) else ""
+        openclaw_route_mode = "routed" if openclaw_api_base.rstrip("/") == gateway_api_base.rstrip("/") else "direct" if openclaw_api_base.rstrip("/") == backend_api_base.rstrip("/") else "custom" if openclaw_api_base else ""
         claude_gateway_status: dict[str, str] = {}
         if not self.demo:
             try:
@@ -2552,6 +2579,8 @@ class Manager:
             "opencode_config_exists": self.opencode_config_file.exists(),
             "opencode_state_file": str(self.opencode_model_state_file),
             "opencode_state_exists": self.opencode_model_state_file.exists(),
+            "opencode_api_base": opencode_api_base,
+            "opencode_route_mode": opencode_route_mode,
             "opencode_timeout_ms": opencode_timeout,
             "opencode_chunk_timeout_ms": opencode_chunk_timeout,
             "opencode_compaction_reserved": opencode_compaction_reserved,
@@ -2560,7 +2589,9 @@ class Manager:
             "opencode_note": opencode_note,
             "openclaw_model": f"llamacpp/{current_alias}" if current_alias else "",
             "openclaw_profile": openclaw_profile,
-            "openclaw_sync_note": "direct llama.cpp provider",
+            "openclaw_sync_note": "routed through LMM gateway" if openclaw_route_mode == "routed" else "direct llama.cpp provider" if openclaw_route_mode == "direct" else "not yet synced",
+            "openclaw_api_base": openclaw_api_base,
+            "openclaw_route_mode": openclaw_route_mode,
             "openclaw_config_file": str(openclaw_config_file),
             "openclaw_config_exists": openclaw_config_file.exists(),
             "claude_settings_file": str(self.claude_settings_file),
@@ -2568,6 +2599,11 @@ class Manager:
             "claude_model_id": claude_model_id,
             "claude_base_url": claude_base_url,
             "claude_gateway": claude_gateway_status,
+            "gateway": gateway_status,
+            "gateway_api_base": gateway_api_base,
+            "gateway_backend_api_base": backend_api_base,
+            "gateway_harness_mode_default": harness_mode_default,
+            "gateway_requests": gateway_requests if isinstance(gateway_requests, dict) else {},
             "glyphos_config_file": str(self.glyphos_config_file),
             "glyphos_config_exists": self.glyphos_config_file.exists(),
             "glyphos_model": current_model_name,
@@ -2697,11 +2733,17 @@ class Manager:
             )
         return snapshot
 
-    def sync_opencode(self, preset: str = "balanced") -> dict[str, str]:
-        return self.parse_key_values(self.run_cli("sync-opencode", "--preset", preset))
+    def sync_opencode(self, preset: str = "balanced", mode: str = "") -> dict[str, str]:
+        args = ["sync-opencode", "--preset", preset]
+        if mode:
+            args.extend(["--mode", mode])
+        return self.parse_key_values(self.run_cli(*args))
 
-    def sync_openclaw(self) -> dict[str, str]:
-        return self.parse_key_values(self.run_cli("sync-openclaw"))
+    def sync_openclaw(self, mode: str = "") -> dict[str, str]:
+        args = ["sync-openclaw"]
+        if mode:
+            args.extend(["--mode", mode])
+        return self.parse_key_values(self.run_cli(*args))
 
     def sync_claude(self) -> dict[str, str]:
         return self.parse_key_values(self.run_cli("sync-claude"))
@@ -2804,9 +2846,13 @@ class Manager:
                 "opencode_config_exists": True,
                 "opencode_state_file": str(self.opencode_model_state_file),
                 "opencode_state_exists": True,
+                "opencode_api_base": "http://127.0.0.1:4010/v1",
+                "opencode_route_mode": "routed",
                 "openclaw_model": "llamacpp/qwen36-35b-q2",
                 "openclaw_profile": "main",
-                "openclaw_sync_note": "direct llama.cpp provider",
+                "openclaw_sync_note": "routed through LMM gateway",
+                "openclaw_api_base": "http://127.0.0.1:4010/v1",
+                "openclaw_route_mode": "routed",
                 "openclaw_config_file": str(self.home / ".openclaw" / "openclaw.json"),
                 "openclaw_config_exists": True,
                 "claude_settings_file": str(self.claude_settings_file),
@@ -2814,6 +2860,11 @@ class Manager:
                 "claude_model_id": "qwen35-9b-q8",
                 "claude_base_url": "http://127.0.0.1:4000",
                 "claude_gateway": {"running": "yes", "url": "http://127.0.0.1:4000", "model_id": "qwen35-9b-q8", "log": "/var/log/claude-gateway.log", "upstream_timeout_seconds": "1800"},
+                "gateway": {"running": "yes", "health": "yes", "url": "http://127.0.0.1:4010/v1", "backend_api_base": "http://127.0.0.1:8081/v1", "mode_default": "routed"},
+                "gateway_api_base": "http://127.0.0.1:4010/v1",
+                "gateway_backend_api_base": "http://127.0.0.1:8081/v1",
+                "gateway_harness_mode_default": "routed",
+                "gateway_requests": {"recent_requests": [], "counters": {}},
                 "glyphos_telemetry": {"available": False, "routing": {"attempts_by_target": {}, "fallback_reason_counts": {}, "total_attempts": 0, "recent_attempts": []}},
                 "context_mode_mcp": {"available": True, "root": str(self.context_mode_mcp_root), "dashboard_source_exists": True, "dashboard_build_exists": False, "lifecycle_matrix_exists": True, "typecheck_script_exists": True},
                 "context_glyphos_pipeline": {"enabled": True, "ready": True, "status": "ready", "label": "Ready", "blockers": [], "benefit": "retrieved context + glyph-routed local inference"},
@@ -3135,10 +3186,12 @@ class AppHandler(BaseHTTPRequestHandler):
             return {"ok": True, "service": self.manager.dashboard_service_status()}
         if route == "/api/opencode/sync":
             preset = str(payload.get("preset", "balanced")).strip() or "balanced"
-            result = self.manager.sync_opencode(preset)
+            mode = str(payload.get("mode", "")).strip()
+            result = self.manager.sync_opencode(preset, mode)
             return {"ok": True, "result": result}
         if route == "/api/openclaw/sync":
-            result = self.manager.sync_openclaw()
+            mode = str(payload.get("mode", "")).strip()
+            result = self.manager.sync_openclaw(mode)
             return {"ok": True, "result": result}
         if route == "/api/claude/sync":
             result = self.manager.sync_claude()
@@ -3151,6 +3204,10 @@ class AppHandler(BaseHTTPRequestHandler):
         if route == "/api/claude-gateway":
             action = str(payload.get("action", "status")).strip()
             result = self.parse_key_values(self.manager.run_cli("claude-gateway", action))
+            return {"ok": True, "result": result}
+        if route == "/api/gateway":
+            action = str(payload.get("action", "status")).strip()
+            result = self.parse_key_values(self.manager.run_cli("gateway", action))
             return {"ok": True, "result": result}
         raise ValidationError("unknown_route", f"Unknown API route: {route}")
 

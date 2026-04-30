@@ -6,6 +6,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import json
+import os
+from pathlib import Path
 import threading
 import time
 from typing import Any, Dict, Optional
@@ -52,15 +55,71 @@ _GLOBAL_ROUTING_STATE: dict[str, Any] = {
 _GLOBAL_ROUTING_LOCK = threading.Lock()
 
 
+def _telemetry_file() -> Path:
+    configured = os.environ.get("LLAMA_MODEL_GLYPHOS_TELEMETRY_FILE", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")).expanduser()
+    return state_home / "llama-server" / "glyphos-routing.json"
+
+
+def _blank_shared_state() -> dict[str, Any]:
+    return {
+        "attempts_by_target": {},
+        "fallback_reason_counts": {},
+        "recent_attempts": [],
+    }
+
+
+def _read_shared_state() -> dict[str, Any]:
+    path = _telemetry_file()
+    if not path.exists():
+        return _blank_shared_state()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return _blank_shared_state()
+    if not isinstance(payload, dict):
+        return _blank_shared_state()
+    state = _blank_shared_state()
+    if isinstance(payload.get("attempts_by_target"), dict):
+        state["attempts_by_target"] = dict(payload["attempts_by_target"])
+    if isinstance(payload.get("fallback_reason_counts"), dict):
+        state["fallback_reason_counts"] = dict(payload["fallback_reason_counts"])
+    if isinstance(payload.get("recent_attempts"), list):
+        state["recent_attempts"] = list(payload["recent_attempts"])[:_GLOBAL_ROUTING_HISTORY_LIMIT]
+    return state
+
+
+def _write_shared_state(state: dict[str, Any]) -> None:
+    path = _telemetry_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+        temp.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        temp.replace(path)
+    except Exception:
+        return
+
+
 def _normalize_reason_code(value: str) -> str:
     return (value or "unresolved").strip().lower().replace(" ", "_").replace("/", "_")
 
 
 def _record_global_attempt(record: dict[str, Any]) -> None:
     with _GLOBAL_ROUTING_LOCK:
+        shared_state = _read_shared_state()
+        for key in ("attempts_by_target", "fallback_reason_counts"):
+            merged = dict(shared_state.get(key, {}))
+            merged.update(_GLOBAL_ROUTING_STATE.get(key, {}))
+            _GLOBAL_ROUTING_STATE[key] = merged
+
         attempts_by_target = _GLOBAL_ROUTING_STATE.setdefault("attempts_by_target", {})
         fallback_reason_counts = _GLOBAL_ROUTING_STATE.setdefault("fallback_reason_counts", {})
-        recent_attempts = list(_GLOBAL_ROUTING_STATE.setdefault("recent_attempts", []))
+        recent_attempts = list(shared_state.get("recent_attempts", []))
+        for existing in list(_GLOBAL_ROUTING_STATE.setdefault("recent_attempts", [])):
+            if existing not in recent_attempts:
+                recent_attempts.append(existing)
 
         target = str(record.get("target", "unknown"))
         reason_code = _normalize_reason_code(str(record.get("reason_code", "unresolved")))
@@ -78,13 +137,24 @@ def _record_global_attempt(record: dict[str, Any]) -> None:
         _GLOBAL_ROUTING_STATE["attempts_by_target"] = attempts_by_target
         _GLOBAL_ROUTING_STATE["fallback_reason_counts"] = fallback_reason_counts
         _GLOBAL_ROUTING_STATE["recent_attempts"] = recent_attempts
+        _write_shared_state(_GLOBAL_ROUTING_STATE)
 
 
 def routing_telemetry_snapshot(limit: int = 10) -> dict[str, Any]:
     with _GLOBAL_ROUTING_LOCK:
-        attempts_by_target = dict(_GLOBAL_ROUTING_STATE.get("attempts_by_target", {}))
-        fallback_reason_counts = dict(_GLOBAL_ROUTING_STATE.get("fallback_reason_counts", {}))
-        recent_attempts = list(_GLOBAL_ROUTING_STATE.get("recent_attempts", []))[: max(0, int(limit))]
+        shared_state = _read_shared_state()
+        attempts_by_target = dict(shared_state.get("attempts_by_target", {}))
+        for target, count in dict(_GLOBAL_ROUTING_STATE.get("attempts_by_target", {})).items():
+            attempts_by_target[target] = max(int(attempts_by_target.get(target, 0)), int(count))
+        fallback_reason_counts = dict(shared_state.get("fallback_reason_counts", {}))
+        for reason, count in dict(_GLOBAL_ROUTING_STATE.get("fallback_reason_counts", {})).items():
+            fallback_reason_counts[reason] = max(int(fallback_reason_counts.get(reason, 0)), int(count))
+        recent_attempts = list(shared_state.get("recent_attempts", []))
+        for existing in list(_GLOBAL_ROUTING_STATE.get("recent_attempts", [])):
+            if existing not in recent_attempts:
+                recent_attempts.append(existing)
+        recent_attempts = sorted(recent_attempts, key=lambda item: float(item.get("time", 0)) if isinstance(item, dict) else 0, reverse=True)
+        recent_attempts = recent_attempts[: max(0, int(limit))]
 
     return {
         "attempts_by_target": attempts_by_target,
@@ -99,6 +169,7 @@ def reset_routing_telemetry() -> None:
         _GLOBAL_ROUTING_STATE["attempts_by_target"] = {}
         _GLOBAL_ROUTING_STATE["fallback_reason_counts"] = {}
         _GLOBAL_ROUTING_STATE["recent_attempts"] = []
+        _write_shared_state(_GLOBAL_ROUTING_STATE)
 
 
 class AdaptiveRouter:

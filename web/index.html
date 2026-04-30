@@ -576,6 +576,14 @@
               Auto Sync GlyphOS
               <input name="LLAMA_MODEL_SYNC_GLYPHOS" id="default-sync-glyphos" placeholder="0">
             </label>
+            <label title="Default harness sync path. Routed uses the LMM gateway; direct bypasses Context + GlyphOS and points clients at llama.cpp.">
+              Harness Mode
+              <input name="LLAMA_MODEL_HARNESS_MODE" id="default-harness-mode" placeholder="routed">
+            </label>
+            <label title="Port for the OpenAI-compatible LMM gateway used by routed harness sync.">
+              Gateway Port
+              <input name="LLAMA_MODEL_GATEWAY_PORT" id="default-gateway-port" placeholder="4010">
+            </label>
             <label title="Operator-facing toggle for the combined Context Mode MCP + GlyphOS workflow. It does not change security boundaries; it makes the intended combined pipeline visible in the dashboard.">
               Context + GlyphOS
               <div class="checkbox-row">
@@ -643,9 +651,19 @@
           </div>
           <div class="integration-grid">
             <article class="integration-card">
-              <span class="metric-label">API Base</span>
+              <span class="metric-label">Harness Gateway</span>
               <code id="api-base">-</code>
               <span id="integration-endpoint-note" class="metric-note">OpenAI-compatible local endpoint.</span>
+            </article>
+            <article class="integration-card">
+              <span class="metric-label">LMM Gateway</span>
+              <code id="gateway-status">-</code>
+              <span id="gateway-route" class="metric-note">-</span>
+              <div class="inline-actions integration-actions">
+                <button id="gateway-start" class="button button-small button-primary" title="Start the LMM OpenAI-compatible gateway.">Start Gateway</button>
+                <button id="gateway-restart" class="button button-small" title="Restart the LMM gateway.">Restart</button>
+                <button id="gateway-stop" class="button button-small button-danger" title="Stop the LMM gateway.">Stop</button>
+              </div>
             </article>
             <article class="integration-card">
               <span class="metric-label">opencode</span>
@@ -664,6 +682,7 @@
               <span class="metric-label">OpenClaw</span>
               <code id="openclaw-model">-</code>
               <span id="openclaw-path" class="metric-note">-</span>
+              <span id="openclaw-state" class="metric-note">-</span>
               <div class="inline-actions integration-actions">
                 <button id="sync-openclaw" class="button button-small button-primary" title="Sync OpenClaw to the currently served llama.cpp model.">Sync OpenClaw</button>
               </div>
