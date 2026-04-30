@@ -33,6 +33,7 @@ CONTEXT_BRIDGE_PATH = ROOT_DIR / "scripts" / "context_mcp_bridge.py"
 LMM_CONFIG_PATH = ROOT_DIR / "scripts" / "lmm_config.py"
 LMM_ERRORS_PATH = ROOT_DIR / "scripts" / "lmm_errors.py"
 LMM_STORAGE_PATH = ROOT_DIR / "scripts" / "lmm_storage.py"
+LMM_TYPES_PATH = ROOT_DIR / "scripts" / "lmm_types.py"
 
 
 class Phase0ContractTests(unittest.TestCase):
@@ -126,6 +127,125 @@ class Phase0ContractTests(unittest.TestCase):
         self.assertEqual(state["counters"]["mode:routed-basic"], 2)
         self.assertEqual(state["counters"]["success:True"], 2)
         self.assertEqual(state["counters"]["success:False"], 1)
+
+    def test_run_record_round_trips_to_dict(self) -> None:
+        types_module = self.load_script_module("llama_model_manager_types_round_trip", LMM_TYPES_PATH)
+        run_record = types_module.RunRecord(
+            id="",
+            created_at=None,
+            started_at="2026-01-01T00:00:00Z",
+            completed_at="2026-01-01T00:00:01Z",
+            prompt="ping",
+            model="test.gguf",
+            provider="llamacpp",
+            route_target="llamacpp",
+            route_reason_code="high_coherence_local",
+            completion_chars=12,
+            harness="pytest-agent",
+            context_status="ok",
+            context_used=True,
+            status=types_module.RunStatus.PENDING,
+            exit_result=None,
+            duration_ms=None,
+            error_message=None,
+        )
+
+        payload = run_record.to_dict()
+        restored = types_module.RunRecord.from_dict(payload)
+
+        self.assertEqual(payload["status"], types_module.RunStatus.PENDING.value)
+        self.assertEqual(restored.to_dict(), payload)
+
+    def test_run_record_truncates_long_prompt(self) -> None:
+        types_module = self.load_script_module("llama_model_manager_types_prompt_limit", LMM_TYPES_PATH)
+        record = types_module.RunRecord(
+            id="",
+            created_at=None,
+            started_at=None,
+            completed_at=None,
+            prompt="x" * 8000,
+            model="qwen.gguf",
+            provider="llamacpp",
+            route_target="llamacpp",
+            route_reason_code="high_coherence_local",
+            completion_chars=0,
+            harness="pytest-agent",
+            context_status="empty",
+            context_used=False,
+        )
+
+        self.assertEqual(len(record.prompt), 4000)
+
+    def test_run_record_auto_generates_id_and_timestamp(self) -> None:
+        types_module = self.load_script_module("llama_model_manager_types_identity", LMM_TYPES_PATH)
+        record = types_module.RunRecord(
+            id="",
+            created_at=None,
+            started_at=None,
+            completed_at=None,
+            prompt="hello",
+            model="qwen.gguf",
+            provider="llamacpp",
+            route_target="llamacpp",
+            route_reason_code="high_coherence_local",
+            completion_chars=0,
+            harness="pytest-agent",
+            context_status="empty",
+            context_used=False,
+        )
+
+        self.assertEqual(len(record.id), 12)
+        self.assertIsInstance(record.created_at, str)
+        self.assertTrue(record.created_at)
+
+    def test_json_run_record_store_caps_recent_records(self) -> None:
+        storage_module = self.load_script_module("llama_model_manager_storage_run_caps", LMM_STORAGE_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "run-records.json"
+            store = storage_module.JsonRunRecordStore(path, recent_limit=3)
+            for index in range(5):
+                store.append_record({
+                    "id": f"record-{index}",
+                    "status": "completed",
+                    "model": "model.gguf",
+                })
+
+            self.assertEqual(len(store.list_recent(limit=10)), 3)
+            recent = store.list_recent()
+            self.assertEqual([record["id"] for record in recent], ["record-4", "record-3", "record-2"])
+
+    def test_json_run_record_store_filters_by_status(self) -> None:
+        storage_module = self.load_script_module("llama_model_manager_storage_run_filter", LMM_STORAGE_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "run-records.json"
+            store = storage_module.JsonRunRecordStore(path, recent_limit=10)
+            store.append_record({"id": "r1", "status": "completed", "model": "m1"})
+            store.append_record({"id": "r2", "status": "failed", "model": "m2"})
+            store.append_record({"id": "r3", "status": "completed", "model": "m3"})
+
+            completed = store.list_recent(status="completed")
+            self.assertEqual([record["id"] for record in completed], ["r3", "r1"])
+
+    def test_json_run_record_store_latest_completed(self) -> None:
+        storage_module = self.load_script_module("llama_model_manager_storage_run_latest", LMM_STORAGE_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "run-records.json"
+            store = storage_module.JsonRunRecordStore(path, recent_limit=10)
+            store.append_record({"id": "r1", "status": "completed", "model": "m1"})
+            store.append_record({"id": "r2", "status": "failed", "model": "m2"})
+            store.append_record({"id": "r3", "status": "completed", "model": "m3"})
+            self.assertEqual(store.latest_completed(), {"id": "r3", "status": "completed", "model": "m3"})
+
+    def test_json_run_record_store_atomic_writes(self) -> None:
+        storage_module = self.load_script_module("llama_model_manager_storage_run_atomic", LMM_STORAGE_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "run-records.json"
+            store = storage_module.JsonRunRecordStore(path)
+            store.append_record({"id": "r1", "status": "completed", "model": "m1"})
+            store.append_record({"id": "r2", "status": "failed", "model": "m2"})
+
+            tmp_files = sorted(path.parent.glob(f".{path.name}.tmp*"))
+            self.assertEqual(tmp_files, [])
 
     def test_lmm_config_imports_without_scripts_on_sys_path(self) -> None:
         """Verify lmm_config.py is self-contained when loaded directly."""
