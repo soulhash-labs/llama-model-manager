@@ -251,164 +251,33 @@ API_POST_PAYLOAD_SCHEMAS: dict[str, dict[str, Any]] = {
     },
 }
 
-DEMO_STATE = {
-    "title": APP_TITLE,
-    "brand": APP_BRAND,
-    "defaults": {
-        "LLAMA_SERVER_HOST": "127.0.0.1",
-        "LLAMA_SERVER_PORT": "8081",
-        "LLAMA_SERVER_DEVICE": "",
-        "LLAMA_SERVER_CONTEXT": "128000",
-        "LLAMA_SERVER_NGL": "999",
-        "LLAMA_SERVER_BATCH": "128",
-        "LLAMA_SERVER_THREADS": "16",
-        "LLAMA_SERVER_PARALLEL": "1",
-        "GGML_CUDA_ENABLE_UNIFIED_MEMORY": "",
-        "LLAMA_SERVER_LOG": "/var/log/llama-server.log",
-        "LLAMA_SERVER_EXTRA_ARGS": "",
-        "LLAMA_MODEL_SYNC_OPENCODE": "1",
-        "LLAMA_MODEL_SYNC_CLAUDE": "0",
-        "LLAMA_MODEL_SYNC_OPENCLAW": "0",
-        "LLAMA_MODEL_SYNC_GLYPHOS": "0",
-        "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
-    },
-    "current": {
-        "pid": "28142",
-        "alias": "qwen36-35b-q2",
-        "model": "/models/qwen/Qwen3.6-35-Q2_M.gguf",
-        "log": "/var/log/llama-server.log",
-        "configured_mode": "single-client",
-        "configured_parallel": "1",
-        "active_mode": "single-client",
-        "active_parallel": "1",
-        "active_context": "128000",
-        "active_ngl": "999",
-        "active_batch": "128",
-        "active_threads": "16",
-        "active_device": "cuda0",
-        "cuda_unified_memory": "disabled",
-        "auto_fit_override_reason": "",
-        "health": "ok (http://127.0.0.1:8081/health)",
-    },
-    "doctor": {
-        "pid": "28142",
-        "alias": "qwen36-35b-q2",
-        "model": "/models/qwen/Qwen3.6-35-Q2_M.gguf",
-        "health": "ok",
-        "host_os": "linux",
-        "host_arch": "x86_64",
-        "host_backends": "cpu,cuda",
-        "defaults_file": "/etc/llama-server/defaults.env",
-        "registry_file": "/etc/llama-server/models.tsv",
-        "log": "/var/log/llama-server.log",
-        "binary_ok": "yes",
-        "binary": "/opt/llama-model-manager/runtime/llama-server/linux-x86_64-cuda/llama-server",
-        "binary_source": "bundled",
-        "binary_backend": "cuda",
-        "binary_status": "compatible",
-        "binary_message": "validated bundled NVIDIA CUDA binary",
-        "binary_label": "NVIDIA CUDA",
-        "endpoint": "http://127.0.0.1:8081/v1",
-        "build_info": "b1-e365e65",
-        "offload": "offloaded 41/41 layers to GPU",
-        "kv_buffer": "2500.00 MiB",
-        "graph_splits": "2",
-        "gpu_memory": "NVIDIA RTX: 14.3 GiB used / 24.0 GiB total (9.7 GiB free)",
-        "system_memory": "RAM: 42.0 GiB available / 128.0 GiB total",
-        "fit_posture": "gpu-fit",
-        "fit_guidance": "GPU-fit: enough VRAM for a GPU-heavy posture; still lower context if KV cache allocation fails.",
-        "cuda_unified_memory": "disabled",
-        "auto_fit_override_reason": "",
-        "gpu_process_count": "1",
-        "gpu_processes": "pid=28142 port=8081 context=128000 ngl=999 model=/models/qwen/Qwen3.6-35-Q2_M.gguf",
-        "startup_category": "",
-        "startup_diagnosis": "",
-        "startup_suggested_fix": "",
-        "server": "http://127.0.0.1:8081",
-    },
-    "mode": {
-        "configured_mode": "single-client",
-        "configured_parallel": "1",
-        "active_parallel": "1",
-        "active_mode": "single-client",
-    },
-    "models": [
-        {
-            "alias": "qwen36-35b-q2",
-            "path": "/models/qwen/Qwen3.6-35-Q2_M.gguf",
-            "extra": "",
-            "mmproj": "",
-            "extra_args": "",
-            "context": "",
-            "ngl": "",
-            "batch": "",
-            "threads": "",
-            "parallel": "",
-            "device": "",
-            "notes": "Primary long-context coding profile",
-            "exists": "yes",
-        },
-        {
-            "alias": "qwen35-9b-q8",
-            "path": "/models/qwen/Qwen3.5-9B-Q8_0.gguf",
-            "extra": "",
-            "mmproj": "",
-            "extra_args": "",
-            "context": "65536",
-            "ngl": "999",
-            "batch": "128",
-            "threads": "12",
-            "parallel": "1",
-            "device": "cuda0",
-            "notes": "Fast iteration profile",
-            "exists": "yes",
-        },
-        {
-            "alias": "gemma4-e4b-q8",
-            "path": "/models/gemma/Gemma-4-E4B-Q8_K_P.gguf",
-            "extra": "--mmproj /models/gemma/mmproj-Gemma-4-E4B-f16.gguf",
-            "mmproj": "/models/gemma/mmproj-Gemma-4-E4B-f16.gguf",
-            "extra_args": "",
-            "context": "",
-            "ngl": "",
-            "batch": "",
-            "threads": "",
-            "parallel": "",
-            "device": "",
-            "notes": "Vision and audio profile",
-            "exists": "yes",
-        },
-    ],
-    "discovery_root": "/models",
-    "api_base": "http://127.0.0.1:8081/v1",
-    "opencode_model": "llamacpp/Qwen3.6-35-Q2_M.gguf",
-}
+def _load_demo_state() -> dict[str, Any]:
+    demo_path = Path(__file__).parent / "demo_state.json"
+    if not demo_path.exists():
+        return {"state": {}, "discovery": [], "log": ""}
 
-DEMO_DISCOVERY = [
-    {
-        "alias": "mistral-small-24b-q4",
-        "path": "/models/mistral/Mistral-Small-24B-Q4.gguf",
-        "mmproj": "",
-        "extra_args": "",
-        "extra": "",
-        "imported": "no",
-        "exists": "yes",
-    },
-    {
-        "alias": "gemma4-e4b-q8",
-        "path": "/models/gemma/Gemma-4-E4B-Q8_K_P.gguf",
-        "mmproj": "/models/gemma/mmproj-Gemma-4-E4B-f16.gguf",
-        "extra_args": "",
-        "extra": "--mmproj /models/gemma/mmproj-Gemma-4-E4B-f16.gguf",
-        "imported": "yes",
-        "exists": "yes",
-    },
-]
+    try:
+        payload = json.loads(demo_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"state": {}, "discovery": [], "log": ""}
 
-DEMO_LOG = """main: model loaded
-main: server is listening on http://127.0.0.1:8081
-srv  update_slots: all slots are idle
-"""
+    if not isinstance(payload, dict):
+        return {"state": {}, "discovery": [], "log": ""}
+
+    state = payload.get("state")
+    discovery = payload.get("discovery")
+    log = payload.get("log")
+    return {
+        "state": state if isinstance(state, dict) else {},
+        "discovery": discovery if isinstance(discovery, list) else [],
+        "log": log if isinstance(log, str) else "",
+    }
+
+
+_DEMO = _load_demo_state()
+DEMO_STATE = _DEMO["state"]
+DEMO_DISCOVERY = _DEMO["discovery"]
+DEMO_LOG = _DEMO["log"]
 
 
 def default_remote_models_store() -> dict[str, Any]:
@@ -2833,6 +2702,38 @@ class Manager:
                 "message": "Dashboard service status is unavailable.",
             }
 
+    def _load_run_history(self) -> dict[str, Any]:
+        try:
+            store_path = Path(
+                os.environ.get(
+                    "LMM_RUN_RECORDS_FILE",
+                    str(Path.home() / ".local" / "state" / "llama-server" / "lmm-run-records.json"),
+                )
+            ).expanduser()
+            if not store_path.exists():
+                return {"records": [], "total": 0, "by_status": {}}
+
+            scripts_dir = str(Path(__file__).parent.parent / "scripts")
+            inserted = False
+            if scripts_dir not in sys.path:
+                sys.path.insert(0, scripts_dir)
+                inserted = True
+            try:
+                from lmm_storage import JsonRunRecordStore  # type: ignore[import-not-found]
+            finally:
+                if inserted:
+                    sys.path.remove(scripts_dir)
+
+            store = JsonRunRecordStore(store_path)
+            return {
+                "records": store.list_recent(limit=20),
+                "total": store.total_records(),
+                "by_status": store.count_by_status(),
+                "latest_completed": store.latest_completed(),
+            }
+        except Exception:
+            return {"records": [], "total": 0, "by_status": {}, "error": "run_history_unavailable"}
+
     def state(self) -> dict[str, Any]:
         if self.demo:
             return {
@@ -2883,10 +2784,12 @@ class Manager:
                 "gateway_backend_api_base": "http://127.0.0.1:8081/v1",
                 "gateway_harness_mode_default": "routed",
                 "gateway_requests": {"recent_requests": [], "counters": {}},
+                "run_history": {"records": [], "total": 0, "by_status": {}},
                 "glyphos_telemetry": {"available": False, "routing": {"attempts_by_target": {}, "fallback_reason_counts": {}, "total_attempts": 0, "recent_attempts": []}},
                 "context_mode_mcp": {"available": True, "root": str(self.context_mode_mcp_root), "dashboard_source_exists": True, "dashboard_build_exists": False, "lifecycle_matrix_exists": True, "typecheck_script_exists": True},
                 "context_glyphos_pipeline": {"enabled": True, "ready": True, "status": "ready", "label": "Ready", "blockers": [], "benefit": "retrieved context + glyph-routed local inference"},
             }
+
         current = self.parse_key_values(self.run_cli("current"))
         doctor = self.parse_key_values(self.run_cli("doctor"))
         mode = self.parse_key_values(self.run_cli("mode"))
@@ -2894,7 +2797,7 @@ class Manager:
         phase0 = self.phase0_contracts(doctor)
         integration = self.integration_state(defaults, current, mode)
         api_base = f"http://{defaults['LLAMA_SERVER_HOST']}:{defaults['LLAMA_SERVER_PORT']}/v1"
-        current_model_name = Path(current["model"]).name if current.get("model") else "<model>"
+        run_history = self._load_run_history()
 
         return {
             "title": APP_TITLE,
@@ -2919,7 +2822,9 @@ class Manager:
             "registry_exists": self.models_file.exists(),
             "defaults_file": str(self.defaults_file),
             "defaults_exists": self.defaults_file.exists(),
+            "run_history": run_history,
         }
+
 
 
 REMOTE_AND_DOWNLOAD_POST_ROUTES = {
