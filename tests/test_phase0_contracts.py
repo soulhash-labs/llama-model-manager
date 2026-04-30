@@ -38,6 +38,7 @@ LMM_RECEIPTS_PATH = ROOT_DIR / "scripts" / "lmm_receipts.py"
 LMM_TYPES_PATH = ROOT_DIR / "scripts" / "lmm_types.py"
 LMM_HEALTH_PATH = ROOT_DIR / "scripts" / "lmm_health.py"
 LMM_PROVIDERS_PATH = ROOT_DIR / "scripts" / "lmm_providers.py"
+LMM_NOTIFICATIONS_PATH = ROOT_DIR / "scripts" / "lmm_notifications.py"
 
 
 class Phase0ContractTests(unittest.TestCase):
@@ -329,6 +330,119 @@ class Phase0ContractTests(unittest.TestCase):
 
             tmp_files = sorted(path.parent.glob(f".{path.name}.tmp*"))
             self.assertEqual(tmp_files, [])
+
+    def test_notification_manager_respects_cooldown(self) -> None:
+        notifications_module = self.load_script_module("llama_model_manager_notifications", LMM_NOTIFICATIONS_PATH)
+        manager = notifications_module.NotificationManager([notifications_module.LogBackend()], cooldown_seconds=1)
+
+        old_stderr = sys.stderr
+        captured = io.StringIO()
+        sys.stderr = captured
+        try:
+            manager.notify("Title", "Body", notifications_module.NotificationType.RUN_COMPLETED)
+            time.sleep(0.5)
+            manager.notify("Title", "Body", notifications_module.NotificationType.RUN_COMPLETED)
+            output = captured.getvalue()
+        finally:
+            sys.stderr = old_stderr
+
+        self.assertEqual(output.count("[LMM Notification]"), 1)
+
+    def test_notification_manager_falls_back_to_log(self) -> None:
+        notifications_module = self.load_script_module("llama_model_manager_notifications", LMM_NOTIFICATIONS_PATH)
+        desktop_backend = mock.Mock()
+        desktop_backend.name = "desktop"
+        desktop_backend.is_available.return_value = False
+        desktop_backend.send.return_value = False
+        old_stderr = sys.stderr
+        captured = io.StringIO()
+        sys.stderr = captured
+        try:
+            manager = notifications_module.NotificationManager([desktop_backend, notifications_module.LogBackend()])
+            manager.notify("Fallback", "Used", notifications_module.NotificationType.RUN_COMPLETED)
+            output = captured.getvalue()
+        finally:
+            sys.stderr = old_stderr
+
+        self.assertIn("[LMM Notification] Fallback: Used", output)
+        self.assertTrue(desktop_backend.send.called)
+
+    def test_notifications_disabled_by_default(self) -> None:
+        notifications_module = self.load_script_module("llama_model_manager_notifications", LMM_NOTIFICATIONS_PATH)
+        self.assertIsNone(notifications_module.create_notification_manager(enabled=False))
+
+    def test_gateway_emits_notification_on_long_stream(self) -> None:
+        gateway = self.load_gateway_module()
+        notifications_module = self.load_script_module("llama_model_manager_notifications", LMM_NOTIFICATIONS_PATH)
+        notifications = []
+
+        class SpyNotificationManager:
+            def notify(self, title: str, body: str, ntype: notifications_module.NotificationType) -> None:
+                notifications.append((title, body, ntype))
+
+        class DummyHandler:
+            def __init__(self) -> None:
+                self.wfile = io.BytesIO()
+
+            def send_response(self, status: int) -> None:
+                return None
+
+            def send_header(self, key: str, value: str) -> None:
+                return None
+
+            def end_headers(self) -> None:
+                return None
+
+        with mock.patch.object(gateway, "notification_manager", return_value=SpyNotificationManager()):
+            with mock.patch.object(gateway, "now", return_value=31.0):
+                gateway.stream_completion(
+                    DummyHandler(),
+                    started=0.0,
+                    model="test/model",
+                    chunks=iter(["A", "B"]),
+                    headers={},
+                    heartbeat_seconds=0.01,
+                )
+
+        self.assertEqual(len(notifications), 1)
+        actual_type = getattr(notifications[0][2], "value", str(notifications[0][2]))
+        self.assertEqual(actual_type, notifications_module.NotificationType.RUN_COMPLETED.value)
+        self.assertEqual(notifications[0][0], "LMM: model completed")
+
+    def test_gateway_does_not_emit_notification_on_short_stream(self) -> None:
+        gateway = self.load_gateway_module()
+        notifications_module = self.load_script_module("llama_model_manager_notifications", LMM_NOTIFICATIONS_PATH)
+        notifications = []
+
+        class SpyNotificationManager:
+            def notify(self, title: str, body: str, ntype: notifications_module.NotificationType) -> None:
+                notifications.append((title, body, ntype))
+
+        class DummyHandler:
+            def __init__(self) -> None:
+                self.wfile = io.BytesIO()
+
+            def send_response(self, status: int) -> None:
+                return None
+
+            def send_header(self, key: str, value: str) -> None:
+                return None
+
+            def end_headers(self) -> None:
+                return None
+
+        with mock.patch.object(gateway, "notification_manager", return_value=SpyNotificationManager()):
+            with mock.patch.object(gateway, "now", return_value=10.0):
+                gateway.stream_completion(
+                    DummyHandler(),
+                    started=0.0,
+                    model="test/model",
+                    chunks=iter(["A", "B"]),
+                    headers={},
+                    heartbeat_seconds=0.01,
+                )
+
+        self.assertEqual(notifications, [])
 
     def test_json_run_record_store_caps_recent_records(self) -> None:
         storage_module = self.load_script_module("llama_model_manager_storage_run_caps", LMM_STORAGE_PATH)
