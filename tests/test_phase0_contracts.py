@@ -34,6 +34,7 @@ CONTEXT_BRIDGE_PATH = ROOT_DIR / "scripts" / "context_mcp_bridge.py"
 LMM_CONFIG_PATH = ROOT_DIR / "scripts" / "lmm_config.py"
 LMM_ERRORS_PATH = ROOT_DIR / "scripts" / "lmm_errors.py"
 LMM_STORAGE_PATH = ROOT_DIR / "scripts" / "lmm_storage.py"
+LMM_RECEIPTS_PATH = ROOT_DIR / "scripts" / "lmm_receipts.py"
 LMM_TYPES_PATH = ROOT_DIR / "scripts" / "lmm_types.py"
 LMM_HEALTH_PATH = ROOT_DIR / "scripts" / "lmm_health.py"
 LMM_PROVIDERS_PATH = ROOT_DIR / "scripts" / "lmm_providers.py"
@@ -229,6 +230,105 @@ class Phase0ContractTests(unittest.TestCase):
         self.assertEqual(len(record.id), 12)
         self.assertIsInstance(record.created_at, str)
         self.assertTrue(record.created_at)
+
+    def test_receipt_round_trips_to_dict(self) -> None:
+        receipts_module = self.load_script_module("llama_model_manager_receipts_round_trip", LMM_RECEIPTS_PATH)
+        payload_text = "hello world"
+        response_text = "response text"
+        receipt = receipts_module.Receipt(
+            run_id="test-1",
+            route_target="llamacpp",
+            route_reason_code="high_coherence_local",
+            model="test.gguf",
+            harness="pytest-agent",
+            status="success",
+            status_code=200,
+            request_digest=receipts_module.sha256_prefix(payload_text),
+            response_chars=len(response_text),
+            response_digest=receipts_module.sha256_prefix(response_text),
+            duration_ms=123,
+            error_message=None,
+        )
+
+        payload = receipt.to_dict()
+        restored = receipts_module.Receipt.from_dict(payload)
+
+        self.assertEqual(payload["run_id"], "test-1")
+        self.assertTrue(payload["request_digest"].startswith("sha256:"))
+        self.assertEqual(restored.to_dict(), payload)
+
+    def test_sha256_prefix_truncates_long_text(self) -> None:
+        receipts_module = self.load_script_module("llama_model_manager_receipts_sha", LMM_RECEIPTS_PATH)
+        long_text = "x" * 4000
+        truncated = "x" * 2000
+        expected = "sha256:" + hashlib.sha256(truncated.encode("utf-8")).hexdigest()
+        self.assertEqual(receipts_module.sha256_prefix(long_text), expected)
+
+    def test_receipt_emitter_caps_at_line_limit(self) -> None:
+        receipts_module = self.load_script_module("llama_model_manager_receipts_limit", LMM_RECEIPTS_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "receipts.ndjson"
+            emitter = receipts_module.ReceiptEmitter(path, line_limit=3)
+            for index in range(5):
+                emitter.emit(
+                    receipts_module.Receipt(
+                        run_id=f"test-{index}",
+                        route_target="llamacpp",
+                        route_reason_code="high_coherence_local",
+                        model="test.gguf",
+                        request_digest=receipts_module.sha256_prefix(f"prompt {index}"),
+                        response_chars=10,
+                        response_digest=receipts_module.sha256_prefix(f"response {index}"),
+                        duration_ms=index * 10,
+                    )
+                )
+
+            lines = path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 3)
+
+    def test_receipt_emitter_newest_first_ordering(self) -> None:
+        receipts_module = self.load_script_module("llama_model_manager_receipts_order", LMM_RECEIPTS_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "receipts.ndjson"
+            emitter = receipts_module.ReceiptEmitter(path, line_limit=10)
+            for index in range(5):
+                emitter.emit(
+                    receipts_module.Receipt(
+                        run_id=f"test-{index}",
+                        route_target="llamacpp",
+                        route_reason_code="high_coherence_local",
+                        model="test.gguf",
+                        request_digest=receipts_module.sha256_prefix(f"prompt {index}"),
+                        response_chars=10,
+                        response_digest=receipts_module.sha256_prefix(f"response {index}"),
+                        duration_ms=index * 10,
+                    )
+                )
+
+            recent = emitter.read_recent(limit=10)
+            self.assertEqual(len(recent), 5)
+            self.assertEqual([item.run_id for item in recent], ["test-4", "test-3", "test-2", "test-1", "test-0"])
+
+    def test_receipt_emitter_atomic_writes(self) -> None:
+        receipts_module = self.load_script_module("llama_model_manager_receipts_atomic", LMM_RECEIPTS_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "receipts.ndjson"
+            emitter = receipts_module.ReceiptEmitter(path)
+            emitter.emit(
+                receipts_module.Receipt(
+                    run_id="test-1",
+                    route_target="llamacpp",
+                    route_reason_code="high_coherence_local",
+                    model="test.gguf",
+                    request_digest=receipts_module.sha256_prefix("prompt"),
+                    response_chars=4,
+                    response_digest=receipts_module.sha256_prefix("resp"),
+                    duration_ms=1,
+                )
+            )
+
+            tmp_files = sorted(path.parent.glob(f".{path.name}.tmp*"))
+            self.assertEqual(tmp_files, [])
 
     def test_json_run_record_store_caps_recent_records(self) -> None:
         storage_module = self.load_script_module("llama_model_manager_storage_run_caps", LMM_STORAGE_PATH)
