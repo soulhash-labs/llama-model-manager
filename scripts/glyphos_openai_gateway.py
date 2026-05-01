@@ -454,24 +454,43 @@ def message_summary(messages: Any) -> dict[str, Any]:
     return summary
 
 
-def command_context_from_output(raw: str) -> Any:
+def command_context_from_output(raw: str) -> dict[str, Any]:
+    """Extract context text and search metadata from bridge output.
+
+    Returns dict with:
+    - context: text content (always str)
+    - meta: search metadata from MCP (strategy, degraded, suggestions)
+    """
+    default = {"context": "", "meta": {}}
     raw = raw.strip()
     if not raw:
-        return ""
+        return default
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
-        return raw
+        return {"context": raw, "meta": {}}
     if not isinstance(parsed, dict):
-        return parsed
+        return {"context": str(parsed), "meta": {}}
+
+    # Extract search metadata (FTS5 degradation signal)
+    meta = parsed.get("meta")
+    if isinstance(meta, dict):
+        meta = {
+            "strategy": str(meta.get("strategy", "unknown")),
+            "degraded": bool(meta.get("degraded", False)),
+            "suggestions": meta.get("suggestions") if isinstance(meta.get("suggestions"), list) else [],
+        }
+
+    # Extract context text
     for key in ("retrieved_context", "context", "text", "markdown"):
         value = parsed.get(key)
         if isinstance(value, str) and value.strip():
-            return value
+            return {"context": value, "meta": meta}
         if isinstance(value, dict) and value:
-            return value
+            return {"context": json.dumps(value), "meta": meta}
         if isinstance(value, list) and value:
-            return value
+            return {"context": str(value), "meta": meta}
+
     items = parsed.get("items") or parsed.get("results") or parsed.get("snippets")
     if isinstance(items, list):
         pieces: list[str] = []
@@ -483,8 +502,9 @@ def command_context_from_output(raw: str) -> Any:
                     pieces.append(f"{title}: {text}" if title else str(text))
             elif item:
                 pieces.append(str(item))
-        return "\n".join(pieces)
-    return ""
+        return {"context": "\n".join(pieces), "meta": meta}
+
+    return default
 
 
 def retrieve_context(payload: dict[str, Any], prompt: str, *, model: str, stream: bool) -> dict[str, Any]:
@@ -575,13 +595,19 @@ def retrieve_context(payload: dict[str, Any], prompt: str, *, model: str, stream
         if completed.returncode != 0:
             result.update({"status": "error", "source": "context-mode-mcp", "error": "context_command_failed"})
             return result
-        text = context_to_text(command_context_from_output(completed.stdout))
+        extracted = command_context_from_output(completed.stdout)
+        text = context_to_text(extracted.get("context", ""))
+        search_meta = extracted.get("meta", {})
         result.update(
             {
                 "status": "retrieved" if text else "empty",
                 "used": bool(text),
                 "context": text,
                 "source": "context-mode-mcp",
+                # FTS5 search metadata (loud failures)
+                "search_strategy": search_meta.get("strategy", ""),
+                "search_degraded": bool(search_meta.get("degraded", False)),
+                "search_suggestions": search_meta.get("suggestions", []),
             }
         )
         return result
@@ -807,6 +833,10 @@ def prepare_gateway_pipeline(
         "context_source": context_result.get("source", ""),
         "context_error": context_result.get("error", ""),
         "context_latency_ms": context_result.get("latency_ms", 0),
+        # FTS5 search metadata (loud failures)
+        "search_strategy": context_result.get("search_strategy", ""),
+        "search_degraded": bool(context_result.get("search_degraded", False)),
+        "search_suggestions": context_result.get("search_suggestions", []),
         # Encoding metadata (for telemetry — NOT applied to prompt yet)
         "glyph_encoding_status": encoding_result.get("status", "skipped"),
         "glyph_encoding_used": bool(encoding_result.get("used")),
@@ -1232,6 +1262,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     "context_source": pipeline.get("context_source", ""),
                     "context_error": pipeline.get("context_error", ""),
                     "context_latency_ms": pipeline.get("context_latency_ms", 0),
+                    # FTS5 search metadata (loud failures)
+                    "search_strategy": pipeline.get("search_strategy", ""),
+                    "search_degraded": bool(pipeline.get("search_degraded", False)),
+                    # Encoding metadata (for telemetry — NOT applied to prompt yet)
                     "glyph_encoding_status": pipeline.get("glyph_encoding_status", "skipped"),
                     "glyph_encoding_used": bool(pipeline.get("glyph_encoding_used")),
                     "raw_context_chars": pipeline.get("raw_context_chars", 0),
@@ -1252,6 +1286,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 headers["X-LMM-Route-Mode"] = str(pipeline.get("mode", "routed-basic"))
                 headers["X-LMM-Context-Status"] = str(pipeline.get("context_status", "unknown"))
                 headers["X-LMM-Glyph-Encoding"] = str(pipeline.get("glyph_encoding_status", "skipped"))
+                headers["X-LMM-Search-Strategy"] = str(pipeline.get("search_strategy", ""))
+                headers["X-LMM-Search-Degraded"] = str(bool(pipeline.get("search_degraded", False)))
                 record.update(
                     {
                         "route_target": routed["target"],
@@ -1296,6 +1332,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
             headers["X-LMM-Route-Mode"] = str(pipeline.get("mode", "routed-basic"))
             headers["X-LMM-Context-Status"] = str(pipeline.get("context_status", "unknown"))
             headers["X-LMM-Glyph-Encoding"] = str(pipeline.get("glyph_encoding_status", "skipped"))
+            headers["X-LMM-Search-Strategy"] = str(pipeline.get("search_strategy", ""))
+            headers["X-LMM-Search-Degraded"] = str(bool(pipeline.get("search_degraded", False)))
             record.update(
                 {
                     "route_target": routed["target"],

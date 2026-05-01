@@ -61,10 +61,39 @@ def request(proc: subprocess.Popen[str], payload: dict[str, Any]) -> dict[str, A
 
 
 def extract_context(response: dict[str, Any]) -> dict[str, Any]:
+    """Extract context text and metadata from MCP tool response.
+
+    Returns a dict with:
+    - context: text representation of search results
+    - meta: search metadata (strategy, degraded, suggestions)
+    - results: raw result rows if available
+    """
     result = response.get("result") if isinstance(response.get("result"), dict) else {}
     structured = result.get("structuredContent") if isinstance(result.get("structuredContent"), dict) else {}
     if structured:
-        return structured
+        # MCP server returns full object: {ok, tool, query, results, meta}
+        # Flatten meta to top level so gateway can read it easily
+        extracted: dict[str, Any] = {}
+        meta = structured.get("meta")
+        if isinstance(meta, dict):
+            extracted["meta"] = meta
+        results = structured.get("results")
+        if isinstance(results, list):
+            extracted["results"] = results
+        # Build text context from results
+        text_parts: list[str] = []
+        for item in results or []:
+            if isinstance(item, dict):
+                snippet = item.get("snippet") or item.get("content") or ""
+                title = item.get("title") or item.get("uri") or ""
+                if snippet:
+                    text_parts.append(f"{title}: {snippet}" if title else str(snippet))
+            elif item:
+                text_parts.append(str(item))
+        if text_parts:
+            extracted["context"] = "\n".join(text_parts)
+        return extracted
+
     content = result.get("content")
     if isinstance(content, list):
         for item in content:
