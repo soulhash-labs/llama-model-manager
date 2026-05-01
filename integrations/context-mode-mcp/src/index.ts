@@ -25,6 +25,13 @@ import { openSqlBackend } from "./db/adapter";
 import { loadSecurityPolicy, resolveSessionContext } from "./utils/types";
 import { startLifecycleGuard } from "./utils/lifecycle";
 
+// Prevent any dependency from polluting stdout and breaking the JSON-RPC handshake.
+// All console.log calls are redirected to stderr so the MCP protocol stays clean.
+const _originalLog = console.log;
+console.log = (...args: unknown[]) => {
+  process.stderr.write(`[MCP-LOG] ${args.map(a => String(a)).join(" ")}\n`);
+};
+
 const STARTED_AT = Date.now();
 
 function withRuntimeSchema(_schema?: unknown) {

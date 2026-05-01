@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
+import select
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
-
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 MCP_ROOT = APP_ROOT / "integrations" / "context-mode-mcp"
@@ -22,32 +22,33 @@ def read_stdin_json() -> dict[str, Any]:
 
 
 def send_message(proc: subprocess.Popen[str], payload: dict[str, Any]) -> None:
+    """Send a JSON-RPC message as a newline-delimited line (MCP SDK 1.x stdio protocol)."""
     raw = json.dumps(payload, separators=(",", ":"))
-    message = f"Content-Length: {len(raw.encode('utf-8'))}\r\n\r\n{raw}"
     assert proc.stdin is not None
-    proc.stdin.write(message)
+    proc.stdin.write(raw + "\n")
     proc.stdin.flush()
 
 
-def read_message(proc: subprocess.Popen[str]) -> dict[str, Any]:
+def read_message(proc: subprocess.Popen[str], timeout: float = 10.0) -> dict[str, Any]:
+    """Read a single JSON-RPC response line from the MCP server stdout with timeout safety."""
     assert proc.stdout is not None
-    headers: dict[str, str] = {}
     while True:
+        ready = select.select([proc.stdout], [], [], timeout)
+        if not ready[0]:
+            raise TimeoutError(f"MCP bridge read timeout after {timeout}s")
         line = proc.stdout.readline()
-        if line == "":
-            raise RuntimeError("Context MCP server closed stdout")
-        line = line.strip()
         if not line:
-            break
-        if ":" in line:
-            key, value = line.split(":", 1)
-            headers[key.lower()] = value.strip()
-    length = int(headers.get("content-length", "0"))
-    if length <= 0:
-        return {}
-    raw = proc.stdout.read(length)
-    payload = json.loads(raw)
-    return payload if isinstance(payload, dict) else {}
+            raise RuntimeError("Context MCP server closed stdout")
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            payload = json.loads(stripped)
+            return payload if isinstance(payload, dict) else {}
+        except json.JSONDecodeError:
+            # Log stray output but continue (shouldn't happen with clean stdout)
+            print(f"[MCP Bridge] Non-JSON line: {stripped[:200]}", file=sys.stderr)
+            continue
 
 
 def request(proc: subprocess.Popen[str], payload: dict[str, Any]) -> dict[str, Any]:
@@ -100,29 +101,35 @@ def main() -> int:
         env=env,
     )
     try:
-        request(proc, {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "lmm-context-mcp-bridge", "version": "1.0.0"},
-            },
-        })
-        send_message(proc, {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
-        response = request(proc, {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {
-                "name": "ctx_search",
-                "arguments": {
-                    "query": query,
-                    "limit": int(gateway_request.get("limit") or 8),
+        request(
+            proc,
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "lmm-context-mcp-bridge", "version": "1.0.0"},
                 },
             },
-        })
+        )
+        send_message(proc, {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+        response = request(
+            proc,
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "ctx_search",
+                    "arguments": {
+                        "query": query,
+                        "limit": int(gateway_request.get("limit") or 8),
+                    },
+                },
+            },
+        )
         context = extract_context(response)
         print(json.dumps(context, separators=(",", ":")))
         return 0
