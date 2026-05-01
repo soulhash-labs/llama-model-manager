@@ -1444,3 +1444,90 @@ input:focus {
     transition: none;
   }
 }
+
+/* Phase 06: Session handoff panel styles */
+.handoff-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.5rem 0;
+}
+
+.handoff-card {
+  padding: 0.85rem 1rem;
+  border-radius: 0.5rem;
+  background: rgba(27, 42, 70, 0.04);
+  border: 1px solid rgba(27, 42, 70, 0.08);
+}
+
+.handoff-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.4rem;
+}
+
+.handoff-model {
+  font-weight: 600;
+  font-size: 0.92rem;
+  color: var(--text);
+}
+
+.handoff-status {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.handoff-status.status-success {
+  background: rgba(16, 185, 129, 0.12);
+  color: #059669;
+}
+
+.handoff-status.status-error {
+  background: rgba(239, 68, 68, 0.12);
+  color: #dc2626;
+}
+
+.handoff-status.status-cancelled {
+  background: rgba(107, 114, 128, 0.12);
+  color: #6b7280;
+}
+
+.handoff-meta {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-bottom: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.handoff-prompt {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+  max-height: 2.8em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.handoff-artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.4rem;
+}
+
+.handoff-artifacts .artifact {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 0.25rem;
+  background: rgba(59, 130, 246, 0.08);
+  color: #2563eb;
+  font-family: var(--mono-font);
+}

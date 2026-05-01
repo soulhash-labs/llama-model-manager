@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
@@ -63,6 +63,12 @@ class RunRecord:
     harness: str = "python"
     context_status: str = "unknown"
     context_used: bool = False
+    # Handoff fields (Phase 06) — optional, backward compatible
+    session_id: str = ""
+    upstream_session_ref: str = ""
+    handoff_summary: str = ""
+    artifacts: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -75,6 +81,8 @@ class RunRecord:
             self.prompt = self.prompt[:4000]
         if self.duration_ms is None:
             self.duration_ms = self._compute_duration_ms()
+        if not self.session_id:
+            self.session_id = self.id
 
     def _compute_duration_ms(self) -> int | None:
         start = _parse_iso8601_timestamp(self.started_at)
@@ -86,7 +94,7 @@ class RunRecord:
         return int((end - start).total_seconds() * 1000)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "id": self.id,
             "created_at": self.created_at,
             "started_at": self.started_at,
@@ -105,6 +113,18 @@ class RunRecord:
             "context_status": self.context_status,
             "context_used": self.context_used,
         }
+        # Handoff fields — only include when non-empty (backward compatible)
+        if self.session_id and self.session_id != self.id:
+            result["session_id"] = self.session_id
+        if self.upstream_session_ref:
+            result["upstream_session_ref"] = self.upstream_session_ref
+        if self.handoff_summary:
+            result["handoff_summary"] = self.handoff_summary
+        if self.artifacts:
+            result["artifacts"] = list(self.artifacts)
+        if self.tags:
+            result["tags"] = list(self.tags)
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RunRecord:
@@ -141,4 +161,9 @@ class RunRecord:
             harness=str(data.get("harness", "")),
             context_status=str(data.get("context_status", "")),
             context_used=bool(data.get("context_used", False)),
+            session_id=str(data.get("session_id", "")),
+            upstream_session_ref=str(data.get("upstream_session_ref", "")),
+            handoff_summary=str(data.get("handoff_summary", "")),
+            artifacts=list(data.get("artifacts", [])),
+            tags=list(data.get("tags", [])),
         )

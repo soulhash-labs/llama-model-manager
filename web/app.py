@@ -198,6 +198,11 @@ API_POST_PAYLOAD_SCHEMAS: dict[str, dict[str, Any]] = {
     "/api/gateway": {
         "allowed": {"action"},
     },
+    # Phase 06: Handoff summary endpoint
+    "/api/handoff/summary": {
+        "allowed": {"run_id", "limit"},
+        "int_fields": {"limit"},
+    },
     "/api/downloads/start": {
         "allowed": {"repo_id", "artifact_name", "destination_root", "resume_partial_path", "resume_source_job_id"},
         "required": {"repo_id", "artifact_name"},
@@ -2881,6 +2886,69 @@ class Manager:
         except Exception:
             return {"records": [], "total": 0, "by_status": {}, "error": "run_history_unavailable"}
 
+    def get_handoff_summary(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Phase 06: Return handoff summary for recent completed runs."""
+        try:
+            store_path = Path(
+                os.environ.get(
+                    "LMM_RUN_RECORDS_FILE",
+                    str(Path.home() / ".local" / "state" / "llama-server" / "lmm-run-records.json"),
+                )
+            ).expanduser()
+            if not store_path.exists():
+                return {"ok": False, "error": "No run records store found"}
+
+            scripts_dir = str(Path(__file__).parent.parent / "scripts")
+            inserted = False
+            if scripts_dir not in sys.path:
+                sys.path.insert(0, scripts_dir)
+                inserted = True
+            try:
+                from lmm_handoff import HandoffSummary  # type: ignore
+
+                from lmm_storage import JsonRunRecordStore  # type: ignore[import-not-found]
+            finally:
+                if inserted:
+                    sys.path.remove(scripts_dir)
+
+            limit = int(payload.get("limit", 10))
+            run_id = str(payload.get("run_id", "")).strip()
+
+            store = JsonRunRecordStore(store_path)
+            if run_id:
+                records = [r for r in store.list_recent(limit=50) if r.get("id") == run_id]
+            else:
+                records = store.list_recent(limit=limit)
+
+            # Filter for completed runs and generate summaries
+            summaries = []
+            for record in records:
+                status = record.get("status", "")
+                if status not in ("completed", "failed", "cancelled"):
+                    continue
+                try:
+                    summary = HandoffSummary.from_run_record(record)
+                    summaries.append(
+                        {
+                            "session_id": summary.session_id,
+                            "run_id": summary.run_id,
+                            "status": summary.status,
+                            "model": summary.model,
+                            "provider": summary.provider,
+                            "duration_human": summary.duration_human,
+                            "completed_at": summary.completed_at,
+                            "exit_result": summary.exit_result,
+                            "prompt_preview": summary.prompt_preview,
+                            "artifacts": summary.artifacts or [],
+                        }
+                    )
+                except Exception:
+                    continue
+
+            return {"ok": True, "summaries": summaries, "total": len(summaries)}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def state(self) -> dict[str, Any]:
         if self.demo:
             return {
@@ -3310,6 +3378,9 @@ class AppHandler(BaseHTTPRequestHandler):
             action = str(payload.get("action", "status")).strip()
             result = self.manager.parse_key_values(self.manager.run_cli("gateway", action))
             return {"ok": True, "result": result}
+        # Phase 06: Handoff summary endpoint
+        if route == "/api/handoff/summary":
+            return self.manager.get_handoff_summary(payload)
         raise ValidationError("unknown_route", f"Unknown API route: {route}")
 
     def _status_for_error(self, error: Exception) -> HTTPStatus:

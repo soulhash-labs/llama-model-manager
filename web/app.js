@@ -2226,6 +2226,15 @@ function bindEvents() {
     setActivityPanelVisible(visible);
     renderActivityPanelVisibility(visible);
   });
+  $("#toggle-session-handoffs-panel")?.addEventListener("click", () => {
+    const panel = $("#session-handoffs-panel");
+    if (!panel) return;
+    const collapsed = panel.classList.contains("is-collapsed");
+    panel.classList.toggle("is-collapsed", !collapsed);
+    const btn = $("#toggle-session-handoffs-panel");
+    if (btn) btn.textContent = collapsed ? "Hide Sessions" : "Show Sessions";
+    if (collapsed) loadSessionHandoffs().catch(showError);
+  });
   $("#restart-server").addEventListener("click", (event) => withButtonBusy(event.currentTarget, "Restarting...", async () => {
     await api("/api/restart", { method: "POST", body: JSON.stringify({}) });
     await refreshState();
@@ -2325,6 +2334,48 @@ function showError(error) {
   showToast(error.message || String(error), "error");
 }
 
+// Phase 06: Session handoff functions
+async function loadSessionHandoffs() {
+  try {
+    const result = await api("/api/handoff/summary", {
+      method: "POST",
+      body: JSON.stringify({ limit: 10 }),
+    });
+    if (result?.ok) {
+      renderSessionHandoffs(result.summaries || []);
+    }
+  } catch (err) {
+    // Silently fail — handoff panel is optional
+    console.warn("Failed to load session handoffs:", err);
+  }
+}
+
+function renderSessionHandoffs(summaries) {
+  const container = $("#session-handoffs-list");
+  if (!container) return;
+  if (!summaries.length) {
+    container.innerHTML = '<p class="empty-state">No completed sessions yet. Long-running sessions will appear here when they finish.</p>';
+    return;
+  }
+  container.innerHTML = summaries.map(s => {
+    const statusClass = s.status === "completed" ? "status-success" : s.status === "failed" ? "status-error" : "status-cancelled";
+    const statusLabel = s.status.charAt(0).toUpperCase() + s.status.slice(1);
+    return `<div class="handoff-card">
+      <div class="handoff-header">
+        <span class="handoff-model">${escapeHtml(s.model || "unknown")}</span>
+        <span class="handoff-status ${statusClass}">${escapeHtml(statusLabel)}</span>
+      </div>
+      <div class="handoff-meta">
+        <span class="handoff-duration">${escapeHtml(s.duration_human || "—")}</span>
+        <span class="handoff-provider">${escapeHtml(s.provider || "—")}</span>
+        <span class="handoff-completed">${escapeHtml(s.completed_at || "")}</span>
+      </div>
+      <div class="handoff-prompt">${escapeHtml(s.prompt_preview || "")}</div>
+      ${s.artifacts?.length ? `<div class="handoff-artifacts">${s.artifacts.map(a => `<span class="artifact">${escapeHtml(a)}</span>`).join(" ")}</div>` : ""}
+    </div>`;
+  }).join("");
+}
+
 async function main() {
   loadCleanupRetentionPreference();
   loadRemotePreferences();
@@ -2332,5 +2383,6 @@ async function main() {
   bindEvents();
   await refreshState();
   renderDiscovery(state.discovery);
+  renderSessionHandoffs([]); // Initialize empty — loads on panel expand
 }
 main().catch(showError);

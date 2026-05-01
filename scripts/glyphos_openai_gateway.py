@@ -34,6 +34,31 @@ from lmm_notifications import NotificationType, create_notification_manager  # n
 from lmm_storage import JsonGatewayTelemetryStore, JsonRunRecordStore  # noqa: E402
 from lmm_types import ExitResult, RunRecord, RunStatus  # noqa: E402
 
+# Phase 06: Handoff module (optional import for backward compat)
+try:
+    from lmm_handoff import HandoffSummary, format_handoff_text  # type: ignore
+except ImportError:
+    HandoffSummary = None  # type: ignore
+    format_handoff_text = None  # type: ignore
+
+
+def _generate_handoff_summary(record: dict[str, Any], duration_ms: int) -> None:
+    """Generate handoff summary for long-running sessions and store in record.
+
+    Phase 06: For runs exceeding the handoff threshold, populate the
+    handoff_summary field with a human-readable summary.
+    """
+    if HandoffSummary is None or format_handoff_text is None:
+        return
+    threshold_ms = int(os.environ.get("LMM_HANDOFF_THRESHOLD_MS", "60000"))
+    if duration_ms < threshold_ms:
+        return
+    try:
+        summary = HandoffSummary.from_run_record(record)
+        record["handoff_summary"] = format_handoff_text(summary)
+    except Exception:
+        pass  # Never break recording for handoff generation failure
+
 
 def now() -> float:
     return time.time()
@@ -228,6 +253,11 @@ def _run_record_from_dict(record: dict[str, Any]) -> RunRecord:
         context_status=str(record.get("context_status", "")),
         context_used=bool(record.get("context_used", False)),
         duration_ms=record.get("duration_ms") if isinstance(record.get("duration_ms"), int) else None,
+        session_id=str(record.get("session_id", "")),
+        upstream_session_ref=str(record.get("upstream_session_ref", "")),
+        handoff_summary=str(record.get("handoff_summary", "")),
+        artifacts=list(record.get("artifacts", [])),
+        tags=list(record.get("tags", [])),
     )
 
 
@@ -265,6 +295,36 @@ def context_mcp_root() -> Path:
 
 def context_mcp_bridge_path() -> Path:
     return APP_ROOT / "scripts" / "context_mcp_bridge.py"
+
+
+def _extract_session_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract session metadata from request payload for handoff tracking.
+
+    Reads metadata.session_id, metadata.conversation_id, metadata.tags,
+    and metadata.artifact_paths from the incoming chat completion payload.
+    """
+    metadata = payload.get("metadata") if isinstance(payload, dict) else None
+    if not isinstance(metadata, dict):
+        return {}
+
+    result: dict[str, Any] = {}
+    session_id = metadata.get("session_id") or metadata.get("conversation_id")
+    if isinstance(session_id, str) and session_id:
+        result["session_id"] = session_id
+
+    upstream_ref = metadata.get("upstream_session_ref")
+    if isinstance(upstream_ref, str) and upstream_ref:
+        result["upstream_session_ref"] = upstream_ref
+
+    tags = metadata.get("tags")
+    if isinstance(tags, list):
+        result["tags"] = [str(t) for t in tags if isinstance(t, str)]
+
+    artifacts = metadata.get("artifact_paths") or metadata.get("artifacts")
+    if isinstance(artifacts, list):
+        result["artifacts"] = [str(a) for a in artifacts if isinstance(a, str)]
+
+    return result
 
 
 def context_status() -> tuple[str, bool]:
@@ -1012,6 +1072,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
             model = str(payload.get("model") or self.server.model_id or "local-llama")  # type: ignore[attr-defined]
             record["prompt"] = prompt
             record["model"] = model
+            # Phase 06: Extract session metadata for handoff tracking
+            session_meta = _extract_session_metadata(payload)
+            if session_meta:
+                record.update(session_meta)
             max_tokens = request_int(payload, "max_tokens", int(os.environ.get("LMM_DEFAULT_MAX_TOKENS", "32768")))
             temperature = request_float(payload, "temperature", 0.7)
             stream = payload.get("stream") is True
@@ -1078,6 +1142,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     record["status"] = RunStatus.COMPLETED.value
                     record["exit_result"] = ExitResult.SUCCESS.value
                     record["provider"] = record["route_target"]
+                # Phase 06: Generate handoff summary for long runs
+                _generate_handoff_summary(record, record.get("latency_ms", 0))
                 safe_record_run_record(_run_record_from_dict(record))
                 safe_record_gateway_request(record)
                 return
@@ -1103,6 +1169,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 routed=routed,
                 pipeline=pipeline,
             )
+            # Phase 06: Generate handoff summary for long runs
+            _generate_handoff_summary(record, routed.get("latency_ms", 0))
             safe_record_run_record(_run_record_from_dict(record))
             safe_record_gateway_request(record)
             json_response(self, 200, response_payload, headers=headers)
@@ -1112,6 +1180,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             record["exit_result"] = ExitResult.ERROR.value
             record["latency_ms"] = round((now() - started) * 1000)
             record["completed_at"] = _current_iso_timestamp()
+            _generate_handoff_summary(record, record["latency_ms"])
             safe_record_gateway_request(record)
             safe_record_run_record(_run_record_from_dict(record))
             json_response(
@@ -1125,6 +1194,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             record["exit_result"] = ExitResult.PROVIDER_ERROR.value
             record["latency_ms"] = round((now() - started) * 1000)
             record["completed_at"] = _current_iso_timestamp()
+            _generate_handoff_summary(record, record["latency_ms"])
             safe_record_gateway_request(record)
             safe_record_run_record(_run_record_from_dict(record))
             error_payload = (
