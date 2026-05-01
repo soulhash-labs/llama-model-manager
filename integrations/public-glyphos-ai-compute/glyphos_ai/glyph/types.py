@@ -221,6 +221,22 @@ class Intent:
 
 
 @dataclass
+class ContextPayload:
+    """Carries context state (raw + encoded) through the GlyphOS pipeline.
+
+    The router inspects this to decide whether to apply Ψ encoding.
+    """
+    raw_context: str = ""
+    raw_context_chars: int = 0
+    encoding_status: str = "none"          # "none" | "encoded" | "skipped" | "disabled" | "error_raw_fallback"
+    encoded_context: str = ""
+    encoding_format: str = ""              # "GE1-JSON" | "GE1-LINES"
+    encoding_ratio: float = 1.0            # encoded_chars / raw_chars (lower = better)
+    estimated_token_delta: int = 0
+    error: str = ""
+
+
+@dataclass
 class GlyphPacket:
     """Complete glyph packet"""
     instance_id: str
@@ -229,6 +245,10 @@ class GlyphPacket:
     header: str = "H"
     time_slot: str = "T00"
     destination: str = ""
+    # Encoding metadata (filled by gateway, inspected by router)
+    encoding_status: str = "none"          # mirrors ContextPayload.encoding_status
+    encoding_format: str = ""              # "GE1-JSON" | "GE1-LINES"
+    encoding_ratio: float = 1.0
 
 
 # === Helper Functions ===
