@@ -547,6 +547,11 @@
               <input name="LMM_GATEWAY_SSE_HEARTBEAT_SECONDS" id="default-sse-heartbeat" placeholder="5">
               <span class="field-note">Interval for SSE keepalive comments. Default 5s. Lower values prevent reverse-proxy timeouts.</span>
             </label>
+            <label title="LMM gateway provider timeout in seconds. Maximum time the gateway waits for llama.cpp before aborting. Must be at least as large as your expected reasoning duration.">
+              Gateway Timeout (s)
+              <input name="LMM_GATEWAY_TIMEOUT_SECONDS" id="default-gateway-timeout" placeholder="3600">
+              <span class="field-note">Max time gateway waits for llama.cpp before aborting. Default 3600 (1 hour); raise for long sessions.</span>
+            </label>
             <label title="Network host for llama-server. 127.0.0.1 keeps it local to this machine.">
               Host
               <input name="LLAMA_SERVER_HOST" id="default-host">

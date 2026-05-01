@@ -39,6 +39,7 @@ KNOWN_DEFAULT_KEYS = [
     "LMM_DEFAULT_MAX_TOKENS",
     "LLAMA_CPP_STREAM_TIMEOUT",
     "LMM_GATEWAY_SSE_HEARTBEAT_SECONDS",
+    "LMM_GATEWAY_TIMEOUT_SECONDS",
     "LLAMA_SERVER_HOST",
     "LLAMA_SERVER_PORT",
     "LLAMA_SERVER_DEVICE",
@@ -3303,11 +3304,11 @@ class AppHandler(BaseHTTPRequestHandler):
             return {"ok": True, **self.manager.activate_context_glyphos_pipeline()}
         if route == "/api/claude-gateway":
             action = str(payload.get("action", "status")).strip()
-            result = self.parse_key_values(self.manager.run_cli("claude-gateway", action))
+            result = self.manager.parse_key_values(self.manager.run_cli("claude-gateway", action))
             return {"ok": True, "result": result}
         if route == "/api/gateway":
             action = str(payload.get("action", "status")).strip()
-            result = self.parse_key_values(self.manager.run_cli("gateway", action))
+            result = self.manager.parse_key_values(self.manager.run_cli("gateway", action))
             return {"ok": True, "result": result}
         raise ValidationError("unknown_route", f"Unknown API route: {route}")
 

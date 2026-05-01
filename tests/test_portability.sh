@@ -1639,7 +1639,7 @@ EOF
     assert_not_contains "$config" 'preferred_local_backend: llamacpp'
     assert_contains "$config" 'url: http://127.0.0.1:19081/v1'
     assert_contains "$config" 'model: Qwen3.5-9B-Q8_0.gguf'
-    assert_contains "$config" 'timeout: 300'
+    assert_contains "$config" 'timeout: 3600'
     assert_contains "$config" 'openai:'
 }
 

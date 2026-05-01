@@ -97,7 +97,7 @@ def _sse_content(line: str) -> str | None:
 
 
 class LlamaCppProvider:
-    def __init__(self, base_url: str = "http://127.0.0.1:8081/v1", model: str = "", timeout: float = 300.0) -> None:
+    def __init__(self, base_url: str = "http://127.0.0.1:8081/v1", model: str = "", timeout: float = 3600.0) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model or "local-llama"
         self.timeout = timeout
@@ -283,7 +283,7 @@ class ProviderRegistry:
 
 def create_default_registry() -> ProviderRegistry:
     backend_base_url = os.environ.get("LLAMA_MODEL_BACKEND_BASE_URL", "http://127.0.0.1:8081/v1")
-    timeout_text = os.environ.get("LMM_GATEWAY_TIMEOUT_SECONDS", "300")
+    timeout_text = os.environ.get("LMM_GATEWAY_TIMEOUT_SECONDS", "3600")
     try:
         timeout_seconds = float(timeout_text)
     except ValueError as exc:

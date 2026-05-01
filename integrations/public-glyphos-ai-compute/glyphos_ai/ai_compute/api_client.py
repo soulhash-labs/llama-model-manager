@@ -380,9 +380,9 @@ def create_configured_clients() -> dict[str, Any]:
     )
     llama_timeout = int(
         _env_first(
-            "GLYPHOS_LLAMACPP_TIMEOUT", default=_config_value(config, "ai_compute.llamacpp.timeout", default="300")
+            "GLYPHOS_LLAMACPP_TIMEOUT", default=_config_value(config, "ai_compute.llamacpp.timeout", default="3600")
         )
-        or "300"
+        or "3600"
     )
     if (
         _env_first(
@@ -409,9 +409,9 @@ def create_configured_clients() -> dict[str, Any]:
         timeout = int(
             _env_first(
                 f"GLYPHOS_LLAMACPP_{lane.upper()}_TIMEOUT",
-                default=_config_value(config, f"ai_compute.lanes.{lane}.llamacpp_timeout", default="300"),
+                default=_config_value(config, f"ai_compute.lanes.{lane}.llamacpp_timeout", default="3600"),
             )
-            or "300"
+            or "3600"
         )
         client = LlamaCppClient(base_url=base_url, model=model, timeout=timeout)
         if client.is_available():
