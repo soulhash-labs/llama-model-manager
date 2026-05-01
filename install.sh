@@ -51,19 +51,23 @@ ensure_context_mode_mcp_dist() {
     [[ -f "$mcp_dir/dist/index.js" ]] && return 0
 
     if ! command -v npm >/dev/null 2>&1; then
-        printf 'post-install warning: Context Mode MCP dist/index.js is missing and npm is unavailable; Context MCP will remain degraded until you run npm ci && npm run build:mcp in %s\n' "$mcp_dir" >&2
+        printf 'post-install warning: Context Mode MCP dist/index.js is missing and npm is unavailable; Context MCP will remain degraded until you run npm ci --ignore-scripts && npm run build:mcp in %s\n' "$mcp_dir" >&2
+        return 0
+    fi
+    if [[ ! -f "$mcp_dir/package-lock.json" ]]; then
+        printf 'post-install warning: Context Mode MCP package-lock.json is missing; refusing live npm resolution during install. Context MCP will remain degraded until a locked package is available in %s\n' "$mcp_dir" >&2
         return 0
     fi
 
     printf 'building Context Mode MCP server bundle...\n'
     if (
         cd "$mcp_dir"
-        npm ci --omit=optional
+        npm ci --omit=optional --ignore-scripts --no-audit --fund=false
         npm run build:mcp
     ); then
         printf 'built Context Mode MCP server bundle\n'
     else
-        printf 'post-install warning: failed to build Context Mode MCP server bundle; Context MCP will remain degraded until you run npm ci && npm run build:mcp in %s\n' "$mcp_dir" >&2
+        printf 'post-install warning: failed to build Context Mode MCP server bundle; Context MCP will remain degraded until you run npm ci --ignore-scripts && npm run build:mcp in %s\n' "$mcp_dir" >&2
     fi
 }
 

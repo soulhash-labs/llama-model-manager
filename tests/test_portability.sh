@@ -326,6 +326,10 @@ test_install_builds_context_mcp_dist_when_archive_omits_generated_artifact() {
     cat >"$fake_bin/npm" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${1:-}" == "ci" ]]; then
+    [[ " $* " == *" --ignore-scripts "* ]] || exit 9
+    [[ " $* " == *" --no-audit "* ]] || exit 9
+fi
 if [[ "${1:-}" == "run" && "${2:-}" == "build:mcp" ]]; then
     mkdir -p dist/hooks
     printf 'console.log("fake context mcp");\n' >dist/index.js
@@ -1126,8 +1130,15 @@ test_context_mcp_build_repairs_missing_dist() {
     cat >"$mcp_root/package.json" <<'JSON'
 {"scripts":{"build:mcp":"node scripts/build.js mcp"}}
 JSON
+    cat >"$mcp_root/package-lock.json" <<'JSON'
+{"lockfileVersion":3,"packages":{}}
+JSON
     cat >"$tmp/bin/npm" <<'SH'
 #!/usr/bin/env bash
+if [[ "${1:-}" == "ci" ]]; then
+    [[ " $* " == *" --ignore-scripts "* ]] || exit 9
+    [[ " $* " == *" --no-audit "* ]] || exit 9
+fi
 if [[ "${1:-}" == "run" && "${2:-}" == "build:mcp" ]]; then
     mkdir -p dist
     printf 'console.log("fake context mcp");\n' >dist/index.js

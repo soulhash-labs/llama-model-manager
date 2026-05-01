@@ -3923,14 +3923,11 @@ context_mcp_build() {
     dist="$root/dist/index.js"
     [[ -f "$root/package.json" ]] || die "Context Mode MCP package not found: $root"
     command_available npm || die "npm is required to build Context Mode MCP; install npm or rerun the installer on a host with npm"
+    [[ -f "$root/package-lock.json" ]] || die "Context Mode MCP package-lock.json is required; refusing unlocked npm install during supply-chain risk window"
 
     (
         cd "$root"
-        if [[ -f package-lock.json ]]; then
-            npm ci --omit=optional
-        else
-            npm install --omit=optional
-        fi
+        npm ci --omit=optional --ignore-scripts --no-audit --fund=false
         npm run build:mcp
     )
 
