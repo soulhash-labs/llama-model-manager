@@ -309,6 +309,44 @@ test_install_fails_when_required_integrations_are_missing() {
     assert_contains "$(cat "$err")" "installer payload is missing integrations/public-glyphos-ai-compute/glyphos_ai"
 }
 
+test_install_builds_context_mcp_dist_when_archive_omits_generated_artifact() {
+    local tmp
+    local source
+    local fake_bin
+    local output
+
+    tmp="$(mktemp -d)"
+    source="$tmp/source"
+    fake_bin="$tmp/bin"
+    mkdir -p "$source" "$fake_bin"
+    cp -a "$ROOT_DIR"/bin "$ROOT_DIR"/config "$ROOT_DIR"/desktop "$ROOT_DIR"/scripts "$ROOT_DIR"/web "$ROOT_DIR"/integrations "$source"/
+    cp "$ROOT_DIR/install.sh" "$source/install.sh"
+    rm -rf "$source/integrations/context-mode-mcp/dist" "$source/integrations/context-mode-mcp/node_modules"
+    cat >"$fake_bin/npm" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "run" && "${2:-}" == "build:mcp" ]]; then
+    mkdir -p dist/hooks
+    printf 'console.log("fake context mcp");\n' >dist/index.js
+    printf 'console.log("fake hook runner");\n' >dist/hooks/runner.js
+fi
+exit 0
+EOF
+    chmod +x "$fake_bin/npm"
+
+    output="$(
+        env \
+            HOME="$tmp/home" \
+            XDG_CONFIG_HOME="$tmp/config" \
+            XDG_DATA_HOME="$tmp/data" \
+            PATH="$fake_bin:/usr/bin:/bin" \
+            bash "$source/install.sh"
+    )"
+
+    assert_contains "$output" "building Context Mode MCP server bundle"
+    [[ -f "$tmp/data/llama-model-manager/integrations/context-mode-mcp/dist/index.js" ]] || fail "expected install.sh to build and copy context-mode-mcp/dist/index.js"
+}
+
 
 test_install_migrates_placeholder_seed_registry() {
     local tmp
@@ -1860,6 +1898,7 @@ main() {
     test_docs_no_longer_imply_universal_gpu_binary
     test_installers_support_bootstrap_tty_handoff_and_empty_registry_seed
     test_install_fails_when_required_integrations_are_missing
+    test_install_builds_context_mcp_dist_when_archive_omits_generated_artifact
     test_install_migrates_placeholder_seed_registry
     test_install_preserves_real_registry_entries
     test_dependency_install_preview_exists

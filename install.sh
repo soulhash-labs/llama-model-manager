@@ -44,6 +44,29 @@ clean_python_cache() {
     find "$target" -type f -name '*.pyc' -delete 2>/dev/null || true
 }
 
+ensure_context_mode_mcp_dist() {
+    local mcp_dir="$ROOT_DIR/integrations/context-mode-mcp"
+
+    [[ -f "$mcp_dir/package.json" ]] || return 0
+    [[ -f "$mcp_dir/dist/index.js" ]] && return 0
+
+    if ! command -v npm >/dev/null 2>&1; then
+        printf 'post-install warning: Context Mode MCP dist/index.js is missing and npm is unavailable; Context MCP will remain degraded until you run npm ci && npm run build:mcp in %s\n' "$mcp_dir" >&2
+        return 0
+    fi
+
+    printf 'building Context Mode MCP server bundle...\n'
+    if (
+        cd "$mcp_dir"
+        npm ci --omit=optional
+        npm run build:mcp
+    ); then
+        printf 'built Context Mode MCP server bundle\n'
+    else
+        printf 'post-install warning: failed to build Context Mode MCP server bundle; Context MCP will remain degraded until you run npm ci && npm run build:mcp in %s\n' "$mcp_dir" >&2
+    fi
+}
+
 defaults_has_key() {
     local key="$1"
     local file="$2"
@@ -248,10 +271,6 @@ require_source_tree() {
         printf 'error: installer payload is missing integrations/context-mode-mcp/package.json\n' >&2
         missing=1
     }
-    [[ -f "$ROOT_DIR/integrations/context-mode-mcp/dist/index.js" ]] || {
-        printf 'error: installer payload is missing integrations/context-mode-mcp/dist/index.js; run npm ci && npm run build in integrations/context-mode-mcp before packaging\n' >&2
-        missing=1
-    }
 
     if [[ "$missing" -ne 0 ]]; then
         printf 'error: download the full llama-model-manager archive and rerun install.sh\n' >&2
@@ -260,6 +279,7 @@ require_source_tree() {
 }
 
 require_source_tree
+ensure_context_mode_mcp_dist
 mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$APP_DIR" "$APP_SHARE_DIR"
 
 install -m 0755 "$ROOT_DIR/bin/llama-model" "$BIN_DIR/llama-model"
