@@ -35,3 +35,7 @@ WEB_MANAGER_HANDOFF.md
 
 # Local/reference documentation artifacts
 docs/
+
+# Local branding/media artifacts
+web/branding/
+desktop/*icon*.svg
