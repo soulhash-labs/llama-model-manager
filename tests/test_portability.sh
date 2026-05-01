@@ -198,6 +198,7 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$help" "llama-model sync-claude"
     assert_contains "$help" "llama-model claude-gateway start"
     assert_contains "$help" "llama-model sync-glyphos"
+    assert_contains "$help" "llama-model context-mcp status|build"
     assert_contains "$help" "llama-model download-jobs"
     assert_contains "$help" "llama-model download-cancel <job_id>"
     assert_contains "$defaults" "OPENCLAW_PROFILE="
@@ -1031,7 +1032,7 @@ test_doctor_reports_install_health() {
     assert_contains "$output" "context_mode_mcp_installed: yes"
     assert_contains "$output" "context_mode_mcp_dist: no"
     assert_contains "$output" "install_ok: no"
-    assert_contains "$output" "install_guidance: Run ./install.sh"
+    assert_contains "$output" "install_guidance: Run llama-model context-mcp build"
 
     mkdir -p "$tmp/home/.local/share/llama-model-manager/integrations/public-glyphos-ai-compute/glyphos_ai/ai_compute"
     : >"$tmp/home/.local/share/llama-model-manager/integrations/public-glyphos-ai-compute/glyphos_ai/__init__.py"
@@ -1111,6 +1112,44 @@ PY
     assert_contains "$output" "dashboard_api_context_glyphos_status: activation_pending"
     assert_contains "$output" "dashboard_api_glyphos_config: yes"
     assert_contains "$output" "dashboard_api_guidance: Live dashboard cannot see bundled GlyphOS"
+}
+
+test_context_mcp_build_repairs_missing_dist() {
+    local tmp
+    local mcp_root
+    local output
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    mcp_root="$tmp/context-mode-mcp"
+    mkdir -p "$mcp_root" "$tmp/bin"
+    cat >"$mcp_root/package.json" <<'JSON'
+{"scripts":{"build:mcp":"node scripts/build.js mcp"}}
+JSON
+    cat >"$tmp/bin/npm" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "run" && "${2:-}" == "build:mcp" ]]; then
+    mkdir -p dist
+    printf 'console.log("fake context mcp");\n' >dist/index.js
+fi
+exit 0
+SH
+    chmod +x "$tmp/bin/npm"
+
+    output="$(
+        env \
+            HOME="$tmp/home" \
+            PATH="$tmp/bin:/usr/bin:/bin" \
+            XDG_CONFIG_HOME="$tmp/config" \
+            XDG_STATE_HOME="$tmp/state" \
+            LLAMA_SERVER_RUNTIME_DIR="$tmp/runtime" \
+            CONTEXT_MODE_MCP_ROOT="$mcp_root" \
+            "$BIN" context-mcp build
+    )"
+
+    assert_contains "$output" "status: built"
+    assert_contains "$output" "restart_note: run llama-model gateway restart"
+    [[ -f "$mcp_root/dist/index.js" ]] || fail "expected context-mcp build to create dist/index.js"
 }
 
 test_doctor_reports_legacy_route_state() {
@@ -1920,6 +1959,7 @@ main() {
     test_registry_parsing_preserves_empty_columns
     test_doctor_tolerates_missing_log_markers
     test_doctor_reports_install_health
+    test_context_mcp_build_repairs_missing_dist
     test_doctor_reports_legacy_route_state
     test_dashboard_service_unit_rendering
     test_dashboard_service_status_reports_unsupported_without_systemctl

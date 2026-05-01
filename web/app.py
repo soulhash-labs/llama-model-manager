@@ -2619,10 +2619,32 @@ class Manager:
         package_json = self.context_mode_mcp_root / "package.json"
         package = self.load_json_file(package_json)
         scripts = package.get("scripts", {}) if isinstance(package.get("scripts"), dict) else {}
+        bridge_path = self.app_root.parent / "scripts" / "context_mcp_bridge.py"
+        package_available = package_json.is_file() and (self.context_mode_mcp_root / "src" / "index.ts").is_file()
+        server_dist_exists = (self.context_mode_mcp_root / "dist" / "index.js").is_file()
+        bridge_exists = bridge_path.is_file()
+        if not package_available:
+            status = "missing"
+            guidance = "Context Mode MCP package missing; rerun the latest installer."
+        elif not bridge_exists:
+            status = "missing_bridge"
+            guidance = "Context MCP bridge missing; rerun the latest installer."
+        elif not server_dist_exists:
+            status = "missing_dist"
+            guidance = "Run llama-model context-mcp build, then restart the LMM gateway and dashboard."
+        else:
+            status = "bridge_ready"
+            guidance = ""
         return {
-            "available": package_json.is_file() and (self.context_mode_mcp_root / "src" / "index.ts").is_file(),
+            "available": package_available,
+            "ready": status == "bridge_ready",
+            "status": status,
+            "guidance": guidance,
             "root": str(self.context_mode_mcp_root),
             "package_json": str(package_json),
+            "bridge": str(bridge_path),
+            "bridge_exists": bridge_exists,
+            "server_dist_exists": server_dist_exists,
             "dashboard_source_exists": (self.context_mode_mcp_root / "dashboard" / "src" / "App.tsx").is_file(),
             "dashboard_build_exists": (self.context_mode_mcp_root / "dist" / "index.html").is_file(),
             "lifecycle_matrix_exists": (self.context_mode_mcp_root / "scripts" / "lifecycle-matrix.mjs").is_file(),
@@ -2646,7 +2668,7 @@ class Manager:
         }
         glyphos_ready = self.glyphos_config_file.exists()
         glyphos_integration_ready = bool((glyphos_telemetry or {}).get("available"))
-        context_ready = bool(context_mode_mcp.get("available"))
+        context_ready = bool(context_mode_mcp.get("ready"))
         ready = enabled and glyphos_ready and glyphos_integration_ready and context_ready
         blockers: list[str] = []
         if not enabled:
@@ -2656,7 +2678,7 @@ class Manager:
         if not glyphos_integration_ready:
             blockers.append(str((glyphos_telemetry or {}).get("guidance") or "GlyphOS integration unavailable"))
         if not context_ready:
-            blockers.append("Context Mode MCP package missing")
+            blockers.append(str(context_mode_mcp.get("guidance") or "Context Mode MCP not ready"))
         recent_gateway = (gateway_requests or {}).get("recent_requests")
         latest_trace = (
             recent_gateway[0]
@@ -3550,7 +3572,10 @@ def main(argv: list[str]) -> int:
     web_root = Path(__file__).resolve().parent
     manager = Manager(web_root, demo=args.demo)
 
-    handler = type("AppHandlerImpl", (AppHandler,), {})
+    class AppHandlerImpl(AppHandler):
+        pass
+
+    handler = AppHandlerImpl
     handler.manager = manager
     handler.web_root = web_root
 

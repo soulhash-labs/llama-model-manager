@@ -34,6 +34,7 @@ Commands:
   llama-model sync-claude [model-id]
   llama-model claude-gateway start|stop|restart|status|logs
   llama-model sync-glyphos [alias|/path/to/model.gguf]
+  llama-model context-mcp status|build
   llama-model download-jobs
   llama-model download-cancel <job_id>
   llama-model download-retry <job_id>
@@ -76,6 +77,13 @@ Binary portability:
     llama-model build-runtime --backend auto
   or from a repo checkout:
     ./scripts/build-llama-server.sh --backend auto
+
+Context MCP repair:
+  If doctor reports context_mode_mcp_dist: no or the dashboard shows Context
+  missing_dist, run:
+    llama-model context-mcp build
+  Then restart the LMM gateway and dashboard so routed-full mode can invoke the
+  rebuilt Context MCP bundle.
 
 For single-client coding harnesses, a good optional tweak is:
   LLAMA_SERVER_PARALLEL=1

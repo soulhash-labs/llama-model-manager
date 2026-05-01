@@ -166,6 +166,7 @@ Usage:
   llama-model sync-openclaw [--mode routed|direct] [--profile NAME] [alias|/path/to/model.gguf]
   llama-model sync-claude [model-id]
   llama-model sync-glyphos [alias|/path/to/model.gguf]
+  llama-model context-mcp status|build
   llama-model gateway start|stop|restart|status|logs
   llama-model claude-gateway start|stop|restart|status|logs
   llama-model download-jobs
@@ -193,6 +194,7 @@ Examples:
   llama-model sync-claude qwen35-9b-q8
   llama-model claude-gateway start
   llama-model sync-glyphos
+  llama-model context-mcp build
   llama-model switch /absolute/path/to/model.gguf --no-warmup
   llama-model dashboard-service status
   llama-model dashboard-service install
@@ -210,6 +212,7 @@ Notes:
   - opencode, OpenClaw, Claude Code, and GlyphOS keep their own client settings.
   - sync-opencode and sync-openclaw default to the LMM routed gateway. Use --mode direct to bypass Context + GlyphOS and call llama.cpp directly.
   - sync-claude and sync-glyphos align those settings with the active llama-model runtime.
+  - context-mcp build repairs the bundled Context MCP dist/index.js used by routed-full gateway mode.
   - Download lifecycle commands use the llama-model-web API when available at http://${LLAMA_MODEL_WEB_HOST:-127.0.0.1}:${LLAMA_MODEL_WEB_PORT:-8765}.
 EOF
 }
@@ -3309,7 +3312,11 @@ PY
     [[ -f "$INSTALLED_APP_ROOT/integrations/context-mode-mcp/dist/index.js" ]] && context_mode_mcp_dist="yes"
     if [[ "$installed_web_launcher" != "yes" || "$installed_web_app" != "yes" || "$installed_gateway_script" != "yes" || "$bundled_glyphos" != "yes" || "$bundled_glyphos_importable" != "yes" || "$context_mode_mcp" != "yes" || "$context_mode_mcp_dist" != "yes" ]]; then
         install_ok="no"
-        install_guidance="Run ./install.sh from the current repo checkout, or rerun the latest bootstrap installer, then restart llama-model-web."
+        if [[ "$context_mode_mcp" == "yes" && "$context_mode_mcp_dist" != "yes" ]]; then
+            install_guidance="Run llama-model context-mcp build, then llama-model gateway restart and restart llama-model-web."
+        else
+            install_guidance="Run ./install.sh from the current repo checkout, or rerun the latest bootstrap installer, then restart llama-model-web."
+        fi
     fi
     if [[ "${LLAMA_MODEL_DOCTOR_SKIP_DASHBOARD_API:-0}" != "1" ]] && dashboard_state_json="$(curl -fsS --max-time 2 "${DASHBOARD_SERVICE_URL%/}/api/state" 2>/dev/null)"; then
         dashboard_api_reachable="yes"
@@ -3860,6 +3867,88 @@ harness_route_label() {
     else
         printf 'routed-basic\n'
     fi
+}
+
+context_mcp_root() {
+    if [[ -n "${CONTEXT_MODE_MCP_ROOT:-}" ]]; then
+        printf '%s\n' "$CONTEXT_MODE_MCP_ROOT"
+    else
+        printf '%s\n' "$APP_ROOT/integrations/context-mode-mcp"
+    fi
+}
+
+context_mcp_bridge_path() {
+    printf '%s\n' "$APP_ROOT/scripts/context_mcp_bridge.py"
+}
+
+context_mcp_status() {
+    local root
+    local dist
+    local bridge
+    local status="bridge_ready"
+    local guidance=""
+
+    root="$(context_mcp_root)"
+    dist="$root/dist/index.js"
+    bridge="$(context_mcp_bridge_path)"
+
+    if [[ ! -f "$root/package.json" ]]; then
+        status="missing"
+        guidance="Context Mode MCP package is missing; rerun the latest installer."
+    elif [[ ! -f "$bridge" ]]; then
+        status="missing_bridge"
+        guidance="Context MCP bridge is missing; rerun the latest installer."
+    elif [[ ! -f "$dist" ]]; then
+        status="missing_dist"
+        guidance="Run: llama-model context-mcp build, then llama-model gateway restart and restart llama-model-web."
+    fi
+
+    printf 'status: %s\n' "$status"
+    printf 'root: %s\n' "$root"
+    printf 'bridge: %s\n' "$bridge"
+    printf 'dist: %s\n' "$dist"
+    printf 'package_json: %s\n' "$([[ -f "$root/package.json" ]] && printf yes || printf no)"
+    printf 'bridge_exists: %s\n' "$([[ -f "$bridge" ]] && printf yes || printf no)"
+    printf 'dist_exists: %s\n' "$([[ -f "$dist" ]] && printf yes || printf no)"
+    printf 'guidance: %s\n' "$guidance"
+}
+
+context_mcp_build() {
+    local root
+    local dist
+
+    root="$(context_mcp_root)"
+    dist="$root/dist/index.js"
+    [[ -f "$root/package.json" ]] || die "Context Mode MCP package not found: $root"
+    command_available npm || die "npm is required to build Context Mode MCP; install npm or rerun the installer on a host with npm"
+
+    (
+        cd "$root"
+        if [[ -f package-lock.json ]]; then
+            npm ci --omit=optional
+        else
+            npm install --omit=optional
+        fi
+        npm run build:mcp
+    )
+
+    [[ -f "$dist" ]] || die "Context Mode MCP build finished but dist/index.js is still missing: $dist"
+    printf 'status: built\n'
+    printf 'dist: %s\n' "$dist"
+    printf 'restart_note: run llama-model gateway restart and restart llama-model-web so running processes load the rebuilt Context MCP bundle\n'
+}
+
+context_mcp_command() {
+    local action="${1:-status}"
+    shift || true
+    case "$action" in
+        status) context_mcp_status ;;
+        build) context_mcp_build ;;
+        *)
+            printf '%s\n' 'Usage: llama-model context-mcp status|build'
+            return 2
+            ;;
+    esac
 }
 
 ensure_lmm_gateway_for_routed_harness() {
@@ -5099,6 +5188,10 @@ main() {
         sync-glyphos)
             shift
             sync_glyphos "$@"
+            ;;
+        context-mcp)
+            shift
+            context_mcp_command "$@"
             ;;
         gateway)
             shift
