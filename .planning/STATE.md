@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: milestone
-current_phase: 2
-current_phase_name: run-records
-current_plan: 3
-status: paused
-stopped_at: Completed 03-receipts-notifications-02-PLAN.md
+current_phase: 7
+current_phase_name: update-watcher
+current_plan: 1
+status: phase-complete
+stopped_at: Completed 07-update-watcher-01-PLAN.md
 paused_at: None
-last_updated: "2026-04-30T20:33:30.249Z"
+last_updated: "2026-05-01T06:46:00Z"
 last_activity: 2026-04-30
 progress:
   total_phases: 1
@@ -22,14 +22,14 @@ progress:
 
 ## Current Position
 
-**Current Phase:** 2
-**Current Phase Name:** run-records
+**Current Phase:** 7
+**Current Phase Name:** update-watcher
 **Total Phases:** 3
-**Current Plan:** 3
-**Total Plans in Phase:** 3
-**Status:** Phase complete — ready for verification
+**Current Plan:** 1
+**Total Plans in Phase:** 1
+**Status:** Phase 07 complete — ready for verification
 **Last Activity:** 2026-04-30
-**Last Activity Description:** completed 02-run-records-01
+**Last Activity Description:** completed 07-update-watcher-01
 **Progress:** [██████████] 100%
 **Paused At:** None
 
@@ -51,6 +51,7 @@ progress:
 | Phase 05-devex P01 | 1m | 3 tasks | 6 files |
 | Phase 03-receipts-notifications P01 | 0m | 2 tasks | 3 files |
 | Phase 03-receipts-notifications P02 | 1 | 3 tasks | 3 files |
+| Phase 07-update-watcher P01 | 2m | 7 tasks | 11 files |
 
 ## Decisions
 
@@ -72,6 +73,8 @@ progress:
 - [Phase 03-receipts-notifications]: Use desktop notification first with log fallback for notification delivery.
 - [Phase 03-receipts-notifications]: Gate notifications behind 30s completion threshold and cooldown defaults.
 
+- [Phase 07-update-watcher]: Added notify-only update watcher with cached offline fallback and dashboard/CLI surfaces.
+
 ## Blockers
 
 -
@@ -83,5 +86,5 @@ progress:
 ## Session
 
 **Last Date:** 2026-04-30T20:33:27.226Z
-**Stopped At:** Completed 03-receipts-notifications-02-PLAN.md
+**Stopped At:** Completed 07-update-watcher-01-PLAN.md
 **Resume File:** None

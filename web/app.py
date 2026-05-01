@@ -61,6 +61,12 @@ KNOWN_DEFAULT_KEYS = [
     "LLAMA_MODEL_GATEWAY_PORT",
     "LLAMA_MODEL_GATEWAY_LOG",
     "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE",
+    "LMM_UPDATE_WATCHER_ENABLED",
+    "LMM_UPDATE_CHECK_INTERVAL_HOURS",
+    "LMM_UPDATE_LMM_REPO",
+    "LMM_UPDATE_LLAMACPP_REPO",
+    "LMM_UPDATE_TIMEOUT_SECONDS",
+    "LMM_UPDATE_STATE_FILE",
     "OPENCLAW_PROFILE",
     "OPENCLAW_API_KEY",
     "CLAUDE_GATEWAY_HOST",
@@ -2615,6 +2621,22 @@ class Manager:
             "context_glyphos_pipeline": context_glyphos_pipeline,
         }
 
+    def update_status(self, defaults: dict[str, str]) -> dict[str, Any]:
+        if self.demo:
+            return {"enabled": False}
+        gateway_host = defaults.get("LLAMA_MODEL_GATEWAY_HOST", "127.0.0.1").strip() or "127.0.0.1"
+        gateway_port = defaults.get("LLAMA_MODEL_GATEWAY_PORT", "4010").strip() or "4010"
+        url = f"http://{gateway_host}:{gateway_port}/v1/updates"
+        try:
+            with urllib.request.urlopen(url, timeout=2) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            return {"enabled": False, "error": exc.__class__.__name__, "url": url}
+        if not isinstance(payload, dict):
+            return {"enabled": False, "error": "invalid_response", "url": url}
+        payload.setdefault("url", url)
+        return payload
+
     def context_mode_mcp_state(self) -> dict[str, Any]:
         package_json = self.context_mode_mcp_root / "package.json"
         package = self.load_json_file(package_json)
@@ -3059,6 +3081,7 @@ class Manager:
                     "blockers": [],
                     "benefit": "retrieved context + glyph-routed local inference",
                 },
+                "update_status": {"enabled": False},
             }
 
         current = self.parse_key_values(self.run_cli("current"))
@@ -3094,6 +3117,7 @@ class Manager:
             "defaults_file": str(self.defaults_file),
             "defaults_exists": self.defaults_file.exists(),
             "run_history": run_history,
+            "update_status": self.update_status(defaults),
         }
 
 

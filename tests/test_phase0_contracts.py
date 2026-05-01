@@ -39,6 +39,7 @@ LMM_TYPES_PATH = ROOT_DIR / "scripts" / "lmm_types.py"
 LMM_HEALTH_PATH = ROOT_DIR / "scripts" / "lmm_health.py"
 LMM_PROVIDERS_PATH = ROOT_DIR / "scripts" / "lmm_providers.py"
 LMM_NOTIFICATIONS_PATH = ROOT_DIR / "scripts" / "lmm_notifications.py"
+LMM_UPDATES_PATH = ROOT_DIR / "scripts" / "lmm_updates.py"
 
 
 class Phase0ContractTests(unittest.TestCase):
@@ -553,6 +554,92 @@ class Phase0ContractTests(unittest.TestCase):
             self.assertEqual(server.server_address[0], config.gateway.host)
             self.assertEqual(server.backend_base_url, config.gateway.backend_base_url)  # type: ignore[attr-defined]
         finally:
+            server.server_close()
+
+    def test_update_watcher_config_defaults_and_validation(self) -> None:
+        config_module = self.load_script_module("llama_model_manager_config_update_defaults", LMM_CONFIG_PATH)
+        config = config_module.load_lmm_config_from_env()
+
+        self.assertFalse(config.update_watcher.enabled)
+        self.assertEqual(config.update_watcher.check_interval_hours, 12)
+        self.assertEqual(config.update_watcher.lmm_repo, "soulhash-labs/llama-model-manager")
+        self.assertEqual(config.update_watcher.llamacpp_repo, "ggml-org/llama.cpp")
+        self.assertEqual(config.update_watcher.timeout_seconds, 5)
+        self.assertEqual(config.update_watcher.state_file.name, "lmm-updates.json")
+
+        with mock.patch.dict(os.environ, {"LMM_UPDATE_CHECK_INTERVAL_HOURS": "0"}, clear=False):
+            with self.assertRaises(config_module.ConfigurationError):
+                config_module.load_lmm_config_from_env()
+        with mock.patch.dict(os.environ, {"LMM_UPDATE_TIMEOUT_SECONDS": "31"}, clear=False):
+            with self.assertRaises(config_module.ConfigurationError):
+                config_module.load_lmm_config_from_env()
+
+    def test_update_checker_version_comparison_fetch_and_offline_cache(self) -> None:
+        updates_module = self.load_script_module("llama_model_manager_updates_contract", LMM_UPDATES_PATH)
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "tag_name": "v2.10.0",
+                        "html_url": "https://example.test/release",
+                        "body": "release notes",
+                    }
+                ).encode("utf-8")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checker = updates_module.UpdateChecker(
+                current_lmm_version="v2.1.0",
+                lmm_repo="owner/repo",
+                llamacpp_repo="ggml-org/llama.cpp",
+                timeout=1,
+                state_file=Path(tmpdir) / "updates.json",
+            )
+            self.assertTrue(checker._is_newer("v2.1.0", "v2.10.0"))
+            self.assertFalse(checker._is_newer("v2.10.0", "v2.1.0"))
+
+            with mock.patch.object(updates_module, "urlopen", return_value=FakeResponse()):
+                result = checker.check_lmm_update()
+            self.assertTrue(result.update_available)
+            self.assertEqual(result.latest_version, "v2.10.0")
+
+            with mock.patch.object(updates_module, "urlopen", side_effect=updates_module.URLError("offline")):
+                cached = checker.check_lmm_update()
+            self.assertEqual(cached.latest_version, "v2.10.0")
+            self.assertTrue(cached.update_available)
+
+    def test_update_state_store_persistence(self) -> None:
+        updates_module = self.load_script_module("llama_model_manager_updates_store", LMM_UPDATES_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "updates.json"
+            store = updates_module.UpdateStateStore(path)
+            result = updates_module.UpdateCheckResult(
+                current_version="v1.0.0",
+                latest_version="v1.1.0",
+                update_available=True,
+                release_url="https://example.test",
+                release_notes_preview="notes",
+                checked_at="2026-05-01T00:00:00Z",
+            )
+            store.update_result("lmm", result)
+            self.assertEqual(store.result_for("lmm")["latest_version"], "v1.1.0")
+
+    def test_gateway_update_endpoint_disabled(self) -> None:
+        gateway = self.load_gateway_module()
+        server = self.start_gateway_server(gateway_module=gateway)
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/v1/updates", timeout=2) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertFalse(payload["enabled"])
+            self.assertEqual(payload["message"], "Update watcher is disabled")
+        finally:
+            server.shutdown()
             server.server_close()
 
     def test_gateway_context_status_reports_bridge_readiness(self) -> None:

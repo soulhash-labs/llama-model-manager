@@ -81,6 +81,7 @@
       </header>
 
         <section id="top-notice" class="notice-banner hidden" aria-live="polite"></section>
+        <section id="update-notice" class="notice-banner hidden" aria-live="polite"></section>
 
       <details class="help-strip">
         <summary>
@@ -637,6 +638,21 @@
                 <input name="LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE" id="default-context-glyphos-pipeline" type="checkbox" aria-label="Show Context Mode MCP and GlyphOS as a combined pipeline">
               <span class="field-note">Activate the bundled combined workflow view for retrieved context plus glyph-routed local inference.</span>
               </div>
+            </label>
+            <label class="span-2 checkbox-field" title="Opt-in. Checks GitHub release metadata periodically and shows notify-only update status. It never installs updates automatically.">
+              Update Watcher
+              <div class="checkbox-row">
+                <input name="LMM_UPDATE_WATCHER_ENABLED" id="default-update-watcher-enabled" type="checkbox" aria-label="Enable notify-only update watcher">
+                <span class="field-note">Notify-only GitHub release checks for LMM and llama.cpp. Disabled by default and safe for air-gapped hosts.</span>
+              </div>
+            </label>
+            <label title="Hours between update checks when the watcher is enabled.">
+              Update Interval (h)
+              <input name="LMM_UPDATE_CHECK_INTERVAL_HOURS" id="default-update-interval" placeholder="12">
+            </label>
+            <label title="Network timeout in seconds for update checks.">
+              Update Timeout (s)
+              <input name="LMM_UPDATE_TIMEOUT_SECONDS" id="default-update-timeout" placeholder="5">
             </label>
             <label title="Optional OpenClaw profile name. Leave blank to target the main profile.">
               OpenClaw Profile

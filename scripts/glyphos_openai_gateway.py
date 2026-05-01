@@ -27,6 +27,8 @@ INTEGRATION_ROOT = APP_ROOT / "integrations" / "public-glyphos-ai-compute"
 if str(INTEGRATION_ROOT) not in sys.path:
     sys.path.insert(0, str(INTEGRATION_ROOT))
 
+from lmm_updates import UpdateChecker  # noqa: E402
+
 from lmm_config import load_lmm_config_from_env  # noqa: E402
 from lmm_errors import GatewayError, InvalidRequestError  # noqa: E402
 from lmm_health import ComponentHealth, HealthChecker  # noqa: E402
@@ -1037,6 +1039,28 @@ class GatewayHandler(BaseHTTPRequestHandler):
         if path == "/v1/telemetry":
             json_response(self, 200, self.gateway().telemetry())
             return
+        if path == "/v1/updates":
+            checker = getattr(self.server, "update_checker", None)
+            if checker is None:
+                json_response(
+                    self,
+                    200,
+                    {
+                        "enabled": False,
+                        "message": "Update watcher is disabled",
+                    },
+                )
+                return
+            try:
+                raw_state = checker.state_store.read_state()
+            except Exception as exc:
+                raw_state = {"error": str(exc)}
+            if not isinstance(raw_state, dict):
+                raw_state = {}
+            payload = dict(raw_state)
+            payload["enabled"] = True
+            json_response(self, 200, payload)
+            return
         json_response(self, 404, {"error": {"message": "unknown route", "type": "not_found"}})
 
     def do_POST(self) -> None:  # noqa: N802
@@ -1211,6 +1235,7 @@ def create_gateway_server(
     port: int = 4010,
     backend_base_url: str = "http://127.0.0.1:8081/v1",
     model_id: str = "",
+    watcher_config: object | None = None,
 ) -> ThreadingHTTPServer:
     """Create a configured ThreadingHTTPServer for the LMM OpenAI gateway.
 
@@ -1219,12 +1244,73 @@ def create_gateway_server(
     - ``server.model_id`` (str)
     - ``server.gateway`` (LMMOpenAIGateway)
     """
+    config = load_lmm_config_from_env()
+    if watcher_config is None:
+        watcher_config = config.update_watcher
     server = ThreadingHTTPServer((host, port), GatewayHandler)
     server.backend_base_url = backend_base_url  # type: ignore[attr-defined]
     server.model_id = model_id  # type: ignore[attr-defined]
     server.gateway = LMMOpenAIGateway(backend_base_url=backend_base_url, model_id=model_id)  # type: ignore[attr-defined]
     server.health_checker = server.gateway.health_checker  # type: ignore[attr-defined]
+
+    if getattr(watcher_config, "enabled", False):
+        start_update_watcher(
+            server,
+            watcher_config=watcher_config,
+        )
     return server
+
+
+def start_update_watcher(
+    server: ThreadingHTTPServer,
+    *,
+    watcher_config: Any,
+) -> None:
+    current_version = os.environ.get("LMM_VERSION", "v2.1.0")
+    checker = UpdateChecker(
+        current_lmm_version=current_version,
+        lmm_repo=watcher_config.lmm_repo,
+        llamacpp_repo=watcher_config.llamacpp_repo,
+        timeout=watcher_config.timeout_seconds,
+        state_file=watcher_config.state_file,
+    )
+    server.update_checker = checker  # type: ignore[attr-defined]
+    interval_seconds = int(watcher_config.check_interval_hours) * 3600
+    if interval_seconds < 60:
+        interval_seconds = 60
+
+    def periodic_check() -> None:
+        try:
+            lmm_result = checker.check_lmm_update()
+            llamacpp_result = checker.check_llamacpp_update()
+        except Exception:
+            lmm_result = None
+            llamacpp_result = None
+
+        manager = create_notification_manager(True)
+        if manager is not None:
+            if lmm_result and lmm_result.update_available:
+                manager.notify(
+                    "LMM update available",
+                    f"Current: {lmm_result.current_version}. Latest: {lmm_result.latest_version}.",
+                    NotificationType.UPDATE_AVAILABLE,
+                )
+            if llamacpp_result and llamacpp_result.update_available:
+                manager.notify(
+                    "llama.cpp update available",
+                    f"Current: {llamacpp_result.current_version}. Latest: {llamacpp_result.latest_version}.",
+                    NotificationType.UPDATE_AVAILABLE,
+                )
+
+        timer = threading.Timer(interval_seconds, periodic_check)
+        timer.daemon = True
+        server.update_timer = timer  # type: ignore[attr-defined]
+        timer.start()
+
+    initial_timer = threading.Timer(0, periodic_check)
+    initial_timer.daemon = True
+    server.update_timer = initial_timer  # type: ignore[attr-defined]
+    initial_timer.start()
 
 
 def main(argv: list[str]) -> int:

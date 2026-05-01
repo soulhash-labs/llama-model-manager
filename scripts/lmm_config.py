@@ -115,6 +115,7 @@ class UpdateWatcherConfig:
     lmm_repo: str = "soulhash-labs/llama-model-manager"
     llamacpp_repo: str = "ggml-org/llama.cpp"
     timeout_seconds: int = 5
+    state_file: Path = Path.home() / ".local" / "state" / "llama-server" / "lmm-updates.json"
 
     def __post_init__(self) -> None:
         if self.check_interval_hours < 1 or self.check_interval_hours > 168:
@@ -142,6 +143,11 @@ class LMMConfig:
 def default_state_file() -> Path:
     state_home = Path(_env("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))).expanduser()
     return state_home / "llama-server" / "lmm-gateway-requests.json"
+
+
+def default_update_state_file() -> Path:
+    state_home = Path(_env("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))).expanduser()
+    return state_home / "llama-server" / "lmm-updates.json"
 
 
 def load_lmm_config_from_env() -> LMMConfig:
@@ -176,6 +182,7 @@ def load_lmm_config_from_env() -> LMMConfig:
         lmm_repo=_env("LMM_UPDATE_LMM_REPO", "soulhash-labs/llama-model-manager"),
         llamacpp_repo=_env("LMM_UPDATE_LLAMACPP_REPO", "ggml-org/llama.cpp"),
         timeout_seconds=_int_env("LMM_UPDATE_TIMEOUT_SECONDS", 5, minimum=1, maximum=30),
+        state_file=Path(_env("LMM_UPDATE_STATE_FILE", str(default_update_state_file()))).expanduser(),
     )
     return LMMConfig(
         gateway=gateway,

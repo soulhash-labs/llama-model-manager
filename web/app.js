@@ -450,6 +450,7 @@ function renderStatus(data) {
   const nextMode = effectiveMode === "single-client" ? "Switch To Multi Client" : "Switch To Single Client";
 
   renderNotice(data);
+  renderUpdateStatus(data.update_status || {});
   renderHero(data);
   renderDashboardService(data.dashboard_service || {});
   renderOwnershipConflict(doctor);
@@ -582,6 +583,44 @@ function renderStatus(data) {
       ? "Restart the server in multi-client mode so multiple requests can run at once."
       : "Restart the server in single-client mode so one request runs at a time.",
   );
+}
+
+function renderUpdateStatus(updateStatus) {
+  const banner = $("#update-notice");
+  if (!banner) return;
+  const status = updateStatus && typeof updateStatus === "object" ? updateStatus : {};
+  if (!status.enabled) {
+    banner.classList.add("hidden");
+    banner.classList.remove("notice-warning", "notice-ok");
+    banner.innerHTML = "";
+    return;
+  }
+  const lmm = status.lmm && typeof status.lmm === "object" ? status.lmm : {};
+  const llamacpp = status.llamacpp && typeof status.llamacpp === "object" ? status.llamacpp : {};
+  const updates = [
+    ["LMM", lmm],
+    ["llama.cpp", llamacpp],
+  ].filter(([, item]) => Boolean(item.update_available));
+
+  banner.classList.remove("hidden", "notice-warning", "notice-ok");
+  if (updates.length) {
+    banner.classList.add("notice-warning");
+    banner.innerHTML = `
+      <strong>Update available:</strong>
+      ${updates.map(([label, item]) => {
+        const latest = escapeHtml(item.latest_version || "latest");
+        const current = escapeHtml(item.current_version || "unknown");
+        const url = String(item.release_url || "").trim();
+        const copy = `${escapeHtml(label)} ${latest} <span class="notice-muted">(current: ${current})</span>`;
+        return url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${copy}</a>` : `<span>${copy}</span>`;
+      }).join(" · ")}
+    `;
+    return;
+  }
+
+  const checkedAt = lmm.checked_at || llamacpp.checked_at || status.updated_at || "";
+  banner.classList.add("notice-ok");
+  banner.innerHTML = `<strong>Update watcher:</strong> up to date${checkedAt ? ` <span class="notice-muted">· checked ${escapeHtml(formatRelativeTime(checkedAt))}</span>` : ""}`;
 }
 
 function routeModeLabel(mode) {
@@ -1586,6 +1625,9 @@ function renderDefaults(defaults) {
   $("#default-gateway-port").value = defaults.LLAMA_MODEL_GATEWAY_PORT || "4010";
   $("#default-gateway-log").value = defaults.LLAMA_MODEL_GATEWAY_LOG || "$HOME/models/lmm-gateway.log";
   $("#default-context-glyphos-pipeline").checked = isTruthySetting(defaults.LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE) || contextGlyphosLocallyActivated();
+  $("#default-update-watcher-enabled").checked = isTruthySetting(defaults.LMM_UPDATE_WATCHER_ENABLED);
+  $("#default-update-interval").value = defaults.LMM_UPDATE_CHECK_INTERVAL_HOURS || "12";
+  $("#default-update-timeout").value = defaults.LMM_UPDATE_TIMEOUT_SECONDS || "5";
   $("#default-openclaw-profile").value = defaults.OPENCLAW_PROFILE || "";
   $("#default-openclaw-api-key").value = defaults.OPENCLAW_API_KEY || "";
   $("#default-claude-gateway-host").value = defaults.CLAUDE_GATEWAY_HOST || "";
@@ -1743,6 +1785,9 @@ function collectDefaultsPayload() {
     LLAMA_MODEL_GATEWAY_PORT: $("#default-gateway-port").value.trim(),
     LLAMA_MODEL_GATEWAY_LOG: $("#default-gateway-log").value.trim(),
     LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE: $("#default-context-glyphos-pipeline").checked ? "1" : "",
+    LMM_UPDATE_WATCHER_ENABLED: $("#default-update-watcher-enabled").checked ? "1" : "",
+    LMM_UPDATE_CHECK_INTERVAL_HOURS: $("#default-update-interval").value.trim(),
+    LMM_UPDATE_TIMEOUT_SECONDS: $("#default-update-timeout").value.trim(),
     OPENCLAW_PROFILE: $("#default-openclaw-profile").value.trim(),
     OPENCLAW_API_KEY: $("#default-openclaw-api-key").value.trim(),
     CLAUDE_GATEWAY_HOST: $("#default-claude-gateway-host").value.trim(),

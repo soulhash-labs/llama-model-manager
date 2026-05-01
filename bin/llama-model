@@ -167,6 +167,7 @@ Usage:
   llama-model sync-claude [model-id]
   llama-model sync-glyphos [alias|/path/to/model.gguf]
   llama-model context-mcp status|build
+  llama-model update-check [--component lmm|llamacpp|all] [--json]
   llama-model gateway start|stop|restart|status|logs
   llama-model claude-gateway start|stop|restart|status|logs
   llama-model download-jobs
@@ -195,6 +196,7 @@ Examples:
   llama-model claude-gateway start
   llama-model sync-glyphos
   llama-model context-mcp build
+  llama-model update-check
   llama-model switch /absolute/path/to/model.gguf --no-warmup
   llama-model dashboard-service status
   llama-model dashboard-service install
@@ -3951,6 +3953,87 @@ context_mcp_command() {
     esac
 }
 
+update_check() {
+    local component="all"
+    local json_output="0"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --component)
+                shift
+                [[ $# -gt 0 ]] || die "--component requires lmm, llamacpp, or all"
+                component="$1"
+                ;;
+            --component=*)
+                component="${1#--component=}"
+                ;;
+            --json)
+                json_output="1"
+                ;;
+            *)
+                die "unknown update-check option: $1"
+                ;;
+        esac
+        shift
+    done
+    case "$component" in
+        lmm|llamacpp|all) ;;
+        *) die "--component must be lmm, llamacpp, or all" ;;
+    esac
+
+    LMM_UPDATE_COMPONENT="$component" \
+    LMM_UPDATE_JSON="$json_output" \
+    LMM_VERSION="${LMM_VERSION:-v2.1.0}" \
+    LLAMA_CPP_REF="${LLAMA_CPP_REF:-$LLAMA_CPP_REF}" \
+    APP_ROOT="$APP_ROOT" \
+    STATE_DIR="$STATE_DIR" \
+    python3 - <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+app_root = Path(os.environ["APP_ROOT"])
+sys.path.insert(0, str(app_root / "scripts"))
+
+from lmm_config import load_lmm_config_from_env  # noqa: E402
+from lmm_updates import UpdateChecker  # noqa: E402
+
+component = os.environ.get("LMM_UPDATE_COMPONENT", "all")
+json_output = os.environ.get("LMM_UPDATE_JSON") == "1"
+config = load_lmm_config_from_env().update_watcher
+checker = UpdateChecker(
+    current_lmm_version=os.environ.get("LMM_VERSION", "v2.1.0"),
+    lmm_repo=config.lmm_repo,
+    llamacpp_repo=config.llamacpp_repo,
+    timeout=config.timeout_seconds,
+    state_file=config.state_file,
+)
+
+results = {}
+if component in {"lmm", "all"}:
+    results["lmm"] = checker.check_lmm_update().to_dict()
+if component in {"llamacpp", "all"}:
+    results["llamacpp"] = checker.check_llamacpp_update(os.environ.get("LLAMA_CPP_REF", "unknown")).to_dict()
+
+if json_output:
+    print(json.dumps(results, indent=2))
+    raise SystemExit(0)
+
+labels = {"lmm": "LMM", "llamacpp": "llama.cpp"}
+for key in ("lmm", "llamacpp"):
+    if key not in results:
+        continue
+    item = results[key]
+    print(f"{labels[key]}:")
+    print(f"  Current:  {item.get('current_version') or 'unknown'}")
+    print(f"  Latest:   {item.get('latest_version') or 'unknown'}")
+    print(f"  Update:   {'Available' if item.get('update_available') else 'Not available'}")
+    if item.get("release_url"):
+        print(f"  URL:      {item['release_url']}")
+PY
+}
+
 ensure_lmm_gateway_for_routed_harness() {
     local mode="$1"
     local output=""
@@ -5192,6 +5275,10 @@ main() {
         context-mcp)
             shift
             context_mcp_command "$@"
+            ;;
+        update-check)
+            shift
+            update_check "$@"
             ;;
         gateway)
             shift

@@ -350,6 +350,25 @@ h2 {
   line-height: 1.5;
 }
 
+.notice-banner.notice-warning {
+  border-color: rgba(178, 92, 0, 0.28);
+  background: linear-gradient(180deg, rgba(255, 171, 64, 0.18), rgba(255, 171, 64, 0.06));
+}
+
+.notice-banner.notice-ok {
+  border-color: rgba(12, 128, 93, 0.24);
+  background: linear-gradient(180deg, rgba(20, 184, 138, 0.12), rgba(20, 184, 138, 0.04));
+}
+
+.notice-banner a {
+  color: inherit;
+  font-weight: 750;
+}
+
+.notice-muted {
+  color: var(--muted);
+}
+
 .notice-banner.hidden {
   display: none;
 }

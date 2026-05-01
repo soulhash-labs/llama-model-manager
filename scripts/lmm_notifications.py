@@ -16,6 +16,7 @@ class NotificationType(Enum):
     RUN_COMPLETED = "run_completed"
     RUN_FAILED = "run_failed"
     CLIENT_DISCONNECTED = "client_disconnected"
+    UPDATE_AVAILABLE = "update_available"
 
 
 @runtime_checkable

@@ -35,6 +35,7 @@ Commands:
   llama-model claude-gateway start|stop|restart|status|logs
   llama-model sync-glyphos [alias|/path/to/model.gguf]
   llama-model context-mcp status|build
+  llama-model update-check [--component lmm|llamacpp|all] [--json]
   llama-model download-jobs
   llama-model download-cancel <job_id>
   llama-model download-retry <job_id>
