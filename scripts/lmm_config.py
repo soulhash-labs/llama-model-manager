@@ -109,10 +109,34 @@ class GlyphEncodingConfig:
 
 
 @dataclass(frozen=True)
+class UpdateWatcherConfig:
+    enabled: bool = False
+    check_interval_hours: int = 12
+    lmm_repo: str = "soulhash-labs/llama-model-manager"
+    llamacpp_repo: str = "ggml-org/llama.cpp"
+    timeout_seconds: int = 5
+
+    def __post_init__(self) -> None:
+        if self.check_interval_hours < 1 or self.check_interval_hours > 168:
+            raise ConfigurationError(
+                "Update check interval must be between 1 and 168 hours",
+                field="check_interval_hours",
+                value=self.check_interval_hours,
+            )
+        if self.timeout_seconds < 1 or self.timeout_seconds > 30:
+            raise ConfigurationError(
+                "Update watcher timeout must be between 1 and 30 seconds",
+                field="timeout_seconds",
+                value=self.timeout_seconds,
+            )
+
+
+@dataclass(frozen=True)
 class LMMConfig:
     gateway: GatewayConfig
     context: ContextConfig
     glyph_encoding: GlyphEncodingConfig
+    update_watcher: UpdateWatcherConfig
 
 
 def default_state_file() -> Path:
@@ -124,7 +148,9 @@ def load_lmm_config_from_env() -> LMMConfig:
     gateway = GatewayConfig(
         host=_env("LLAMA_MODEL_GATEWAY_HOST", "127.0.0.1"),
         port=_int_env("LLAMA_MODEL_GATEWAY_PORT", 4010, minimum=1, maximum=65535),
-        backend_base_url=_url(_env("LLAMA_MODEL_BACKEND_BASE_URL", "http://127.0.0.1:8081/v1"), field="backend_base_url"),
+        backend_base_url=_url(
+            _env("LLAMA_MODEL_BACKEND_BASE_URL", "http://127.0.0.1:8081/v1"), field="backend_base_url"
+        ),
         model_id=_env("LLAMA_MODEL_GATEWAY_MODEL_ID", ""),
         state_file=Path(_env("LMM_GATEWAY_STATE_FILE", str(default_state_file()))).expanduser(),
         sse_heartbeat_seconds=_float_env("LMM_GATEWAY_SSE_HEARTBEAT_SECONDS", 5.0, minimum=0.01),
@@ -139,4 +165,21 @@ def load_lmm_config_from_env() -> LMMConfig:
         disabled=_bool_env("LMM_GLYPH_ENCODING_DISABLED", False),
         force_error=bool(_env("LMM_GLYPH_ENCODING_FORCE_ERROR", "")),
     )
-    return LMMConfig(gateway=gateway, context=context, glyph_encoding=glyph_encoding)
+    update_watcher = UpdateWatcherConfig(
+        enabled=_bool_env("LMM_UPDATE_WATCHER_ENABLED", False),
+        check_interval_hours=_int_env(
+            "LMM_UPDATE_CHECK_INTERVAL_HOURS",
+            12,
+            minimum=1,
+            maximum=168,
+        ),
+        lmm_repo=_env("LMM_UPDATE_LMM_REPO", "soulhash-labs/llama-model-manager"),
+        llamacpp_repo=_env("LMM_UPDATE_LLAMACPP_REPO", "ggml-org/llama.cpp"),
+        timeout_seconds=_int_env("LMM_UPDATE_TIMEOUT_SECONDS", 5, minimum=1, maximum=30),
+    )
+    return LMMConfig(
+        gateway=gateway,
+        context=context,
+        glyph_encoding=glyph_encoding,
+        update_watcher=update_watcher,
+    )
