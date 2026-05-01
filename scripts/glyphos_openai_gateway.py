@@ -7,6 +7,7 @@ import math
 import os
 import queue
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -254,7 +255,9 @@ def _run_record_from_dict(record: dict[str, Any]) -> RunRecord:
         harness=str(record.get("harness", "")),
         context_status=str(record.get("context_status", "")),
         context_used=bool(record.get("context_used", False)),
-        duration_ms=record.get("duration_ms") if isinstance(record.get("duration_ms"), int) else None,
+        duration_ms=record.get("duration_ms")
+        if isinstance(record.get("duration_ms"), int)
+        else (record.get("latency_ms") if isinstance(record.get("latency_ms"), int) else None),
         session_id=str(record.get("session_id", "")),
         upstream_session_ref=str(record.get("upstream_session_ref", "")),
         handoff_summary=str(record.get("handoff_summary", "")),
@@ -297,6 +300,41 @@ def context_mcp_root() -> Path:
 
 def context_mcp_bridge_path() -> Path:
     return APP_ROOT / "scripts" / "context_mcp_bridge.py"
+
+
+def context_mcp_db_path() -> Path:
+    """Compute the SQLite DB path used by the MCP server for the current project."""
+    import hashlib
+
+    project_root = os.getcwd()
+    project_hash = hashlib.sha256(project_root.encode()).hexdigest()[:16]
+    return Path.home() / ".claude" / "context-mode" / "sessions" / f"{project_hash}.db"
+
+
+def _maybe_run_indexer(timeout_seconds: float) -> None:
+    """Run the project indexer if the DB doesn't exist yet (first-run only)."""
+    db_path = context_mcp_db_path()
+    if db_path.is_file():
+        return  # Already indexed
+    mcp_entry = context_mcp_root() / "dist" / "index.js"
+    if not mcp_entry.is_file():
+        return
+
+    # Find the node binary
+    node_bin = shutil.which("node")
+    if not node_bin:
+        return
+
+    try:
+        subprocess.run(
+            [node_bin, str(mcp_entry), "--index-project"],
+            cwd=str(context_mcp_root()),
+            env={**os.environ, "CTX_PROJECT_ROOT": os.getcwd()},
+            timeout=timeout_seconds,
+            capture_output=True,
+        )
+    except Exception:
+        pass  # Indexing is best-effort; search will still work (empty results)
 
 
 def _extract_session_metadata(payload: dict[str, Any]) -> dict[str, Any]:
@@ -521,7 +559,12 @@ def retrieve_context(payload: dict[str, Any], prompt: str, *, model: str, stream
         "model": model,
         "stream": stream,
         "message_summary": message_summary(payload.get("messages", [])),
+        "project_root": os.getcwd(),
     }
+
+    # First-run: populate the project index before searching.
+    _maybe_run_indexer(timeout_seconds=max(5, timeout_ms / 2000))
+
     try:
         completed = run_context_command(
             shlex.split(command),

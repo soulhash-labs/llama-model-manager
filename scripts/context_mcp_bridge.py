@@ -91,6 +91,12 @@ def main() -> int:
 
     command = ["node", str(entry)]
     env = dict(os.environ)
+
+    # Pass the project root to the MCP server so it indexes/searches the correct DB.
+    # The gateway sets this in the request payload; fallback to cwd if not provided.
+    project_root = str(gateway_request.get("project_root") or os.getcwd())
+    env["CTX_PROJECT_ROOT"] = project_root
+
     proc = subprocess.Popen(
         command,
         cwd=str(MCP_ROOT),

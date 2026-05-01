@@ -519,6 +519,7 @@ export async function handleDoctorTool(params: {
       fts5: capabilities.fts5,
       trigram: capabilities.trigram,
       degraded: capabilities.degraded,
+      warnings: capabilities.warnings,
     },
     security: {
       deny_bash_patterns: params.security.denyBashPatterns,

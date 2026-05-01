@@ -24,6 +24,7 @@ import { initSchema } from "./db/schema";
 import { openSqlBackend } from "./db/adapter";
 import { loadSecurityPolicy, resolveSessionContext } from "./utils/types";
 import { startLifecycleGuard } from "./utils/lifecycle";
+import { scanAndIndexProject } from "./indexer/project-scan";
 
 // Prevent any dependency from polluting stdout and breaking the JSON-RPC handshake.
 // All console.log calls are redirected to stderr so the MCP protocol stays clean.
@@ -108,6 +109,36 @@ function asToolResponse(response: unknown): CallToolResult {
     ],
     structuredContent: response,
   };
+}
+
+/**
+ * CLI mode: scan the project root and index all eligible files, then exit.
+ * Usage: node dist/index.js --index-project [--project-root /path/to/project]
+ * This runs outside the MCP server lifecycle — the Python bridge or gateway
+ * can invoke it separately to populate the index before searching.
+ */
+async function runProjectIndex(): Promise<void> {
+  const projectRootArg = process.argv[3];
+  if (projectRootArg && projectRootArg.startsWith("--project-root=")) {
+    process.env.CTX_PROJECT_ROOT = projectRootArg.split("=")[1];
+  }
+
+  const context = resolveSessionContext();
+  const db = await openSqlBackend(context.db_path);
+  const caps = initSchema(db);
+
+  if (caps.warnings.length > 0) {
+    for (const w of caps.warnings) {
+      process.stderr.write(`[MCP-INDEX] ${w}\n`);
+    }
+  }
+
+  const result = scanAndIndexProject(db, context.project_root, context.project_hash);
+  process.stderr.write(`[MCP-INDEX] scanned ${context.project_root}\n`);
+  process.stderr.write(`[MCP-INDEX] indexed: ${result.indexed}, skipped: ${result.skipped}, errors: ${result.errors}, bytes: ${result.totalBytes}, duration: ${result.durationMs}ms\n`);
+
+  try { db.close(); } catch { /* soft-fail */ }
+  process.exit(result.errors > result.indexed ? 1 : 0);
 }
 
 async function bootstrap() {
@@ -320,4 +351,10 @@ async function bootstrap() {
   await server.connect(transport);
 }
 
-await bootstrap();
+// Dispatch: CLI mode takes priority over MCP server mode.
+const cliFlag = process.argv[2];
+if (cliFlag === "--index-project") {
+  await runProjectIndex();
+} else {
+  await bootstrap();
+}

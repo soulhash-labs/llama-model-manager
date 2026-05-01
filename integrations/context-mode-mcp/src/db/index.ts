@@ -213,9 +213,11 @@ export function getDbCapabilities(db: SqlBackend): {
   fts5: boolean;
   trigram: boolean;
   degraded: boolean;
+  warnings: string[];
 } {
   let fts5 = false;
   let trigram = false;
+  const warnings: string[] = [];
 
   try {
     fts5 = tableExists(db, "chunks_fts");
@@ -225,11 +227,16 @@ export function getDbCapabilities(db: SqlBackend): {
     trigram = false;
   }
 
+  if (db.kind === "none") warnings.push("no sqlite backend — DB operations will throw");
+  if (!fts5) warnings.push("FTS5 unavailable — using substring fallback");
+  if (!trigram) warnings.push("trigram tokenizer unavailable");
+
   return {
     backend: db.kind,
     fts5,
     trigram,
     degraded: db.kind === "none" || !fts5,
+    warnings,
   };
 }
 

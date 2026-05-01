@@ -273,6 +273,7 @@ export const CtxDoctorResponse = z.object({
     fts5: z.boolean(),
     trigram: z.boolean(),
     degraded: z.boolean(),
+    warnings: z.array(z.string()).default([]),
   }).strict(),
   security: z.object({
     deny_bash_patterns: z.array(z.string()).default([]),
