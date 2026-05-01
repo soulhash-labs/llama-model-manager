@@ -3147,6 +3147,7 @@ show_doctor() {
     local bundled_glyphos_importable="no"
     local bundled_glyphos_import_error=""
     local context_mode_mcp="no"
+    local context_mode_mcp_dist="no"
     local install_ok="yes"
     local install_guidance=""
     local dashboard_api_reachable="no"
@@ -3305,7 +3306,8 @@ PY
         )" && bundled_glyphos_importable="yes" || bundled_glyphos_importable="no"
     fi
     [[ -f "$INSTALLED_APP_ROOT/integrations/context-mode-mcp/package.json" ]] && context_mode_mcp="yes"
-    if [[ "$installed_web_launcher" != "yes" || "$installed_web_app" != "yes" || "$installed_gateway_script" != "yes" || "$bundled_glyphos" != "yes" || "$bundled_glyphos_importable" != "yes" || "$context_mode_mcp" != "yes" ]]; then
+    [[ -f "$INSTALLED_APP_ROOT/integrations/context-mode-mcp/dist/index.js" ]] && context_mode_mcp_dist="yes"
+    if [[ "$installed_web_launcher" != "yes" || "$installed_web_app" != "yes" || "$installed_gateway_script" != "yes" || "$bundled_glyphos" != "yes" || "$bundled_glyphos_importable" != "yes" || "$context_mode_mcp" != "yes" || "$context_mode_mcp_dist" != "yes" ]]; then
         install_ok="no"
         install_guidance="Run ./install.sh from the current repo checkout, or rerun the latest bootstrap installer, then restart llama-model-web."
     fi
@@ -3361,6 +3363,7 @@ print("glyphos_config=" + ("yes" if data.get("glyphos_config_exists") else "no")
     printf 'bundled_glyphos_importable: %s\n' "$bundled_glyphos_importable"
     printf 'bundled_glyphos_import_error: %s\n' "$bundled_glyphos_import_error"
     printf 'context_mode_mcp_installed: %s\n' "$context_mode_mcp"
+    printf 'context_mode_mcp_dist: %s\n' "$context_mode_mcp_dist"
     printf 'install_ok: %s\n' "$install_ok"
     printf 'install_guidance: %s\n' "$install_guidance"
     printf 'dashboard_api_reachable: %s\n' "$dashboard_api_reachable"

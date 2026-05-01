@@ -248,6 +248,10 @@ require_source_tree() {
         printf 'error: installer payload is missing integrations/context-mode-mcp/package.json\n' >&2
         missing=1
     }
+    [[ -f "$ROOT_DIR/integrations/context-mode-mcp/dist/index.js" ]] || {
+        printf 'error: installer payload is missing integrations/context-mode-mcp/dist/index.js; run npm ci && npm run build in integrations/context-mode-mcp before packaging\n' >&2
+        missing=1
+    }
 
     if [[ "$missing" -ne 0 ]]; then
         printf 'error: download the full llama-model-manager archive and rerun install.sh\n' >&2

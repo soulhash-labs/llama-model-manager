@@ -969,6 +969,7 @@ test_doctor_reports_install_health() {
     assert_contains "$output" "installed_gateway_script: no"
     assert_contains "$output" "bundled_glyphos_integration: no"
     assert_contains "$output" "context_mode_mcp_installed: no"
+    assert_contains "$output" "context_mode_mcp_dist: no"
     assert_contains "$output" "install_ok: no"
     assert_contains "$output" "install_guidance: Run ./install.sh"
 
@@ -990,6 +991,7 @@ test_doctor_reports_install_health() {
     assert_contains "$output" "bundled_glyphos_integration: yes"
     assert_contains "$output" "bundled_glyphos_importable: no"
     assert_contains "$output" "context_mode_mcp_installed: yes"
+    assert_contains "$output" "context_mode_mcp_dist: no"
     assert_contains "$output" "install_ok: no"
     assert_contains "$output" "install_guidance: Run ./install.sh"
 
@@ -1005,6 +1007,8 @@ def routing_telemetry_snapshot(limit=1):
         "recent_attempts": [],
     }
 PY
+    mkdir -p "$tmp/home/.local/share/llama-model-manager/integrations/context-mode-mcp/dist"
+    : >"$tmp/home/.local/share/llama-model-manager/integrations/context-mode-mcp/dist/index.js"
 
     output="$(LLAMA_MODEL_WEB_PORT=9 run_doctor "$tmp")"
     assert_contains "$output" "installed_web_launcher: yes"
@@ -1012,6 +1016,7 @@ PY
     assert_contains "$output" "bundled_glyphos_integration: yes"
     assert_contains "$output" "bundled_glyphos_importable: yes"
     assert_contains "$output" "context_mode_mcp_installed: yes"
+    assert_contains "$output" "context_mode_mcp_dist: yes"
     assert_contains "$output" "install_ok: yes"
     assert_contains "$output" "gateway_url: http://127.0.0.1:4010/v1"
     assert_contains "$output" "gateway_backend_api_base: http://127.0.0.1:19081/v1"
