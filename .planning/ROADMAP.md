@@ -11,6 +11,7 @@
 - ✅ **Phase 07: update-watcher** — [shipped]
 - **Phase 08: context-mcp-enhancements** — [in-progress]
 - **Phase 09: unified-glyphos-pipeline** — [planned]
+- **Phase 10: context-injection-tuning** — [planned]
 
 ## Phase 02: run-records
 
@@ -91,3 +92,14 @@ Plans:
 
 Plans:
 - [ ] 09-unified-glyphos-pipeline-01-PLAN.md — Fix encoding/routing decoupling bug (cloud corruption prevention)
+
+## Phase 10: context-injection-tuning
+
+| Phase | Plans Complete | Status | Completed |
+|-------|----------------|--------|-----------|
+| 10-context-injection-tuning | 0/3 | Planned | — |
+
+Plans:
+- [ ] 10-context-injection-tuning-01-PLAN.md — Context quality scoring (0.0-1.0 metric from search results)
+- [ ] 10-context-injection-tuning-02-PLAN.md — Psi-context coupling + context-aware routing enhancement
+- [ ] 10-context-injection-tuning-03-PLAN.md — Graceful fallback for empty/degraded context
