@@ -65,17 +65,18 @@ die() {
 }
 
 # safe_install — portable replacement for `install -m` (GNU coreutils).
-# Falls back to cp + chmod on minimal systems (Alpine, stripped containers).
+# Uses `install` if available and working, otherwise falls back to cp + chmod.
+# This handles minimal environments (Alpine, stripped containers) where
+# `install` may be missing or broken.
 safe_install() {
     local mode="$1"
     local src="$2"
     local dest="$3"
-    if command -v install >/dev/null 2>&1; then
-        install -m "$mode" "$src" "$dest"
-    else
-        cp "$src" "$dest"
-        chmod "$mode" "$dest"
+    if command -v install >/dev/null 2>&1 && install -m "$mode" "$src" "$dest" 2>/dev/null; then
+        return 0
     fi
+    cp "$src" "$dest"
+    chmod "$mode" "$dest"
 }
 
 ensure_context_mode_mcp_dist() {
