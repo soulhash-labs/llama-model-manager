@@ -329,6 +329,7 @@ set -euo pipefail
 if [[ "${1:-}" == "ci" ]]; then
     [[ " $* " == *" --ignore-scripts "* ]] || exit 9
     [[ " $* " == *" --no-audit "* ]] || exit 9
+    [[ " $* " == *" --omit=optional "* ]] || exit 9
 fi
 if [[ "${1:-}" == "run" && "${2:-}" == "build:mcp" ]]; then
     mkdir -p dist/hooks
@@ -350,6 +351,79 @@ EOF
 
     assert_contains "$output" "building Context Mode MCP server bundle"
     [[ -f "$tmp/data/llama-model-manager/integrations/context-mode-mcp/dist/index.js" ]] || fail "expected install.sh to build and copy context-mode-mcp/dist/index.js"
+}
+
+test_npm_hardened_ci_keeps_optional_deps_for_frontend_builds() {
+    # Verify that npm_hardened_ci supports two modes:
+    #   omit — includes --omit=optional (Context MCP bundles)
+    #   keep — excludes --omit=optional (Next/Vite/frontend builds need SWC binaries)
+    local tmp
+    local fake_bin
+    local mode_log
+    local mcp_pkg
+
+    tmp="$(mktemp -d)"
+    fake_bin="$tmp/bin"
+    mode_log="$tmp/mode.log"
+    mcp_pkg="$tmp/pkg"
+    mkdir -p "$fake_bin" "$mcp_pkg"
+
+    # package-lock.json required by npm_hardened_ci
+    cat >"$mcp_pkg/package-lock.json" <<'JSON'
+{"lockfileVersion":3,"packages":{}}
+JSON
+
+    # Fake npm that records whether --omit=optional was passed
+    cat >"$fake_bin/npm" <<NPM_EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "ci" ]]; then
+    if [[ " \$* " == *" --omit=optional "* ]]; then
+        echo "omit" >>"$mode_log"
+    else
+        echo "keep" >>"$mode_log"
+    fi
+fi
+exit 0
+NPM_EOF
+    chmod +x "$fake_bin/npm"
+
+    # Define npm_hardened_ci inline (copied from install.sh/bin/llama-model)
+    # so we can test the wrapper logic without sourcing the full scripts.
+    npm_hardened_ci() {
+        local optional_mode="${1:-omit}"
+        [[ -f package-lock.json ]] || { echo "error: missing lockfile" >&2; exit 1; }
+        case "$optional_mode" in
+            omit) npm ci --omit=optional --ignore-scripts --no-audit --fund=false ;;
+            keep) npm ci --ignore-scripts --no-audit --fund=false ;;
+            *)    { echo "error: unknown mode: $optional_mode" >&2; exit 1; } ;;
+        esac
+    }
+
+    # Test omit mode produces --omit=optional
+    (
+        cd "$mcp_pkg"
+        PATH="$fake_bin:/usr/bin:/bin" npm_hardened_ci omit
+    )
+    assert_contains "$(cat "$mode_log")" "omit"
+
+    # Test keep mode does NOT produce --omit=optional
+    : >"$mode_log"
+    (
+        cd "$mcp_pkg"
+        PATH="$fake_bin:/usr/bin:/bin" npm_hardened_ci keep
+    )
+    assert_contains "$(cat "$mode_log")" "keep"
+    assert_not_contains "$(cat "$mode_log")" "omit"
+
+    # Test unknown mode is rejected
+    : >"$mode_log"
+    if (
+        cd "$mcp_pkg"
+        PATH="$fake_bin:/usr/bin:/bin" npm_hardened_ci badmode
+    ) 2>/dev/null; then
+        fail "expected npm_hardened_ci to reject unknown mode 'badmode'"
+    fi
+    [[ ! -s "$mode_log" ]] || fail "expected no npm call for unknown mode"
 }
 
 
@@ -1138,6 +1212,7 @@ JSON
 if [[ "${1:-}" == "ci" ]]; then
     [[ " $* " == *" --ignore-scripts "* ]] || exit 9
     [[ " $* " == *" --no-audit "* ]] || exit 9
+    [[ " $* " == *" --omit=optional "* ]] || exit 9
 fi
 if [[ "${1:-}" == "run" && "${2:-}" == "build:mcp" ]]; then
     mkdir -p dist
@@ -1949,6 +2024,7 @@ main() {
     test_installers_support_bootstrap_tty_handoff_and_empty_registry_seed
     test_install_fails_when_required_integrations_are_missing
     test_install_builds_context_mcp_dist_when_archive_omits_generated_artifact
+    test_npm_hardened_ci_keeps_optional_deps_for_frontend_builds
     test_install_migrates_placeholder_seed_registry
     test_install_preserves_real_registry_entries
     test_dependency_install_preview_exists

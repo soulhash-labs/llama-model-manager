@@ -322,11 +322,16 @@ Common commands:
 
 ```bash
 cd integrations/context-mode-mcp
-npm ci
+npm ci --omit=optional --ignore-scripts --no-audit --fund=false
 npm run typecheck
 npm run build
 npm run lifecycle-matrix
 ```
+
+Supply-chain policy:
+- All `npm ci` invocations use `--ignore-scripts` (blocks arbitrary postinstall hooks) and `--no-audit --fund=false` (skips network telemetry).
+- `--omit=optional` is correct for the Context MCP bundle (no optional platform deps needed).
+- **Do NOT use `--omit=optional` for Next.js, Vite, or other frontend builds** — those require optional platform-native packages like `@next/swc-*` binaries. Use `npm ci --ignore-scripts --no-audit --fund=false` instead.
 
 Safety notes:
 

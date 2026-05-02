@@ -44,6 +44,26 @@ clean_python_cache() {
     find "$target" -type f -name '*.pyc' -delete 2>/dev/null || true
 }
 
+# npm_hardened_ci — supply-chain safe npm install wrapper.
+#
+#   npm_hardened_ci omit  — Context MCP server bundle (no optional deps needed)
+#   npm_hardened_ci keep  — Next/Vite/dashboard/frontend builds (need optional
+#                           platform packages like SWC binaries)
+npm_hardened_ci() {
+    local optional_mode="${1:-omit}"
+    [[ -f package-lock.json ]] || die "package-lock.json is required; refusing unlocked npm install"
+    case "$optional_mode" in
+        omit) npm ci --omit=optional --ignore-scripts --no-audit --fund=false ;;
+        keep) npm ci --ignore-scripts --no-audit --fund=false ;;
+        *)    die "unknown npm optional mode: $optional_mode" ;;
+    esac
+}
+
+die() {
+    printf 'error: %s\n' "$*" >&2
+    exit 1
+}
+
 ensure_context_mode_mcp_dist() {
     local mcp_dir="$ROOT_DIR/integrations/context-mode-mcp"
 
@@ -62,7 +82,7 @@ ensure_context_mode_mcp_dist() {
     printf 'building Context Mode MCP server bundle...\n'
     if (
         cd "$mcp_dir"
-        npm ci --omit=optional --ignore-scripts --no-audit --fund=false
+        npm_hardened_ci omit
         npm run build:mcp
     ); then
         printf 'built Context Mode MCP server bundle\n'
