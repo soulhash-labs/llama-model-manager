@@ -144,6 +144,7 @@ BUNDLE_VALIDATE_BACKEND=""
 BUNDLE_VALIDATE_LABEL=""
 BUNDLE_VALIDATE_MANIFEST=""
 EXTERNAL_VALIDATE_REASON=""
+EXTERNAL_VALIDATE_BACKEND=""
 BUNDLED_SELECTION_FAILURE_REASON=""
 ADD_FORCE_MMPROJ="0"
 
@@ -1014,6 +1015,9 @@ autofit_memory_guidance() {
         hybrid-fit)
             printf 'Hybrid-fit: VRAM is tight but system RAM is available for partial CPU/GPU offload; expect slower runs but better startup stability.\n'
             ;;
+        gpu-unknown-vram)
+            printf 'GPU-unknown-VRAM: GPU binary selected but VRAM could not be measured; GPU offload will be attempted. If startup fails, check nvidia-smi.\n'
+            ;;
         cpu-fit)
             printf 'CPU-fit: no GPU memory signal is available, but system RAM can carry CPU execution; expect much slower runs than GPU offload.\n'
             ;;
@@ -1627,10 +1631,43 @@ validate_bundled_binary() {
     return 0
 }
 
+detect_external_binary_backend() {
+    local binary="$1"
+    local info=""
+
+    case "$SELECTED_LLAMA_SERVER_HOST_OS" in
+        linux)
+            if command_available ldd; then
+                info="$(ldd "$binary" 2>&1 || true)"
+                if printf '%s' "$info" | grep -qiE 'libcublas|libcudart|libggml_cuda'; then
+                    printf 'cuda\n'
+                    return 0
+                fi
+                if printf '%s' "$info" | grep -qi 'libvulkan'; then
+                    printf 'vulkan\n'
+                    return 0
+                fi
+            fi
+            ;;
+        darwin)
+            if command_available otool; then
+                info="$(otool -L "$binary" 2>/dev/null || true)"
+                if printf '%s' "$info" | grep -qi 'Metal'; then
+                    printf 'metal\n'
+                    return 0
+                fi
+            fi
+            ;;
+    esac
+
+    printf 'cpu\n'
+}
+
 validate_external_binary() {
     local binary="$1"
 
     EXTERNAL_VALIDATE_REASON=""
+    EXTERNAL_VALIDATE_BACKEND=""
     [[ -x "$binary" ]] || {
         EXTERNAL_VALIDATE_REASON="binary not executable: $binary"
         return 1
@@ -1643,6 +1680,7 @@ validate_external_binary() {
         EXTERNAL_VALIDATE_REASON="binary has unresolved dynamic library dependencies"
         return 1
     }
+    EXTERNAL_VALIDATE_BACKEND="$(detect_external_binary_backend "$binary")"
     return 0
 }
 
@@ -1760,14 +1798,15 @@ probe_server_binary() {
                 fallback_note="configured bundled binary rejected: ${BUNDLE_VALIDATE_REASON}"
             else
                 if validate_external_binary "$configured_path"; then
+                    local ext_backend="${EXTERNAL_VALIDATE_BACKEND:-cpu}"
                     select_binary_record \
                         "$configured_path" \
                         "external" \
-                        "external" \
-                        "external-unvalidated" \
-                        "using external llama-server binary; backend compatibility must be managed by the installer" \
+                        "$ext_backend" \
+                        "external-detected" \
+                        "using external llama-server binary (${ext_backend} backend detected)" \
                         "" \
-                        "external install"
+                        "${ext_backend^} external"
                     return 0
                 fi
                 fallback_note="configured binary rejected: ${EXTERNAL_VALIDATE_REASON}"
@@ -1778,14 +1817,15 @@ probe_server_binary() {
     elif [[ -x "$default_path" ]]; then
         SELECTED_LLAMA_SERVER_PATH_KIND="default"
         if validate_external_binary "$default_path"; then
+            local ext_backend="${EXTERNAL_VALIDATE_BACKEND:-cpu}"
             select_binary_record \
                 "$default_path" \
                 "external" \
-                "external" \
-                "external-unvalidated" \
-                "using installed llama-server from PATH; backend compatibility must be managed by the installer" \
+                "$ext_backend" \
+                "external-detected" \
+                "using installed llama-server from PATH (${ext_backend} backend detected)" \
                 "" \
-                "external install"
+                "${ext_backend^} external"
             return 0
         fi
         fallback_note="default installed binary rejected: ${EXTERNAL_VALIDATE_REASON}"
@@ -2782,6 +2822,13 @@ ${SELECTED_LLAMA_SERVER_GUIDANCE}"
     LLAMA_SERVER_BIN="$SELECTED_LLAMA_SERVER_BIN"
     expected_device_backend="$(infer_backend_from_device "$device")"
     if [[ "$SELECTED_LLAMA_SERVER_BACKEND" == "cpu" ]]; then
+        if [[ ",$SELECTED_LLAMA_SERVER_HOST_BACKENDS," == *",cuda,"* ]]; then
+            printf 'warning: host has CUDA capability but selected llama-server binary is CPU-only; GPU offload will not be used\n' >&2
+            printf 'note: run "llama-model build-runtime --backend cuda" or point LLAMA_SERVER_BIN at a CUDA-enabled llama-server\n' >&2
+        elif [[ ",$SELECTED_LLAMA_SERVER_HOST_BACKENDS," == *",vulkan,"* ]]; then
+            printf 'warning: host has Vulkan capability but selected llama-server binary is CPU-only; GPU offload will not be used\n' >&2
+            printf 'note: run "llama-model build-runtime --backend vulkan" or point LLAMA_SERVER_BIN at a Vulkan-enabled llama-server\n' >&2
+        fi
         ngl="0"
         device=""
     elif [[ "$SELECTED_LLAMA_SERVER_BACKEND" != "external" && -n "$expected_device_backend" && "$expected_device_backend" != "$SELECTED_LLAMA_SERVER_BACKEND" ]]; then
@@ -2803,7 +2850,12 @@ ${SELECTED_LLAMA_SERVER_GUIDANCE}"
         gpu_total="$(detect_gpu_total_mib || true)"
         system_available="$(detect_system_available_mib || true)"
         fit_posture="$(autofit_memory_posture "$gpu_total" "$system_available")"
-        fit_guidance="$(autofit_memory_guidance "$fit_posture")"
+        # When CUDA binary is selected but VRAM detection failed (e.g. nvidia-smi not in PATH),
+        # override misleading "cpu-fit" posture — the binary will still attempt GPU offload.
+        if [[ -z "$gpu_total" && "$fit_posture" == "cpu-fit" ]]; then
+            fit_posture="gpu-unknown-vram"
+            fit_guidance="VRAM detection failed (nvidia-smi not available or driver issue); GPU offload will be attempted with default settings. If startup fails, run nvidia-smi to diagnose."
+        fi
         hybrid_ngl="$(hybrid_ngl_for_system_memory "$system_available")"
         if [[ "$auto_fit" == "1" && "$fit_posture" != "gpu-fit" && -n "$fit_guidance" ]]; then
             printf 'auto_fit_posture: %s\n' "$fit_posture"
@@ -3207,6 +3259,11 @@ show_doctor() {
     system_available_mib="$(detect_system_available_mib || true)"
     fit_posture="$(autofit_memory_posture "$gpu_total_mib" "$system_available_mib")"
     fit_guidance="$(autofit_memory_guidance "$fit_posture")"
+    # Same override as start_server: don't report "cpu-fit" when a GPU binary is selected.
+    if [[ -z "$gpu_total_mib" && "$fit_posture" == "cpu-fit" && ",$SELECTED_LLAMA_SERVER_HOST_BACKENDS," == *",cuda,"* ]]; then
+        fit_posture="gpu-unknown-vram"
+        fit_guidance="$(autofit_memory_guidance "$fit_posture")"
+    fi
     gpu_process_rows="$(llama_server_process_rows || true)"
     if [[ -n "$gpu_process_rows" ]]; then
         gpu_process_count="$(printf '%s\n' "$gpu_process_rows" | grep -c . || true)"
