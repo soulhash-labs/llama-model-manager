@@ -16,6 +16,7 @@ import time
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
@@ -203,6 +204,37 @@ def _redact_gateway_telemetry_record(record: dict[str, Any]) -> dict[str, Any]:
     elif prompt:
         redacted.setdefault("prompt_chars", len(json.dumps(prompt)))
     return redacted
+
+
+def _build_context_payload(
+    *,
+    raw_context: str,
+    raw_context_chars: int,
+    encoding_status: str,
+    encoded_context: str,
+    encoding_format: str,
+    encoding_ratio: float,
+) -> Any:
+    try:
+        from glyphos_ai.glyph.types import ContextPayload as _ContextPayload  # type: ignore
+
+        return _ContextPayload(
+            raw_context=str(raw_context),
+            raw_context_chars=int(raw_context_chars),
+            encoding_status=str(encoding_status),
+            encoded_context=str(encoded_context),
+            encoding_format=str(encoding_format),
+            encoding_ratio=float(encoding_ratio),
+        )
+    except Exception:
+        return SimpleNamespace(
+            raw_context=str(raw_context),
+            raw_context_chars=int(raw_context_chars),
+            encoding_status=str(encoding_status),
+            encoded_context=str(encoded_context),
+            encoding_format=str(encoding_format),
+            encoding_ratio=float(encoding_ratio),
+        )
 
 
 def record_gateway_request(record: dict[str, Any]) -> None:
@@ -495,6 +527,8 @@ def command_context_from_output(raw: str) -> dict[str, Any]:
             "degraded": bool(meta.get("degraded", False)),
             "suggestions": meta.get("suggestions") if isinstance(meta.get("suggestions"), list) else [],
         }
+    else:
+        meta = {}
 
     # Extract context text
     for key in ("retrieved_context", "context", "text", "markdown"):
@@ -737,9 +771,7 @@ def glyph_encode_context(context: str) -> dict[str, Any]:
         result["latency_ms"] = round((time.perf_counter() - started) * 1000)
 
 
-def assemble_prompt_raw(
-    raw_prompt: str, context_result: dict[str, Any]
-) -> tuple[str, dict[str, Any]]:
+def assemble_prompt_raw(raw_prompt: str, context_result: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """Assemble prompt with raw context only (no Ψ encoding).
 
     The router decides whether to apply encoding based on target backend.
@@ -751,16 +783,20 @@ def assemble_prompt_raw(
             "assembled_prompt_chars": len(raw_prompt),
             "context_block_chars": 0,
         }
-    context_block = "\n".join([
-        "[Retrieved Context]",
-        context,
-    ])
-    assembled = "\n\n".join([
-        "System: Use retrieved context only as supporting evidence. The latest user instruction below overrides retrieved or encoded context.",
-        context_block,
-        "[Conversation and latest user request]",
-        raw_prompt,
-    ])
+    context_block = "\n".join(
+        [
+            "[Retrieved Context]",
+            context,
+        ]
+    )
+    assembled = "\n\n".join(
+        [
+            "System: Use retrieved context only as supporting evidence. The latest user instruction below overrides retrieved or encoded context.",
+            context_block,
+            "[Conversation and latest user request]",
+            raw_prompt,
+        ]
+    )
     return assembled, {
         "assembly_status": "raw_context",
         "assembled_prompt_chars": len(assembled),
@@ -872,20 +908,158 @@ def prepare_gateway_pipeline(
     return assembled_prompt, pipeline
 
 
+def _normalize_cloud_provider(raw: str) -> str:
+    provider = str(raw or "").strip().lower()
+    if provider in {"openai", "anthropic", "xai"}:
+        return provider
+    return ""
+
+
+def _parse_cloud_fallback_order(raw: Any) -> list[str]:
+    if not raw:
+        return []
+    if isinstance(raw, (list, tuple)):
+        values = list(raw)
+    else:
+        values = str(raw).split(",")
+    providers: list[str] = []
+    for value in values:
+        provider = _normalize_cloud_provider(str(value))
+        if provider and provider not in providers:
+            providers.append(provider)
+    return providers
+
+
+def _coerce_bool(raw: Any, default: bool = False) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw or "").strip().lower()
+    if text in {"1", "true", "yes", "on", "enabled", "y"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled", "n"}:
+        return False
+    return default
+
+
+def _load_glyphos_config() -> dict[str, Any]:
+    from glyphos_ai.ai_compute.api_client import _load_glyphos_config as integration_load_config  # type: ignore
+
+    return integration_load_config()
+
+
+def _cloud_routing_config() -> tuple[list[str], str]:
+    config = _load_glyphos_config()
+    cloud_root = config.get("ai_compute", {}).get("cloud", {}) if isinstance(config, dict) else {}
+    preferred_raw = os.environ.get("GLYPHOS_CLOUD_PREFERRED", "").strip()
+    if not preferred_raw and isinstance(config, dict):
+        preferred_raw = (
+            str(config.get("ai_compute", {}).get("cloud", {}).get("preferred_cloud", "")).strip()
+            if isinstance(cloud_root, dict)
+            else ""
+        )
+    if not preferred_raw and isinstance(config, dict):
+        preferred_raw = (
+            str(config.get("ai_compute", {}).get("cloud", {}).get("preferred_provider", "")).strip()
+            if isinstance(cloud_root, dict)
+            else ""
+        )
+    preferred_cloud = (
+        _normalize_cloud_provider(preferred_raw)
+        or _normalize_cloud_provider(os.environ.get("GLYPHOS_CLOUD_PREFERRED_PROVIDER", ""))
+        or "xai"
+    )
+
+    fallback_order = os.environ.get("GLYPHOS_CLOUD_FALLBACK_ORDER", "").strip()
+    if not fallback_order and isinstance(config, dict):
+        cloud_root = config.get("ai_compute", {}).get("cloud", {})
+        fallback_order = cloud_root.get("fallback_order", "") if isinstance(cloud_root, dict) else ""
+    return (
+        _parse_cloud_fallback_order(fallback_order),
+        preferred_cloud,
+    )
+
+
+def _provider_status(enabled: bool, configured: bool, client: Any, reason: str) -> dict[str, Any]:
+    return {
+        "enabled": bool(enabled),
+        "configured": bool(configured),
+        "available": bool(client is not None),
+        "model": getattr(client, "model", ""),
+        "max_tokens": getattr(client, "max_tokens", 0),
+        "reason": reason,
+    }
+
+
+def _get_cloud_provider_status() -> dict[str, Any]:
+    status = {"xai": {}, "openai": {}, "anthropic": {}}
+    try:
+        from glyphos_ai.ai_compute.api_client import (
+            _load_glyphos_config as integration_load_config,  # type: ignore
+        )
+        from glyphos_ai.ai_compute.api_client import (
+            create_configured_clients,  # type: ignore
+        )
+    except Exception:
+        return status
+
+    try:
+        clients = create_configured_clients()
+    except Exception:
+        clients = {}
+    config = integration_load_config()
+    cloud_root = config.get("ai_compute", {}).get("cloud", {}) if isinstance(config, dict) else {}
+    cloud_root_enabled = _coerce_bool(cloud_root.get("enabled"), default=True)
+
+    for provider in ("xai", "openai", "anthropic"):
+        provider_key = provider.upper()
+        cfg_provider = (
+            config.get("ai_compute", {}).get(provider, {}) if isinstance(config.get("ai_compute", {}), dict) else {}
+        )
+        cfg_enabled = cfg_provider.get("enabled", "true") if isinstance(cfg_provider, dict) else "true"
+        enabled = _coerce_bool(
+            os.environ.get(f"GLYPHOS_CLOUD_{provider_key}_ENABLED"),
+            default=_coerce_bool(cfg_enabled, default=True),
+        )
+        if not cloud_root_enabled:
+            enabled = False
+        api_key = os.environ.get(f"GLYPHOS_CLOUD_{provider_key}_API_KEY") or os.environ.get(
+            f"{provider_key}_API_KEY", ""
+        )
+        if not api_key and isinstance(cfg_provider, dict):
+            api_key = cfg_provider.get("api_key", "")
+        configured = bool(enabled and str(api_key).strip())
+        client = clients.get(provider) if isinstance(clients, dict) else None
+        if client is not None:
+            reason = "ready"
+        elif not enabled:
+            reason = "disabled"
+        elif not configured:
+            reason = "api_key_missing"
+        else:
+            reason = "not_available"
+        status[provider] = _provider_status(enabled=enabled, configured=configured, client=client, reason=reason)
+
+    return status
+
+
 def create_router():
     from glyphos_ai.ai_compute.api_client import create_configured_clients  # type: ignore
-    from glyphos_ai.ai_compute.router import AdaptiveRouter  # type: ignore
+    from glyphos_ai.ai_compute.router import AdaptiveRouter, RoutingConfig  # type: ignore
 
     clients = create_configured_clients()
+    cloud_fallback_order, preferred_cloud = _cloud_routing_config()
     return AdaptiveRouter(
         llamacpp_client=clients.get("llamacpp"),
         openai_client=clients.get("openai"),
         anthropic_client=clients.get("anthropic"),
         xai_client=clients.get("xai"),
+        config=RoutingConfig(cloud_fallback_order=cloud_fallback_order, preferred_cloud=preferred_cloud),
     )
 
 
-def route_prompt(prompt: str, model: str, max_tokens: int, temperature: float, context_payload=None) -> tuple[dict[str, Any], dict[str, str]]:
+def route_prompt(
+    prompt: str, model: str, max_tokens: int, temperature: float, context_payload=None
+) -> tuple[dict[str, Any], dict[str, str]]:
     from glyphos_ai.glyph.types import GlyphPacket  # type: ignore
 
     packet = GlyphPacket(
@@ -901,8 +1075,14 @@ def route_prompt(prompt: str, model: str, max_tokens: int, temperature: float, c
     )
     start = time.perf_counter()
     router = create_router()
-    result = router.route(packet, prompt=prompt, context_payload=context_payload,
-                          model=model, max_tokens=max_tokens, temperature=temperature)
+    result = router.route(
+        packet,
+        prompt=prompt,
+        context_payload=context_payload,
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
     latency_ms = round((time.perf_counter() - start) * 1000)
     if result.target.value == "fallback" or str(result.routing_reason_code).endswith(".error"):
         raise GatewayError(f"{result.target.value} route failed: {result.response}", target=result.target.value)
@@ -941,8 +1121,12 @@ def route_prompt_stream(
     )
     router = create_router()
     routed, chunks = router.route_stream(
-        packet, prompt=prompt, context_payload=context_payload,
-        model=model, max_tokens=max_tokens, temperature=temperature,
+        packet,
+        prompt=prompt,
+        context_payload=context_payload,
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
     )
     headers = {
         "X-LMM-Route-Mode": "routed",
@@ -953,6 +1137,72 @@ def route_prompt_stream(
         "X-LMM-Route-Target": str(routed["target"]),
     }
     return routed, headers, chunks
+
+
+def _invoke_route_prompt(
+    *,
+    route_fn,
+    prompt: str,
+    fallback_prompt: str | None = None,
+    model: str,
+    max_tokens: int,
+    temperature: float,
+    context_payload: Any,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Invoke a route prompt callable with backward-compatible args.
+
+    Older tests patch this function with 4-arg callables.
+    Keep new context-aware behavior when supported and gracefully fallback.
+    """
+
+    try:
+        return route_fn(prompt, model, max_tokens, temperature, context_payload=context_payload)
+    except TypeError as exc:
+        message = str(exc)
+        if "context_payload" in message:
+            return route_fn(fallback_prompt or prompt, model, max_tokens, temperature)
+        raise
+
+
+def _invoke_route_prompt_stream(
+    *,
+    route_fn,
+    prompt: str,
+    fallback_prompt: str | None = None,
+    model: str,
+    max_tokens: int,
+    temperature: float,
+    context_payload: Any,
+) -> tuple[dict[str, Any], dict[str, str], Iterator[str]]:
+    """Invoke a streaming route callable with backward-compatible args."""
+
+    try:
+        return route_fn(prompt, model, max_tokens, temperature, context_payload=context_payload)
+    except TypeError as exc:
+        message = str(exc)
+        if "context_payload" in message:
+            return route_fn(fallback_prompt or prompt, model, max_tokens, temperature)
+        raise
+
+
+def _fallback_prompt_for_legacy_route(prompt: str, pipeline: dict[str, Any], context_payload: Any) -> str:
+    """Reconstruct the context-enriched prompt for legacy 4-arg route callbacks."""
+
+    if not bool(pipeline.get("context_used", False)):
+        return prompt
+
+    context_text = str(getattr(context_payload, "raw_context", ""))
+    if not context_text.strip():
+        return prompt
+
+    encoding_status = str(getattr(context_payload, "encoding_status", pipeline.get("glyph_encoding_status", "")))
+    encoded_context = str(getattr(context_payload, "encoded_context", ""))
+    encoding = {
+        "used": encoding_status.lower() == "encoded" and bool(encoded_context),
+        "encoded_context": encoded_context,
+    }
+    rebuilt_prompt, _ = assemble_prompt(prompt, {"context": context_text}, encoding)
+    return rebuilt_prompt
 
 
 def completion_payload(
@@ -1129,7 +1379,16 @@ class LMMOpenAIGateway:
         self._health = HealthChecker(backend_url=backend_base_url, config=load_lmm_config_from_env())
 
     def health(self) -> dict[str, Any]:
-        return {"ok": True, "service": "lmm-glyphos-openai-gateway"}
+        fallback_order, preferred_cloud = _cloud_routing_config()
+        return {
+            "ok": True,
+            "service": "lmm-glyphos-openai-gateway",
+            "cloud_routing": {
+                "preferred_cloud": preferred_cloud,
+                "fallback_order": fallback_order,
+            },
+            "cloud_providers": _get_cloud_provider_status(),
+        }
 
     def list_models(self) -> tuple[int, dict[str, Any]]:
         try:
@@ -1259,8 +1518,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 pipeline_request["harness_identity"] = record["harness"]
 
             # Build ContextPayload for encoding-aware routing
-            from glyphos_ai.glyph.types import ContextPayload as _CP
-            context_payload = _CP(
+            context_payload = _build_context_payload(
                 raw_context=pipeline.get("context_payload_raw", ""),
                 raw_context_chars=pipeline.get("raw_context_chars", 0),
                 encoding_status=pipeline.get("context_payload_encoding_status", "none"),
@@ -1295,8 +1553,14 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 }
             )
             if stream:
-                routed, headers, chunks = route_prompt_stream(
-                    assembled_prompt, model, max_tokens, temperature, context_payload=context_payload,
+                routed, headers, chunks = _invoke_route_prompt_stream(
+                    route_fn=route_prompt_stream,
+                    prompt=assembled_prompt,
+                    fallback_prompt=_fallback_prompt_for_legacy_route(prompt, pipeline, context_payload),
+                    model=model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    context_payload=context_payload,
                 )
                 headers["X-LMM-Route-Mode"] = str(pipeline.get("mode", "routed-basic"))
                 headers["X-LMM-Context-Status"] = str(pipeline.get("context_status", "unknown"))
@@ -1343,7 +1607,15 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 safe_record_run_record(_run_record_from_dict(record))
                 safe_record_gateway_request(record)
                 return
-            routed, headers = route_prompt(assembled_prompt, model, max_tokens, temperature, context_payload=context_payload)
+            routed, headers = _invoke_route_prompt(
+                route_fn=route_prompt,
+                prompt=assembled_prompt,
+                fallback_prompt=_fallback_prompt_for_legacy_route(prompt, pipeline, context_payload),
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                context_payload=context_payload,
+            )
             headers["X-LMM-Route-Mode"] = str(pipeline.get("mode", "routed-basic"))
             headers["X-LMM-Context-Status"] = str(pipeline.get("context_status", "unknown"))
             headers["X-LMM-Glyph-Encoding"] = str(pipeline.get("glyph_encoding_status", "skipped"))

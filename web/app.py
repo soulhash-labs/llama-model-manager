@@ -348,6 +348,118 @@ def default_host_capability_store() -> dict[str, Any]:
     }
 
 
+def _coerce_bool(raw: Any, default: bool = False) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw or "").strip().lower()
+    if text in {"1", "true", "yes", "on", "enabled", "y"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled", "n"}:
+        return False
+    return default
+
+
+def _read_glyphos_cloud_provider_status() -> dict[str, Any]:
+    status = {
+        "xai": {
+            "enabled": False,
+            "configured": False,
+            "available": False,
+            "model": "",
+            "max_tokens": 0,
+            "reason": "not_loaded",
+        },
+        "openai": {
+            "enabled": False,
+            "configured": False,
+            "available": False,
+            "model": "",
+            "max_tokens": 0,
+            "reason": "not_loaded",
+        },
+        "anthropic": {
+            "enabled": False,
+            "configured": False,
+            "available": False,
+            "model": "",
+            "max_tokens": 0,
+            "reason": "not_loaded",
+        },
+    }
+    try:
+        from glyphos_ai.ai_compute.api_client import (  # type: ignore
+            _coerce_int,
+            _load_glyphos_config,
+            create_configured_clients,
+        )
+    except Exception:
+        return status
+
+    try:
+        clients = create_configured_clients()
+    except Exception:
+        clients = {}
+    try:
+        config = _load_glyphos_config()
+    except Exception:
+        config = {}
+    cloud_root = config.get("ai_compute", {}).get("cloud", {}) if isinstance(config, dict) else {}
+    cloud_root_enabled = _coerce_bool(cloud_root.get("enabled"), default=True)
+
+    for provider in ("xai", "openai", "anthropic"):
+        provider_key = provider.upper()
+        provider_cfg = (
+            config.get("ai_compute", {}).get(provider, {}) if isinstance(config.get("ai_compute", {}), dict) else {}
+        )
+        provider_enabled_default = _coerce_bool(
+            provider_cfg.get("enabled", "true") if isinstance(provider_cfg, dict) else True, default=True
+        )
+        enabled = _coerce_bool(
+            os.environ.get(f"GLYPHOS_CLOUD_{provider_key}_ENABLED"),
+            default=provider_enabled_default,
+        )
+        if not cloud_root_enabled:
+            enabled = False
+        client = clients.get(provider) if isinstance(clients, dict) else None
+        api_key = os.environ.get(f"GLYPHOS_CLOUD_{provider_key}_API_KEY") or os.environ.get(
+            f"{provider_key}_API_KEY", ""
+        )
+        if not api_key and isinstance(provider_cfg, dict):
+            api_key = str(provider_cfg.get("api_key", "")).strip()
+        configured = bool(enabled and str(api_key).strip())
+        if client is not None:
+            reason = "ready"
+            model = str(getattr(client, "model", "")).strip()
+            max_tokens = int(getattr(client, "max_tokens", 0))
+        else:
+            model = str(os.environ.get(f"GLYPHOS_CLOUD_{provider_key}_MODEL", "")).strip()
+            if not model and isinstance(provider_cfg, dict):
+                model = str(provider_cfg.get("model", "")).strip()
+            max_tokens = _coerce_int(
+                os.environ.get(f"GLYPHOS_CLOUD_{provider_key}_MAX_TOKENS")
+                if os.environ.get(f"GLYPHOS_CLOUD_{provider_key}_MAX_TOKENS") is not None
+                else (provider_cfg.get("max_tokens", 0) if isinstance(provider_cfg, dict) else 0),
+                default=0,
+            )
+            if not enabled:
+                reason = "disabled"
+            elif not configured:
+                reason = "api_key_missing"
+            else:
+                reason = "not_available"
+
+        status[provider] = {
+            "enabled": enabled,
+            "configured": configured,
+            "available": client is not None,
+            "model": model,
+            "max_tokens": max_tokens,
+            "reason": reason,
+        }
+
+    return status
+
+
 class Manager:
     def __init__(self, app_root: Path, *, demo: bool = False) -> None:
         self.app_root = app_root
@@ -2617,6 +2729,7 @@ class Manager:
             "glyphos_model": current_model_name,
             "glyphos_routing_preference": "llamacpp",
             "glyphos_telemetry": glyphos_telemetry,
+            "cloud_providers": glyphos_telemetry.get("cloud_providers", {}),
             "context_mode_mcp": context_mode_mcp,
             "context_glyphos_pipeline": context_glyphos_pipeline,
         }
@@ -2745,6 +2858,32 @@ class Manager:
             "total_attempts": 0,
             "recent_attempts": [],
         }
+        baseline_cloud_providers = {
+            "xai": {
+                "enabled": False,
+                "configured": False,
+                "available": False,
+                "model": "",
+                "max_tokens": 0,
+                "reason": "unknown",
+            },
+            "openai": {
+                "enabled": False,
+                "configured": False,
+                "available": False,
+                "model": "",
+                "max_tokens": 0,
+                "reason": "unknown",
+            },
+            "anthropic": {
+                "enabled": False,
+                "configured": False,
+                "available": False,
+                "model": "",
+                "max_tokens": 0,
+                "reason": "unknown",
+            },
+        }
         integration_root = self.glyphos_integration_root.resolve()
         snapshot: dict[str, Any] = {
             "available": False,
@@ -2752,22 +2891,25 @@ class Manager:
             "source": "bundled" if integration_root.is_dir() else "python",
             "integration_root": str(integration_root),
             "routing": baseline_routing,
+            "cloud_providers": baseline_cloud_providers,
         }
         if self.demo:
             return snapshot
 
         # Prefer installed package import; fall back to repo-local integration path.
-        candidates: list[str] = []
-        if str(integration_root) not in sys.path and integration_root.is_dir():
-            candidates.append(str(integration_root))
-        candidates.append("")
+        candidates: list[str] = [""]
+        if integration_root.is_dir():
+            candidates.insert(0, str(integration_root))
 
         last_error: Exception | None = None
         for prepend in candidates:
             saved_modules: dict[str, Any] = {}
             try:
+                path_inserted = False
                 if prepend:
-                    sys.path.insert(0, prepend)
+                    if str(prepend) not in sys.path:
+                        sys.path.insert(0, prepend)
+                        path_inserted = True
                     importlib.invalidate_caches()
                     saved_modules = {
                         name: module
@@ -2783,11 +2925,13 @@ class Manager:
                     routing = dict(baseline_routing)
                 else:
                     routing = {**baseline_routing, **routing}
+                cloud_providers = _read_glyphos_cloud_provider_status()
                 snapshot = {
                     **snapshot,
                     "available": True,
                     "source": "bundled" if prepend else "python",
                     "routing": routing,
+                    "cloud_providers": cloud_providers,
                     "error": "",
                     "guidance": "",
                 }
@@ -2801,7 +2945,7 @@ class Manager:
                         sys.modules.pop(name, None)
                     sys.modules.update(saved_modules)
             finally:
-                if prepend:
+                if prepend and path_inserted:
                     try:
                         sys.path.remove(prepend)
                     except ValueError:
@@ -3063,6 +3207,58 @@ class Manager:
                         "fallback_reason_counts": {},
                         "total_attempts": 0,
                         "recent_attempts": [],
+                    },
+                    "cloud_providers": {
+                        "xai": {
+                            "enabled": False,
+                            "configured": False,
+                            "available": False,
+                            "model": "",
+                            "max_tokens": 0,
+                            "reason": "unknown",
+                        },
+                        "openai": {
+                            "enabled": False,
+                            "configured": False,
+                            "available": False,
+                            "model": "",
+                            "max_tokens": 0,
+                            "reason": "unknown",
+                        },
+                        "anthropic": {
+                            "enabled": False,
+                            "configured": False,
+                            "available": False,
+                            "model": "",
+                            "max_tokens": 0,
+                            "reason": "unknown",
+                        },
+                    },
+                },
+                "cloud_providers": {
+                    "xai": {
+                        "enabled": False,
+                        "configured": False,
+                        "available": False,
+                        "model": "",
+                        "max_tokens": 0,
+                        "reason": "unknown",
+                    },
+                    "openai": {
+                        "enabled": False,
+                        "configured": False,
+                        "available": False,
+                        "model": "",
+                        "max_tokens": 0,
+                        "reason": "unknown",
+                    },
+                    "anthropic": {
+                        "enabled": False,
+                        "configured": False,
+                        "available": False,
+                        "model": "",
+                        "max_tokens": 0,
+                        "reason": "unknown",
                     },
                 },
                 "context_mode_mcp": {

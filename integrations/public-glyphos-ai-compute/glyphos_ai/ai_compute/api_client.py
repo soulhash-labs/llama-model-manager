@@ -88,6 +88,32 @@ def _config_value(config: dict[str, Any], dotted: str, default: str = "") -> str
     return str(current).strip() if current is not None else default
 
 
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "on", "enabled", "y"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled", "n"}:
+        return False
+    return default
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_bool(*names: str, default: bool = False) -> bool:
+    for name in names:
+        if name not in os.environ:
+            continue
+        return _coerce_bool(os.environ.get(name), default=default)
+    return default
+
+
 _RETIRED_ENV_VARS = [
     "GLYPHOS_PREFERRED_LOCAL_BACKEND",
     "GLYPHOS_OLLAMA_ENABLED",
@@ -417,13 +443,81 @@ def create_configured_clients() -> dict[str, Any]:
         if client.is_available():
             clients[f"llamacpp-{lane}"] = client
 
-    openai = OpenAIClient()
-    if openai.is_available():
-        clients["openai"] = openai
-    anthropic = AnthropicClient()
-    if anthropic.is_available():
-        clients["anthropic"] = anthropic
-    xai = XAIClient()
-    if xai.is_available():
-        clients["xai"] = xai
+    cloud_enabled = _coerce_bool(
+        _env_first(
+            "GLYPHOS_CLOUD_ENABLED",
+            default=_config_value(config, "ai_compute.cloud.enabled", default="true"),
+        ),
+        default=True,
+    )
+    if cloud_enabled:
+        for provider in ("xai", "openai", "anthropic"):
+            enabled = _coerce_bool(
+                _env_first(
+                    f"GLYPHOS_CLOUD_{provider.upper()}_ENABLED",
+                    default=_config_value(config, f"ai_compute.{provider}.enabled", default="true"),
+                ),
+                default=True,
+            )
+            if not enabled:
+                continue
+
+            if provider == "openai":
+                api_key = _env_first(
+                    "GLYPHOS_CLOUD_OPENAI_API_KEY",
+                    "OPENAI_API_KEY",
+                    default=_config_value(config, "ai_compute.openai.api_key", default=""),
+                )
+                model = _env_first(
+                    "GLYPHOS_CLOUD_OPENAI_MODEL",
+                    default=_config_value(config, "ai_compute.openai.model", default="gpt-4o"),
+                )
+                max_tokens = _coerce_int(
+                    _env_first(
+                        "GLYPHOS_CLOUD_OPENAI_MAX_TOKENS",
+                        default=_config_value(config, "ai_compute.openai.max_tokens", default="1000"),
+                    ),
+                    default=1000,
+                )
+                client = OpenAIClient(api_key=api_key, model=model, max_tokens=max_tokens)
+            elif provider == "anthropic":
+                api_key = _env_first(
+                    "GLYPHOS_CLOUD_ANTHROPIC_API_KEY",
+                    "ANTHROPIC_API_KEY",
+                    default=_config_value(config, "ai_compute.anthropic.api_key", default=""),
+                )
+                model = _env_first(
+                    "GLYPHOS_CLOUD_ANTHROPIC_MODEL",
+                    default=_config_value(config, "ai_compute.anthropic.model", default="claude-3-5-sonnet-latest"),
+                )
+                max_tokens = _coerce_int(
+                    _env_first(
+                        "GLYPHOS_CLOUD_ANTHROPIC_MAX_TOKENS",
+                        default=_config_value(config, "ai_compute.anthropic.max_tokens", default="1000"),
+                    ),
+                    default=1000,
+                )
+                client = AnthropicClient(api_key=api_key, model=model, max_tokens=max_tokens)
+            else:
+                api_key = _env_first(
+                    "GLYPHOS_CLOUD_XAI_API_KEY",
+                    "XAI_API_KEY",
+                    default=_config_value(config, "ai_compute.xai.api_key", default=""),
+                )
+                model = _env_first(
+                    "GLYPHOS_CLOUD_XAI_MODEL",
+                    default=_config_value(config, "ai_compute.xai.model", default="grok-beta"),
+                )
+                max_tokens = _coerce_int(
+                    _env_first(
+                        "GLYPHOS_CLOUD_XAI_MAX_TOKENS",
+                        default=_config_value(config, "ai_compute.xai.max_tokens", default="1000"),
+                    ),
+                    default=1000,
+                )
+                client = XAIClient(api_key=api_key, model=model, max_tokens=max_tokens)
+
+            if client.is_available():
+                clients[provider] = client
+
     return clients

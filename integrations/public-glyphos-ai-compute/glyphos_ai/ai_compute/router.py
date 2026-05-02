@@ -33,10 +33,39 @@ class RoutingConfig:
     high_coherence_threshold: float = 0.8
     low_coherence_threshold: float = 0.3
     complex_actions: list[str] | None = None
+    cloud_fallback_order: list[str] | None = None
+    preferred_cloud: str = "xai"
 
     def __post_init__(self) -> None:
         if self.complex_actions is None:
             self.complex_actions = ["ANALYZE", "SYNTHESIZE", "PREDICT", "LEARN"]
+        self.preferred_cloud = self._normalize_cloud_provider(self.preferred_cloud or "xai")
+        self.cloud_fallback_order = self._normalize_cloud_fallback_order(
+            self.cloud_fallback_order or ["xai", "openai", "anthropic"]
+        )
+        if self.preferred_cloud:
+            self.cloud_fallback_order = [self.preferred_cloud] + [
+                p for p in self.cloud_fallback_order if p != self.preferred_cloud
+            ]
+
+    @staticmethod
+    def _normalize_cloud_provider(name: str) -> str:
+        provider = str(name or "").strip().lower()
+        if provider in {"openai", "anthropic", "xai"}:
+            return provider
+        return "xai"
+
+    @staticmethod
+    def _normalize_cloud_fallback_order(order: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for provider in order:
+            normalized_provider = RoutingConfig._normalize_cloud_provider(provider)
+            if normalized_provider not in normalized:
+                normalized.append(normalized_provider)
+        for provider in ("xai", "openai", "anthropic"):
+            if provider not in normalized:
+                normalized.append(provider)
+        return normalized
 
 
 @dataclass
@@ -262,162 +291,134 @@ class AdaptiveRouter:
             "recent_attempts": list(self._attempt_history),
         }
 
+    @staticmethod
+    def _is_complex_action(action: str, complex_actions: list[str] | None) -> bool:
+        if not complex_actions:
+            return False
+        return str(action or "").strip().upper() in {name.upper() for name in complex_actions}
+
+    def _cloud_fallback_order(self) -> list[str]:
+        return list(self.config.cloud_fallback_order or ["xai", "openai", "anthropic"])
+
+    def _local_routing_reason(self, action: str, psi: float) -> tuple[str, str]:
+        if psi >= self.config.high_coherence_threshold:
+            return "high coherence - Unified GlyphOS pipeline", "high_coherence_glyphos_pipeline"
+        if self._is_complex_action(action, self.config.complex_actions):
+            return "complex action - local fallback", "complex_action_local"
+        return "default - use local llama.cpp", "default_local"
+
+    def _local_routing_reason_stream(self, action: str, psi: float) -> tuple[str, str]:
+        if psi >= self.config.high_coherence_threshold:
+            return "high coherence - Unified GlyphOS pipeline", "high_coherence_glyphos_pipeline"
+        if self._is_complex_action(action, self.config.complex_actions):
+            return "complex action - local stream", "complex_action_local_stream"
+        return "default - use local llama.cpp", "default_local"
+
+    def _cloud_base_reason_code(self, action: str, provider: str) -> str:
+        provider = str(provider or "").strip().lower()
+        if self._is_complex_action(action, self.config.complex_actions):
+            return f"fallback_complex_action_{provider}"
+        return f"fallback_{provider}"
+
+    def _cloud_reason(self, action: str, provider: str) -> tuple[str, str]:
+        provider = str(provider or "").strip().lower()
+        reason_code = self._cloud_base_reason_code(action, provider)
+        if provider == "openai":
+            return "fallback - use OpenAI", reason_code
+        if provider == "anthropic":
+            return "fallback - use Anthropic", reason_code
+        if provider == "xai":
+            return "fallback - use xAI", reason_code
+        return "fallback - use cloud", reason_code
+
+    def _build_local_prompt(self, glyph_packet, prompt: str | None, context_payload=None) -> str:
+        if context_payload is None:
+            return prompt if prompt is not None else glyph_to_prompt(glyph_packet)
+
+        built_prompt = build_prompt_from_packet(glyph_packet, context_payload, prompt or "")
+        glyph_packet.encoding_status = getattr(context_payload, "encoding_status", "")
+        glyph_packet.encoding_format = getattr(context_payload, "encoding_format", "")
+        glyph_packet.encoding_ratio = getattr(context_payload, "encoding_ratio", 1.0)
+        return built_prompt
+
+    def _build_cloud_prompt(self, glyph_packet, prompt: str | None, context_payload=None) -> str:
+        if context_payload is None:
+            return prompt if prompt is not None else glyph_to_prompt(glyph_packet)
+
+        from glyphos_ai.glyph.types import ContextPayload
+
+        raw_context = getattr(context_payload, "raw_context", "")
+        raw_context_payload = ContextPayload(
+            raw_context=str(raw_context),
+            raw_context_chars=len(str(raw_context)),
+            encoding_status="skipped",
+        )
+        built_prompt = build_prompt_from_packet(glyph_packet, raw_context_payload, prompt or "")
+        glyph_packet.encoding_status = "skipped"
+        glyph_packet.encoding_format = ""
+        glyph_packet.encoding_ratio = 1.0
+        return built_prompt
+
+    def _route_cloud(self, prompt: str, action: str, **generation_kwargs: Any) -> RoutingResult:
+        last_error: RoutingResult | None = None
+        for provider in self._cloud_fallback_order():
+            if provider == "openai" and self.openai:
+                reason, reason_code = self._cloud_reason(action, provider)
+                result = self._route_openai(prompt, reason, reason_code, **generation_kwargs)
+            elif provider == "anthropic" and self.anthropic:
+                reason, reason_code = self._cloud_reason(action, provider)
+                result = self._route_anthropic(prompt, reason, reason_code, **generation_kwargs)
+            elif provider == "xai" and self.xai:
+                reason, reason_code = self._cloud_reason(action, provider)
+                result = self._route_xai(prompt, reason, reason_code, **generation_kwargs)
+            else:
+                continue
+
+            if not str(result.routing_reason_code).endswith(".error"):
+                return result
+            last_error = result
+
+        if last_error is not None:
+            return last_error
+
+        return RoutingResult(
+            target=ComputeTarget.FALLBACK,
+            response="No compute backend available",
+            routing_reason="no cloud backends available",
+            routing_reason_code="no_cloud_backends_available",
+        )
+
     def route(
         self, glyph_packet, prompt: str | None = None, context_payload=None, **generation_kwargs: Any
     ) -> RoutingResult:
-        """Route a glyph packet to the appropriate backend.
-
-        High coherence requests ALWAYS use the Unified GlyphOS pipeline
-        (encoding-aware prompt building). If context_payload is None for a
-        high-coherence route, a minimal ContextPayload is created to ensure
-        the full pipeline runs.
-
-        When context_payload is provided for non-high-coherence routes:
-        - Local llama.cpp: encoding is applied via build_prompt_from_packet
-        - Cloud backends: raw context only, encoding skipped
-
-        When context_payload is None for non-high-coherence routes:
-        backward-compatible behavior (no encoding awareness).
-        """
+        """Route a glyph packet across local-first / cloud fallback policy."""
         psi = self._packet_value(glyph_packet, "psi_coherence", "psiCoherence", 0.5)
         action = glyph_packet.action
 
-        # --- Determine target first, then apply encoding ---
-        if psi >= self.config.high_coherence_threshold and self.llamacpp:
-            target = ComputeTarget.LOCAL_LLAMACPP
-            reason = "high coherence - Unified GlyphOS pipeline"
-            reason_code = "high_coherence_glyphos_pipeline"
-            # Ensure full pipeline runs even if context_payload was not provided.
-            # High coherence MUST go through encoding-aware routing, never bypass
-            # to direct llama.cpp calls.
-            if context_payload is None:
-                from glyphos_ai.glyph.types import ContextPayload
-
-                context_payload = ContextPayload(
-                    raw_context="",
-                    raw_context_chars=0,
-                    encoding_status="none",
-                )
-        elif action in self.config.complex_actions:
-            if self.anthropic:
-                target = ComputeTarget.EXTERNAL_ANTHROPIC
-                reason = "complex action - prefer Claude"
-                reason_code = "complex_action_anthropic"
-            elif self.openai:
-                target = ComputeTarget.EXTERNAL_OPENAI
-                reason = "complex action - prefer GPT"
-                reason_code = "fallback_complex_action_openai"
-            elif self.llamacpp:
-                target = ComputeTarget.LOCAL_LLAMACPP
-                reason = "complex action - local fallback"
-                reason_code = "complex_action_local"
-            else:
-                target = None
-        elif self.llamacpp:
-            target = ComputeTarget.LOCAL_LLAMACPP
-            reason = "default - use local llama.cpp"
-            reason_code = "default_local"
-        elif self.openai:
-            target = ComputeTarget.EXTERNAL_OPENAI
-            reason = "fallback - use OpenAI"
-            reason_code = "fallback_openai"
-        elif self.anthropic:
-            target = ComputeTarget.EXTERNAL_ANTHROPIC
-            reason = "fallback - use Anthropic"
-            reason_code = "fallback_anthropic"
-        elif self.xai:
-            target = ComputeTarget.EXTERNAL_XAI
-            reason = "fallback - use xAI"
-            reason_code = "fallback_xai"
-        else:
-            return RoutingResult(
-                target=ComputeTarget.FALLBACK,
-                response="No compute backend available",
-                routing_reason="no backends configured",
-                routing_reason_code="no_backends_configured",
+        if not self.llamacpp:
+            return self._route_cloud(
+                prompt=self._build_cloud_prompt(glyph_packet, prompt, context_payload=context_payload),
+                action=action,
+                **generation_kwargs,
             )
 
-        # --- Build prompt with encoding awareness ---
-        if context_payload is not None:
-            # Encode ONLY for local llama.cpp; cloud gets raw context
-            if target == ComputeTarget.LOCAL_LLAMACPP:
-                # Local: use encoding-aware prompt builder (may include Ψ)
-                built_prompt = build_prompt_from_packet(glyph_packet, context_payload, prompt or "")
-                # Mirror encoding decision into the packet for telemetry
-                glyph_packet.encoding_status = context_payload.encoding_status
-                glyph_packet.encoding_format = context_payload.encoding_format
-                glyph_packet.encoding_ratio = context_payload.encoding_ratio
-            else:
-                # Cloud: force raw context, skip encoding
-                from glyphos_ai.glyph.types import ContextPayload
-
-                raw_context = getattr(context_payload, "raw_context", "")
-                raw_cp = ContextPayload(
-                    raw_context=raw_context,
-                    raw_context_chars=len(raw_context),
-                    encoding_status="skipped",
-                )
-                built_prompt = build_prompt_from_packet(glyph_packet, raw_cp, prompt or "")
-                glyph_packet.encoding_status = "skipped"
-                glyph_packet.encoding_format = ""
-                glyph_packet.encoding_ratio = 1.0
-        else:
-            # Backward compat: no context_payload, use old behavior
-            built_prompt = prompt if prompt is not None else glyph_to_prompt(glyph_packet)
-
-        # --- Execute route ---
-        if target == ComputeTarget.LOCAL_LLAMACPP:
-            return self._route_llamacpp(built_prompt, reason, reason_code, **generation_kwargs)
-        elif target == ComputeTarget.EXTERNAL_OPENAI:
-            return self._route_openai(built_prompt, reason, reason_code, **generation_kwargs)
-        elif target == ComputeTarget.EXTERNAL_ANTHROPIC:
-            return self._route_anthropic(built_prompt, reason, reason_code, **generation_kwargs)
-        elif target == ComputeTarget.EXTERNAL_XAI:
-            return self._route_xai(built_prompt, reason, reason_code, **generation_kwargs)
-        else:
-            return RoutingResult(
-                target=ComputeTarget.FALLBACK,
-                response="No compute backend available",
-                routing_reason="no backends configured",
-                routing_reason_code="no_backends_configured",
-            )
+        reason, reason_code = self._local_routing_reason(action=action, psi=psi)
+        built_prompt = self._build_local_prompt(glyph_packet, prompt, context_payload=context_payload)
+        return self._route_llamacpp(built_prompt, reason, reason_code, **generation_kwargs)
 
     def route_stream(
         self, glyph_packet, prompt: str | None = None, context_payload=None, **generation_kwargs: Any
     ) -> tuple[dict[str, Any], Iterator[str]]:
-        """Stream routing with encoding awareness.
+        """Route streaming traffic with local-first policy."""
+        if not self.llamacpp:
+            raise RuntimeError("no streaming-capable local llama.cpp backend is configured")
 
-        Streaming is only available for local llama.cpp.
-        High coherence requests ALWAYS use the Unified GlyphOS pipeline.
-        """
-        if self.llamacpp:
-            psi = self._packet_value(glyph_packet, "psi_coherence", "psiCoherence", 0.5)
-
-            # High coherence MUST use full pipeline — ensure context_payload exists
-            if context_payload is None:
-                from glyphos_ai.glyph.types import ContextPayload
-
-                context_payload = ContextPayload(
-                    raw_context="",
-                    raw_context_chars=0,
-                    encoding_status="none",
-                )
-
-            # Always use encoding-aware prompt builder for streaming
-            built_prompt = build_prompt_from_packet(glyph_packet, context_payload, prompt or "")
-            glyph_packet.encoding_status = context_payload.encoding_status
-            glyph_packet.encoding_format = context_payload.encoding_format
-            glyph_packet.encoding_ratio = context_payload.encoding_ratio
-
-            if psi >= self.config.high_coherence_threshold:
-                reason = "high coherence - Unified GlyphOS pipeline"
-                reason_code = "high_coherence_glyphos_pipeline"
-            else:
-                reason = "default - use local llama.cpp"
-                reason_code = "default_local"
-            return self._route_llamacpp_stream(built_prompt, reason, reason_code, **generation_kwargs)
-
-        raise RuntimeError("no streaming-capable local llama.cpp backend is configured")
+        psi = self._packet_value(glyph_packet, "psi_coherence", "psiCoherence", 0.5)
+        reason, reason_code = self._local_routing_reason_stream(
+            action=str(getattr(glyph_packet, "action", "")), psi=psi
+        )
+        built_prompt = self._build_local_prompt(glyph_packet, prompt, context_payload=context_payload)
+        return self._route_llamacpp_stream(built_prompt, reason, reason_code, **generation_kwargs)
 
     def _route_llamacpp_stream(
         self, prompt: str, reason: str, reason_code: str, **generation_kwargs: Any
