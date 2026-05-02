@@ -87,6 +87,68 @@ function setNodeHidden(node, hidden) {
   if (node) node.classList.toggle("hidden", Boolean(hidden));
 }
 
+function allDashboardPages() {
+  return Array.from(document.querySelectorAll("#dashboard-main .dashboard-page"));
+}
+
+function dashboardPageFromHash() {
+  const requested = String(location.hash || "").replace(/^#/, "");
+  const pages = new Set(allDashboardPages().map((page) => page.id));
+  if (pages.has(requested)) return requested;
+  return "runtime-live";
+}
+
+function updateDashboardPage(pageId, options = {}) {
+  const { push = true, focus = true } = options;
+  const pages = allDashboardPages();
+  const targetId = pages.some((page) => page.id === pageId) ? pageId : "runtime-live";
+  const navLinks = document.querySelectorAll(".side-nav a[data-page]");
+
+  for (const page of pages) {
+    page.classList.toggle("is-active", page.id === targetId);
+  }
+  for (const link of navLinks) {
+    const active = link.dataset.page === targetId;
+    link.classList.toggle("is-active", active);
+    link.setAttribute("aria-current", active ? "page" : "false");
+  }
+
+  if (push && typeof window !== "undefined" && location.hash !== `#${targetId}`) {
+    history.replaceState({}, "", `#${targetId}`);
+  }
+
+  if (focus) {
+    const target = CSS.escape ? CSS.escape(targetId) : targetId;
+    const heading = document.querySelector(`#${target} h2`);
+    if (heading) {
+      heading.setAttribute("tabindex", "-1");
+      heading.focus({ preventScroll: true });
+    }
+    const page = document.getElementById(targetId);
+    if (page) page.scrollIntoView({ behavior: "auto", block: "start" });
+  }
+}
+
+function bindDashboardNavigation() {
+  const links = document.querySelectorAll(".side-nav a[data-page]");
+  for (const link of links) {
+    const pageId = String(link.getAttribute("data-page") || "").trim();
+    if (!pageId) {
+      continue;
+    }
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      updateDashboardPage(pageId, { push: true, focus: true });
+    });
+  }
+
+  window.addEventListener("hashchange", () => {
+    updateDashboardPage(dashboardPageFromHash(), { push: false, focus: false });
+  });
+
+  updateDashboardPage(dashboardPageFromHash(), { push: false, focus: false });
+}
+
 function titleize(value) {
   return String(value || "")
     .split("-")
@@ -459,6 +521,15 @@ function renderStatus(data) {
   renderObservedGlyphRoutes(data.glyphos_telemetry || {}, data.meta?.dashboard_started_at || "");
   renderContextPipelineTrace(data.gateway_requests || {});
   renderContextGlyphosPipeline(deriveContextGlyphosPipeline(data), deriveContextModeMcp(data), data.glyphos_telemetry || {});
+  renderCloudProviders(data);
+
+  // Show local-first architecture banner when GlyphOS is available and configured
+  const glyphosAvailable = Boolean(data.glyphos_telemetry?.available);
+  const glyphosConfigured = Boolean(data.glyphos_config_exists);
+  const banner = $("#integration-local-first-banner");
+  if (banner) {
+    banner.classList.toggle("hidden", !(glyphosAvailable && glyphosConfigured));
+  }
 
   setText("#metric-model", current.alias || "stopped");
   setText("#metric-model-path", current.model || "No model running");
@@ -513,17 +584,37 @@ function renderStatus(data) {
   );
   setText("#api-base", data.gateway_api_base || data.api_base || "-");
   setText("#integration-endpoint-note", joinNotes([
-    "Default routed harness endpoint.",
+    "Routed through LMM + GlyphOS.",
     data.gateway_backend_api_base ? `backend ${data.gateway_backend_api_base}` : "",
     data.gateway_harness_mode_default ? `default ${routeModeLabel(data.gateway_harness_mode_default)}` : "",
+    "All requests benefit from context injection and Ψ encoding.",
   ]));
   const gateway = data.gateway || {};
   const gatewayRunning = gateway.running === "yes" || gateway.health === "yes";
-  setText("#gateway-status", gatewayRunning ? "Running" : "Stopped");
+  const glyphosAvailable = Boolean(data.glyphos_telemetry?.available);
+  const glyphosConfigured = Boolean(data.glyphos_config_exists);
+  const lmmBadge = $("#lmm-gateway-badge");
+  if (gatewayRunning && glyphosAvailable && glyphosConfigured) {
+    setText("#gateway-status", "Running");
+    lmmBadge.textContent = "Local-First · GlyphOS Enforced";
+    lmmBadge.classList.add("integration-badge-ready");
+    lmmBadge.classList.remove("integration-badge-muted", "integration-badge-warn");
+  } else if (gatewayRunning) {
+    setText("#gateway-status", "Running");
+    lmmBadge.textContent = "Running";
+    lmmBadge.classList.add("integration-badge-warn");
+    lmmBadge.classList.remove("integration-badge-ready", "integration-badge-muted");
+  } else {
+    setText("#gateway-status", "Stopped");
+    lmmBadge.textContent = "Local-First · GlyphOS Enforced";
+    lmmBadge.classList.add("integration-badge-muted");
+    lmmBadge.classList.remove("integration-badge-ready", "integration-badge-warn");
+  }
   setText("#gateway-route", joinNotes([
     data.gateway_api_base || "",
     data.gateway_backend_api_base ? `backend ${data.gateway_backend_api_base}` : "",
     gateway.health ? `health ${gateway.health}` : "",
+    glyphosAvailable ? "all local traffic → GlyphOS pipeline" : "",
   ]) || "-");
   setText("#opencode-model", data.opencode_model || "-");
   setText("#opencode-path", joinNotes([
@@ -766,6 +857,7 @@ function renderContextGlyphosPipeline(pipeline, contextModeMcp, glyphosTelemetry
   const card = $("#context-glyphos-card");
   const badge = $("#context-glyphos-badge");
   const blockersNode = $("#context-glyphos-blockers");
+  const qualityNode = $("#context-glyphos-quality");
   if (!card || !badge || !blockersNode) return;
 
   const status = pipeline.status || "off";
@@ -775,12 +867,12 @@ function renderContextGlyphosPipeline(pipeline, contextModeMcp, glyphosTelemetry
   card.classList.toggle("is-ready", status === "ready");
   card.classList.toggle("is-warn", status === "activation_pending");
   card.classList.toggle("is-off", status === "off");
-  badge.textContent = status === "ready" ? "Enabled" : status === "activation_pending" ? "Blocked" : "Off";
+  badge.textContent = status === "ready" ? "Enabled · Fully Integrated" : status === "activation_pending" ? "Blocked" : "Off";
   badge.classList.toggle("integration-badge-ready", status === "ready");
   badge.classList.toggle("integration-badge-warn", status === "activation_pending");
   badge.classList.toggle("integration-badge-muted", status === "off");
 
-  setText("#context-glyphos-status", status === "ready" ? "Combined pipeline configured" : status === "activation_pending" ? "Feature enabled, waiting on prerequisites" : "Combined pipeline disabled");
+  setText("#context-glyphos-status", status === "ready" ? "All local traffic flows through the complete sovereign pipeline" : status === "activation_pending" ? "Feature enabled, waiting on prerequisites" : "Combined pipeline disabled");
   setText("#context-glyphos-path", joinNotes([
     contextModeMcp.available ? "Context MCP present" : "Context MCP missing",
     contextModeMcp.lifecycle_matrix_exists ? "lifecycle check available" : "",
@@ -790,17 +882,30 @@ function renderContextGlyphosPipeline(pipeline, contextModeMcp, glyphosTelemetry
   const trace = pipeline.latest_gateway_trace && typeof pipeline.latest_gateway_trace === "object" ? pipeline.latest_gateway_trace : {};
   const traceSummary = pipeline.trace_summary || "";
   const compression = trace.glyph_encoding_used && trace.encoding_ratio
-    ? `compression ${Math.round(Number(trace.encoding_ratio) * 100)}%`
+    ? `Ψ compression ${Math.round(Number(trace.encoding_ratio) * 100)}%`
     : "";
+
+  // Context quality score display
+  if (qualityNode) {
+    const ctxQuality = pipeline.context_quality;
+    if (ctxQuality !== undefined && ctxQuality !== null) {
+      const pct = Math.round(Number(ctxQuality) * 100);
+      const label = pct >= 70 ? "chip chip-success" : pct >= 40 ? "chip chip-warning" : "chip chip-danger";
+      qualityNode.innerHTML = `<span class="${label}">Context quality: ${pct}%</span>`;
+    } else {
+      qualityNode.innerHTML = "";
+    }
+  }
+
   setText(
     "#context-glyphos-benefit",
     enabled
       ? (traceSummary
         ? joinNotes([traceSummary, compression, trace.latency_ms ? `${trace.latency_ms}ms` : ""])
         : observedAttempts > 0
-          ? `Glyph-routed traffic observed (${observedAttempts} attempts). Context and Glyph Encoding status appear after gateway requests.`
+          ? `Glyph-routed traffic observed (${observedAttempts} attempts). Context retrieval → Ψ Encoding → GlyphOS Routing → Local llama.cpp.`
           : "Feature is enabled. Gateway requests will show Context enriched, Glyph encoded, Glyph-routed, and Backend completed stages here.")
-      : "Activate Feature enables the combined setting and syncs GlyphOS configuration. Observed traffic appears separately.",
+      : "Activate Feature enables the combined setting and syncs GlyphOS configuration. Context retrieval → Ψ Encoding → GlyphOS Routing → Local llama.cpp.",
   );
 
   blockersNode.innerHTML = "";
@@ -808,7 +913,7 @@ function renderContextGlyphosPipeline(pipeline, contextModeMcp, glyphosTelemetry
   if (!blockers.length) {
     const chip = document.createElement("span");
     chip.className = "chip chip-success";
-    chip.textContent = "configured";
+    chip.textContent = "Fully integrated";
     blockersNode.append(chip);
     return;
   }
@@ -818,6 +923,71 @@ function renderContextGlyphosPipeline(pipeline, contextModeMcp, glyphosTelemetry
     chip.textContent = blocker;
     blockersNode.append(chip);
   });
+}
+
+function renderCloudProviders(data) {
+  const card = $("#cloud-providers-card");
+  const masterBadge = $("#cloud-master-badge");
+  const masterStatus = $("#cloud-master-status");
+  const preferredNode = $("#cloud-preferred");
+  const fallbackNode = $("#cloud-fallback-order");
+  const providerListNode = $("#cloud-provider-list");
+  if (!card || !masterBadge || !masterStatus) return;
+
+  const glyphosTelemetry = data.glyphos_telemetry || {};
+  const cloudProviders = glyphosTelemetry.cloud_providers || {};
+
+  // Determine master status
+  const masterEnabled = data.defaults?.GLYPHOS_CLOUD_ENABLED !== "0" && data.defaults?.GLYPHOS_CLOUD_ENABLED !== "false";
+  const preferred = data.defaults?.GLYPHOS_PREFERRED_CLOUD_PROVIDER || "xAI";
+  const providerNames = Object.keys(cloudProviders);
+
+  if (!providerNames.length && !masterEnabled) {
+    masterBadge.textContent = "Disabled";
+    masterBadge.classList.add("integration-badge-muted");
+    masterBadge.classList.remove("integration-badge-ready", "integration-badge-warn");
+    masterStatus.textContent = "Cloud routing disabled. Local-first only.";
+    setNodeHidden(preferredNode, true);
+    setNodeHidden(fallbackNode, true);
+    if (providerListNode) {
+      providerListNode.innerHTML = '<div class="telemetry-item muted">No cloud providers configured. Set API keys to enable cloud fallback.</div>';
+    }
+    return;
+  }
+
+  masterBadge.textContent = masterEnabled ? "Enabled" : "Disabled";
+  masterBadge.classList.toggle("integration-badge-ready", masterEnabled);
+  masterBadge.classList.toggle("integration-badge-muted", !masterEnabled);
+  masterBadge.classList.remove(masterEnabled ? "integration-badge-muted" : "integration-badge-ready");
+
+  masterStatus.textContent = masterEnabled
+    ? "Cloud fallback available when local inference is unavailable."
+    : "Cloud routing disabled. All traffic stays local.";
+
+  setNodeHidden(preferredNode, false);
+  preferredNode.textContent = `Preferred: ${preferred}`;
+
+  // Build fallback order
+  const enabledProviders = providerNames.filter((p) => cloudProviders[p]?.enabled || cloudProviders[p]?.configured);
+  setNodeHidden(fallbackNode, !enabledProviders.length);
+  if (enabledProviders.length) {
+    fallbackNode.textContent = `Fallback order: ${enabledProviders.join(" → ")}`;
+  }
+
+  // Per-provider status
+  if (providerListNode) {
+    const providerBits = providerNames.map((name) => {
+      const p = cloudProviders[name] || {};
+      const available = Boolean(p.available);
+      const enabled = Boolean(p.enabled);
+      const configured = Boolean(p.configured);
+      const keySource = p.api_key_source || (configured ? "from config" : "not set");
+      const statusLabel = available && enabled ? "Available" : available ? "Available (disabled)" : configured ? "Configured (disabled)" : "Not Available";
+      const chipClass = (available && enabled) ? "chip-success" : configured ? "chip-neutral" : "chip-danger";
+      return `<div class="telemetry-item"><span class="chip ${chipClass}">${escapeHtml(name)}</span> ${escapeHtml(statusLabel)} · ${escapeHtml(String(keySource))}</div>`;
+    }).join("");
+    providerListNode.innerHTML = providerBits || '<div class="telemetry-item muted">No providers detected.</div>';
+  }
 }
 
 function renderModels(models) {
@@ -1132,6 +1302,8 @@ function renderOperationActivity(activityStore, meta = {}) {
 function renderGlyphosTelemetry(glyphosTelemetry, data = {}) {
   const card = $("#glyphos-card");
   const badge = $("#glyphos-badge");
+  const enforcedBadge = $("#glyphos-enforced-badge");
+  const pipelineComponents = $("#glyphos-pipeline-components");
   const statusNode = $("#glyphos-status");
   const summaryNode = $("#glyphos-telemetry-summary");
   const reasonsNode = $("#glyphos-telemetry-reasons");
@@ -1149,8 +1321,22 @@ function renderGlyphosTelemetry(glyphosTelemetry, data = {}) {
   const reasonCounts = routing.fallback_reason_counts && typeof routing.fallback_reason_counts === "object" ? routing.fallback_reason_counts : {};
   const recent = Array.isArray(routing.recent_attempts) ? routing.recent_attempts.filter((item) => item && typeof item === "object") : [];
 
+  // Render pipeline components chips
+  if (pipelineComponents) {
+    const components = [];
+    components.push({ label: "Ψ Encoding", active: available });
+    components.push({ label: "Adaptive Routing", active: available });
+    const contextEnriched = Boolean(data.context_glyphos_pipeline?.enabled || contextGlyphosLocallyActivated());
+    components.push({ label: "Context Injection", active: contextEnriched });
+    pipelineComponents.innerHTML = components.map((c) => {
+      const cls = c.active ? "chip chip-success" : "chip chip-neutral";
+      return `<span class="${cls}">${c.label}</span>`;
+    }).join("");
+  }
+
   if (!available) {
-    if (badge) badge.textContent = installed ? "Refresh Needed" : "Unavailable";
+    if (badge) { badge.textContent = installed ? "Refresh Needed" : "Unavailable"; setNodeHidden(badge, false); }
+    if (enforcedBadge) setNodeHidden(enforcedBadge, true);
     if (statusNode) statusNode.textContent = installed
       ? "GlyphOS package files are present, but the dashboard cannot import them yet."
       : "GlyphOS integration files are missing.";
@@ -1162,17 +1348,20 @@ function renderGlyphosTelemetry(glyphosTelemetry, data = {}) {
     summaryNode.textContent = guidance || "Run the latest installer, then restart llama-model-web.";
     setNodeHidden(summaryNode, false);
     reasonsNode.innerHTML = importError
-      ? `<span class="chip chip-danger" title="${escapeHtml(importError)}">${escapeHtml(importError.slice(0, 96))}</span>`
+      ? `<span class="chip chip-danger" title="${escapeHtml(importError.slice(0, 96))}">${escapeHtml(importError.slice(0, 96))}</span>`
       : "";
     recentNode.innerHTML = "";
     return;
   }
 
-  if (badge) badge.textContent = data.glyphos_config_exists ? "Configured" : "Installed";
+  // Show enforced badge when GlyphOS is available and configured
+  if (enforcedBadge) setNodeHidden(enforcedBadge, false);
+
+  if (badge) { badge.textContent = data.glyphos_config_exists ? "Active" : "Installed"; }
   if (statusNode) {
     statusNode.textContent = data.glyphos_config_exists
-      ? (total > 0 ? "Configured for local routing" : "Configured for local routing. No traffic observed yet.")
-      : "GlyphOS integration installed. Sync GlyphOS to write local routing config.";
+      ? "Active · Local-First Pipeline — All local traffic flows through GlyphOS"
+      : "GlyphOS integration installed. Sync GlyphOS to enable local-first routing.";
   }
   card?.classList.add("is-ready");
   card?.classList.remove("is-warn", "is-off");
@@ -2425,6 +2614,7 @@ async function main() {
   loadCleanupRetentionPreference();
   loadRemotePreferences();
   renderActivityPanelVisibility();
+  bindDashboardNavigation();
   bindEvents();
   await refreshState();
   renderDiscovery(state.discovery);

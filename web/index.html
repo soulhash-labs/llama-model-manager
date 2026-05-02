@@ -133,19 +133,23 @@
             <strong>Control Surface</strong>
             <span>Jump between dense work zones without scanning every card.</span>
           </div>
-          <a href="#runtime-live">Overview</a>
-          <a href="#dashboard-service-panel">Service</a>
-          <a href="#transfers-remote">Transfers</a>
-          <a href="#transfers-downloads">Downloads</a>
-          <a href="#models-registry">Models</a>
-          <a href="#settings-defaults">Settings</a>
-          <a href="#integrations-panel">Integrations</a>
-          <a href="#gateway-trace-panel">Gateway Trace</a>
-          <a href="#audit-panel">Audit</a>
+          <a href="#runtime-live" data-page="runtime-live">Overview</a>
+          <a href="#dashboard-service-panel" data-page="dashboard-service-panel">Service</a>
+          <a href="#transfers-remote" data-page="transfers-remote">Remote Models</a>
+          <a href="#transfers-downloads" data-page="transfers-downloads">Download Jobs</a>
+          <a href="#models-registry" data-page="models-registry">Model Registry</a>
+          <a href="#models-editor" data-page="models-editor">Model Editor</a>
+          <a href="#models-discovery" data-page="models-discovery">Discovery</a>
+          <a href="#settings-defaults" data-page="settings-defaults">Settings</a>
+          <a href="#integrations-panel" data-page="integrations-panel">Integrations</a>
+          <a href="#glyph-routes-panel" data-page="glyph-routes-panel">Observed Glyph Routes</a>
+          <a href="#gateway-trace-panel" data-page="gateway-trace-panel">Gateway Trace</a>
+          <a href="#audit-panel" data-page="audit-panel">Audit</a>
+          <a href="#session-handoffs-panel" data-page="session-handoffs-panel">Session Handoffs</a>
         </nav>
 
-      <main id="dashboard-main" class="layout operator-main">
-        <section id="runtime-live" class="panel status-panel">
+      <main id="dashboard-main" class="operator-main">
+        <section id="runtime-live" class="panel status-panel dashboard-page is-active">
           <div class="panel-head panel-head-anchored">
             <div>
               <span class="panel-tag">Engine Room</span>
@@ -211,7 +215,7 @@
           <pre id="logs-output" class="log-box hidden"></pre>
         </section>
 
-        <section id="dashboard-service-panel" class="panel">
+        <section id="dashboard-service-panel" class="panel dashboard-page">
           <div class="panel-head panel-head-anchored">
             <div>
               <span class="panel-tag">Optional</span>
@@ -255,7 +259,7 @@
           <pre id="service-logs-output" class="log-box hidden"></pre>
         </section>
 
-        <section id="transfers-remote" class="panel">
+        <section id="transfers-remote" class="panel dashboard-page">
           <div class="panel-head panel-head-anchored">
             <div>
               <span class="panel-tag">Transfers</span>
@@ -306,7 +310,7 @@
           </div>
         </section>
 
-        <section id="transfers-downloads" class="panel">
+        <section id="transfers-downloads" class="panel dashboard-page">
           <div class="panel-head panel-head-anchored">
             <div>
               <span class="panel-tag">Transfers</span>
@@ -390,7 +394,7 @@
           </div>
         </section>
 
-        <section id="models-registry" class="panel">
+        <section id="models-registry" class="panel dashboard-page">
           <div class="panel-head">
             <div>
               <span class="panel-tag">Registry</span>
@@ -413,7 +417,7 @@
           </div>
         </section>
 
-        <section id="models-editor" class="panel">
+        <section id="models-editor" class="panel dashboard-page">
           <div class="panel-head">
             <div>
               <span class="panel-tag">Tune Bay</span>
@@ -488,7 +492,7 @@
           </form>
         </section>
 
-        <section id="models-discovery" class="panel">
+        <section id="models-discovery" class="panel dashboard-page">
           <div class="panel-head">
             <div>
               <span class="panel-tag">Intake</span>
@@ -524,7 +528,7 @@
           </div>
         </section>
 
-        <section id="settings-defaults" class="panel">
+        <section id="settings-defaults" class="panel dashboard-page">
           <div class="panel-head">
             <div>
               <span class="panel-tag">Baseline</span>
@@ -704,7 +708,7 @@
           </form>
         </section>
 
-        <section id="integrations-panel" class="panel">
+        <section id="integrations-panel" class="panel dashboard-page">
           <div class="panel-head">
             <div>
               <span class="panel-tag">Wiring</span>
@@ -712,14 +716,21 @@
               <p>Use the live endpoint below for tools that expect an OpenAI-compatible local server.</p>
             </div>
           </div>
+          <div id="integration-local-first-banner" class="notice-integration-banner hidden">
+            <strong>Local-First Architecture Active</strong>
+            All local <code>llama.cpp</code> inference routes through the <strong>Unified GlyphOS Pipeline</strong> — with Ψ encoding, context awareness, and intelligent routing.
+          </div>
           <div class="integration-grid">
             <article class="integration-card">
-              <span class="metric-label">Harness Gateway</span>
+              <span class="metric-label">OpenCode / Harness Gateway</span>
               <code id="api-base">-</code>
-              <span id="integration-endpoint-note" class="metric-note">OpenAI-compatible local endpoint.</span>
+              <span id="integration-endpoint-note" class="metric-note">-</span>
             </article>
             <article class="integration-card">
-              <span class="metric-label">LMM Gateway</span>
+              <span class="metric-label">LMM Gateway + GlyphOS</span>
+              <div class="integration-chip-row">
+                <span id="lmm-gateway-badge" class="integration-badge integration-badge-muted">-</span>
+              </div>
               <code id="gateway-status">-</code>
               <span id="gateway-route" class="metric-note">-</span>
               <div class="inline-actions integration-actions">
@@ -774,11 +785,13 @@
             <article id="glyphos-card" class="integration-card pipeline-card">
               <span class="metric-label">GlyphOS AI Compute</span>
               <div class="integration-chip-row">
-                <span id="glyphos-badge" class="integration-badge integration-badge-muted">Unavailable</span>
+                <span id="glyphos-badge" class="integration-badge integration-badge-muted">-</span>
+                <span id="glyphos-enforced-badge" class="integration-badge integration-badge-enforced hidden">Enforced</span>
               </div>
               <code id="glyphos-status">-</code>
               <code id="glyphos-model">-</code>
               <span id="glyphos-path" class="metric-note">-</span>
+              <div id="glyphos-pipeline-components" class="chip-row"></div>
               <span id="glyphos-telemetry-summary" class="metric-note">-</span>
               <div id="glyphos-telemetry-reasons" class="chip-row"></div>
               <div id="glyphos-telemetry-recent" class="telemetry-list"></div>
@@ -787,23 +800,34 @@
               </div>
             </article>
             <article id="context-glyphos-card" class="integration-card pipeline-card">
-              <span class="metric-label">Context + Glyph Encoding + GlyphOS</span>
+              <span class="metric-label">Context + GlyphOS Pipeline</span>
               <div class="integration-chip-row">
                 <span id="context-glyphos-badge" class="integration-badge">Off</span>
               </div>
               <code id="context-glyphos-status">-</code>
               <span id="context-glyphos-path" class="metric-note">-</span>
               <span id="context-glyphos-benefit" class="metric-note">-</span>
+              <div id="context-glyphos-quality" class="metric-note"></div>
               <div id="context-glyphos-blockers" class="chip-row"></div>
               <div class="inline-actions integration-actions">
-                <button id="sync-glyphos-combined" class="button button-small button-primary" title="Activate the GlyphOS side of the bundled Context + GlyphOS workflow by syncing the active local runtime.">Activate Feature</button>
+                <button id="sync-glyphos-combined" class="button button-small button-primary" title="Activate the combined Context + GlyphOS pipeline: enables the setting, syncs GlyphOS, and refreshes the readiness card.">Activate Feature</button>
               </div>
+            </article>
+            <article id="cloud-providers-card" class="integration-card">
+              <span class="metric-label">Cloud Providers</span>
+              <div class="integration-chip-row">
+                <span id="cloud-master-badge" class="integration-badge integration-badge-muted">-</span>
+              </div>
+              <code id="cloud-master-status">-</code>
+              <span id="cloud-preferred" class="metric-note">-</span>
+              <span id="cloud-fallback-order" class="metric-note">-</span>
+              <div id="cloud-provider-list" class="telemetry-list"></div>
             </article>
           </div>
           <pre id="claude-gateway-logs-output" class="log-box hidden"></pre>
         </section>
 
-        <section id="glyph-routes-panel" class="panel observed-panel">
+        <section id="glyph-routes-panel" class="panel observed-panel dashboard-page">
           <div class="panel-head">
             <div>
               <span class="panel-tag">Observed Traffic</span>
@@ -831,7 +855,7 @@
           <div id="observed-glyph-feed" class="telemetry-list observed-feed" aria-live="polite"></div>
         </section>
 
-        <section id="gateway-trace-panel" class="panel observed-panel">
+        <section id="gateway-trace-panel" class="panel observed-panel dashboard-page">
           <div class="panel-head">
             <div>
               <span class="panel-tag">Gateway Trace</span>
@@ -863,7 +887,7 @@
           </div>
         </section>
 
-        <section id="audit-panel" class="panel activity-panel is-collapsed">
+        <section id="audit-panel" class="panel activity-panel is-collapsed dashboard-page">
           <div class="panel-head panel-head-anchored">
             <div>
               <span class="panel-tag">Audit</span>
@@ -881,7 +905,7 @@
         </section>
 
         <!-- Phase 06: Session handoff panel -->
-        <section id="session-handoffs-panel" class="panel session-panel is-collapsed">
+        <section id="session-handoffs-panel" class="panel session-panel is-collapsed dashboard-page">
           <div class="panel-head panel-head-anchored">
             <div>
               <span class="panel-tag">Session Handoffs</span>
