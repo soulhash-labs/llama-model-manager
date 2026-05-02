@@ -52,7 +52,21 @@ export async function fetchAndCache(url: string, cacheDir: string, force = false
     }
   }
 
-  const response = await fetch(url);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+
+  let response: Response;
+  try {
+    response = await fetch(url, { signal: controller.signal });
+  } catch (err) {
+    clearTimeout(timeout);
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`Fetch timeout after 30s: ${url}`);
+    }
+    throw err;
+  }
+  clearTimeout(timeout);
+
   const body = await response.text();
   const cached: CachedFetch = {
     status: response.status,

@@ -19117,7 +19117,19 @@ async function fetchAndCache(url, cacheDir, force = false) {
     } catch {
     }
   }
-  const response = await fetch(url);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3e4);
+  let response;
+  try {
+    response = await fetch(url, { signal: controller.signal });
+  } catch (err) {
+    clearTimeout(timeout);
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`Fetch timeout after 30s: ${url}`);
+    }
+    throw err;
+  }
+  clearTimeout(timeout);
   const body = await response.text();
   const cached2 = {
     status: response.status,
@@ -19178,7 +19190,10 @@ var DEFAULT_DENY_BASH = [
   "\\b(shutdown|reboot|poweroff|halt)\\b",
   "\\bmkfs\\b",
   "\\bdd\\s",
-  "\\brm\\s+-rf",
+  "\\brm\\s+-[a-zA-Z]*[rRfF]",
+  "\\brm\\s+-r",
+  "\\brm\\s+-f",
+  "\\brm\\s+--recursive",
   "\\bchmod\\s+(-R)?\\s*777",
   "\\bchown\\s",
   "\\biptables\\b",
@@ -19346,7 +19361,7 @@ async function runInSandbox(input) {
   try {
     const plan = buildCommand(input, workdir);
     const commandLine = `${plan.command} ${plan.args.join(" ")}`;
-    if (input.language === "shell" && !isCommandAllowed(commandLine, input.security).allowed) {
+    if (!isCommandAllowed(commandLine, input.security).allowed) {
       return {
         output: {
           stdout: "",
@@ -19558,6 +19573,10 @@ async function handleBatchTool(params) {
         returnedBytesItem = clampBytes(JSON.stringify({ snippets }).length);
         indexedBytesItem = Buffer.byteLength(execution.output.stdout || "", "utf8");
       } catch {
+        policy.indexed = false;
+        policy.disposition = "inline";
+        returned = execution.output.stdout;
+        returnedBytesItem = clampBytes(Buffer.byteLength(returned, "utf8"));
       }
     }
     const shellRun = {
@@ -20042,7 +20061,7 @@ async function handleDashboardOpenTool(params) {
     };
   }
   if (dashboardServer) {
-    dashboardServer.close();
+    await new Promise((resolve3) => dashboardServer.close(() => resolve3()));
     dashboardServer = null;
   }
   const typeFor = (pathname) => {
@@ -20067,8 +20086,15 @@ async function handleDashboardOpenTool(params) {
       response.end("not found");
       return;
     }
+    const stream = createReadStream(filePath);
+    stream.on("error", () => {
+      if (!response.headersSent) {
+        response.writeHead(500, { "Content-Type": "text/plain" });
+        response.end("internal server error");
+      }
+    });
     response.writeHead(200, { "Content-Type": typeFor(filePath) });
-    createReadStream(filePath).pipe(response);
+    stream.pipe(response);
   });
   await new Promise((resolve3, reject) => {
     dashboardServer.listen(port, host, (error2) => {
@@ -20158,10 +20184,13 @@ async function executeAndIndex(params) {
       returnedBytes = clampBytes(Buffer.byteLength(JSON.stringify({ snippets, index }), "utf8"));
       indexedBytes = Buffer.byteLength(execution.output.stdout || "", "utf8");
     } catch (idxErr) {
+      policy.indexed = false;
+      policy.disposition = "inline";
       error2 = error2 ?? {
         code: "DB_UNAVAILABLE",
         message: idxErr instanceof Error ? idxErr.message : "index backend unavailable"
       };
+      returned = execution.output.stdout;
       returnedBytes = Buffer.byteLength(returned, "utf8");
     }
   }
@@ -20228,32 +20257,30 @@ async function handleExecute(params) {
       error: toolError("INVALID_INPUT", "project root missing or inaccessible")
     };
   }
-  if (params.request.language === "shell") {
-    const commandCheck = isCommandAllowed(params.request.code, security);
-    if (!commandCheck.allowed) {
-      return {
-        ok: false,
-        tool: "ctx_execute",
-        request_id: params.requestId,
-        meta: {
-          project_hash: params.context.project_hash,
-          workdir: "",
-          timeout_ms: params.request.timeout_ms || 3e4,
-          exit_code: null,
-          timed_out: false,
-          killed: false,
-          pid: null,
-          stdout_bytes: 0,
-          returned_bytes: 0,
-          fs_bytes_written: 0,
-          net_bytes: null,
-          duration_ms: 0,
-          indexed: false,
-          disposition: "inline"
-        },
-        error: toolError("DENIED", commandCheck.reason || "command denied")
-      };
-    }
+  const commandCheck = isCommandAllowed(params.request.code, security);
+  if (!commandCheck.allowed) {
+    return {
+      ok: false,
+      tool: "ctx_execute",
+      request_id: params.requestId,
+      meta: {
+        project_hash: params.context.project_hash,
+        workdir: "",
+        timeout_ms: params.request.timeout_ms || 3e4,
+        exit_code: null,
+        timed_out: false,
+        killed: false,
+        pid: null,
+        stdout_bytes: 0,
+        returned_bytes: 0,
+        fs_bytes_written: 0,
+        net_bytes: null,
+        duration_ms: 0,
+        indexed: false,
+        disposition: "inline"
+      },
+      error: toolError("DENIED", commandCheck.reason || "command denied")
+    };
   }
   const safeTitle = params.request.title || `execute-${randomBytes5(4).toString("hex")}`;
   return executeAndIndex({

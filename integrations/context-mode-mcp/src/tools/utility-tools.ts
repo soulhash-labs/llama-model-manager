@@ -185,7 +185,11 @@ export async function handleBatchTool(params: {
         returnedBytesItem = clampBytes(JSON.stringify({ snippets }).length);
         indexedBytesItem = Buffer.byteLength(execution.output.stdout || "", "utf8");
       } catch {
-        // soft-fail to inline output
+        // Indexing failed — revert to inline so output isn't lost.
+        policy.indexed = false;
+        policy.disposition = "inline";
+        returned = execution.output.stdout;
+        returnedBytesItem = clampBytes(Buffer.byteLength(returned, "utf8"));
       }
     }
 
@@ -779,7 +783,7 @@ export async function handleDashboardOpenTool(params: {
   }
 
   if (dashboardServer) {
-    dashboardServer.close();
+    await new Promise<void>((resolve) => dashboardServer!.close(() => resolve()));
     dashboardServer = null;
   }
 
@@ -808,8 +812,15 @@ export async function handleDashboardOpenTool(params: {
       return;
     }
 
+    const stream = createReadStream(filePath);
+    stream.on("error", () => {
+      if (!response.headersSent) {
+        response.writeHead(500, { "Content-Type": "text/plain" });
+        response.end("internal server error");
+      }
+    });
     response.writeHead(200, { "Content-Type": typeFor(filePath) });
-    createReadStream(filePath).pipe(response);
+    stream.pipe(response);
   });
 
   await new Promise<void>((resolve, reject) => {

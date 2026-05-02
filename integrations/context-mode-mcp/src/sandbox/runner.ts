@@ -142,7 +142,9 @@ export async function runInSandbox(input: ExecutionInput): Promise<{ output: Exe
     const plan = buildCommand(input, workdir);
 
     const commandLine = `${plan.command} ${plan.args.join(" ")}`;
-    if (input.language === "shell" && !isCommandAllowed(commandLine, input.security).allowed) {
+    // Security check — applies to ALL languages for defense-in-depth.
+    // Even if the caller skipped validation, the sandbox enforces deny patterns.
+    if (!isCommandAllowed(commandLine, input.security).allowed) {
       return {
         output: {
           stdout: "",

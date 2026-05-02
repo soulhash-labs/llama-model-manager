@@ -122,10 +122,14 @@ async function executeAndIndex(params: {
       returnedBytes = clampBytes(Buffer.byteLength(JSON.stringify({ snippets, index }), "utf8"));
       indexedBytes = Buffer.byteLength(execution.output.stdout || "", "utf8");
     } catch (idxErr) {
+      // Indexing failed — revert to inline so output isn't lost.
+      policy.indexed = false;
+      policy.disposition = "inline";
       error = error ?? {
         code: "DB_UNAVAILABLE",
         message: idxErr instanceof Error ? idxErr.message : "index backend unavailable",
       };
+      returned = execution.output.stdout;
       returnedBytes = Buffer.byteLength(returned, "utf8");
     }
   }
@@ -204,32 +208,33 @@ export async function handleExecute(params: {
     };
   }
 
-  if (params.request.language === "shell") {
-    const commandCheck = isCommandAllowed(params.request.code, security);
-    if (!commandCheck.allowed) {
-      return {
-        ok: false,
-        tool: "ctx_execute" as const,
-        request_id: params.requestId,
-        meta: {
-          project_hash: params.context.project_hash,
-          workdir: "",
-          timeout_ms: params.request.timeout_ms || 30_000,
-          exit_code: null,
-          timed_out: false,
-          killed: false,
-          pid: null,
-          stdout_bytes: 0,
-          returned_bytes: 0,
-          fs_bytes_written: 0,
-          net_bytes: null,
-          duration_ms: 0,
-          indexed: false,
-          disposition: "inline",
-        },
-        error: toolError("DENIED", commandCheck.reason || "command denied"),
-      };
-    }
+  // Security checks apply to ALL languages — not just shell.
+  // Non-shell languages can still execute dangerous operations (os.system, etc.)
+  // so deny patterns must always be enforced.
+  const commandCheck = isCommandAllowed(params.request.code, security);
+  if (!commandCheck.allowed) {
+    return {
+      ok: false,
+      tool: "ctx_execute" as const,
+      request_id: params.requestId,
+      meta: {
+        project_hash: params.context.project_hash,
+        workdir: "",
+        timeout_ms: params.request.timeout_ms || 30_000,
+        exit_code: null,
+        timed_out: false,
+        killed: false,
+        pid: null,
+        stdout_bytes: 0,
+        returned_bytes: 0,
+        fs_bytes_written: 0,
+        net_bytes: null,
+        duration_ms: 0,
+        indexed: false,
+        disposition: "inline",
+      },
+      error: toolError("DENIED", commandCheck.reason || "command denied"),
+    };
   }
 
   const safeTitle = params.request.title || `execute-${randomBytes(4).toString("hex")}`;
