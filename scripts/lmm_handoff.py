@@ -32,7 +32,7 @@ class HandoffSummary:
         prompt = str(record.get("prompt", ""))
         prompt_preview = prompt[:200] + ("…" if len(prompt) > 200 else "")
 
-        duration_ms = record.get("duration_ms")
+        duration_ms = record.get("duration_ms") or record.get("latency_ms")
         if duration_ms is not None:
             duration_human = _format_duration(int(duration_ms))
         else:

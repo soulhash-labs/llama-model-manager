@@ -4,19 +4,20 @@ Adaptive routing across local and external AI backends.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from dataclasses import dataclass
-from enum import Enum
 import fcntl
 import json
 import os
-from pathlib import Path
 import threading
 import time
-from typing import Any, Dict, Iterator, Optional
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Any
 
 from .api_client import create_configured_clients
-from .glyph_to_prompt import glyph_to_prompt, build_prompt_from_packet
+from .glyph_to_prompt import build_prompt_from_packet, glyph_to_prompt
 
 
 class ComputeTarget(Enum):
@@ -44,8 +45,8 @@ class RoutingResult:
     response: str
     routing_reason: str
     routing_reason_code: str
-    latency_ms: Optional[int] = None
-    tokens_used: Optional[int] = None
+    latency_ms: int | None = None
+    tokens_used: int | None = None
 
 
 _GLOBAL_ROUTING_HISTORY_LIMIT = 40
@@ -179,7 +180,11 @@ def routing_telemetry_snapshot(limit: int = 10) -> dict[str, Any]:
             for existing in list(_GLOBAL_ROUTING_STATE.get("recent_attempts", [])):
                 if existing not in recent_attempts:
                     recent_attempts.append(existing)
-            recent_attempts = sorted(recent_attempts, key=lambda item: float(item.get("time", 0)) if isinstance(item, dict) else 0, reverse=True)
+            recent_attempts = sorted(
+                recent_attempts,
+                key=lambda item: float(item.get("time", 0)) if isinstance(item, dict) else 0,
+                reverse=True,
+            )
             recent_attempts = recent_attempts[: max(0, int(limit))]
 
     return {
@@ -208,7 +213,7 @@ class AdaptiveRouter:
         openai_client=None,
         anthropic_client=None,
         xai_client=None,
-        config: Optional[RoutingConfig] = None,
+        config: RoutingConfig | None = None,
     ):
         self.llamacpp = llamacpp_client
         self.openai = openai_client
@@ -225,7 +230,7 @@ class AdaptiveRouter:
         reason_code: str,
         *,
         is_error: bool = False,
-        latency_ms: Optional[int] = None,
+        latency_ms: int | None = None,
         error_message: str = "",
     ) -> None:
         normalized = _normalize_reason_code(reason_code)
@@ -245,7 +250,7 @@ class AdaptiveRouter:
             "time": time.time(),
         }
         self._attempt_history.insert(0, record)
-        del self._attempt_history[self._ATTEMPT_HISTORY_LIMIT:]
+        del self._attempt_history[self._ATTEMPT_HISTORY_LIMIT :]
 
         _record_global_attempt(record)
 
@@ -257,12 +262,22 @@ class AdaptiveRouter:
             "recent_attempts": list(self._attempt_history),
         }
 
-    def route(self, glyph_packet, prompt: Optional[str] = None, context_payload=None, **generation_kwargs: Any) -> RoutingResult:
+    def route(
+        self, glyph_packet, prompt: str | None = None, context_payload=None, **generation_kwargs: Any
+    ) -> RoutingResult:
         """Route a glyph packet to the appropriate backend.
 
-        When context_payload is provided, encoding is applied ONLY for
-        local llama.cpp targets. Cloud backends always receive raw context.
-        When context_payload is None (backward compat), behavior is unchanged.
+        High coherence requests ALWAYS use the Unified GlyphOS pipeline
+        (encoding-aware prompt building). If context_payload is None for a
+        high-coherence route, a minimal ContextPayload is created to ensure
+        the full pipeline runs.
+
+        When context_payload is provided for non-high-coherence routes:
+        - Local llama.cpp: encoding is applied via build_prompt_from_packet
+        - Cloud backends: raw context only, encoding skipped
+
+        When context_payload is None for non-high-coherence routes:
+        backward-compatible behavior (no encoding awareness).
         """
         psi = self._packet_value(glyph_packet, "psi_coherence", "psiCoherence", 0.5)
         action = glyph_packet.action
@@ -270,8 +285,19 @@ class AdaptiveRouter:
         # --- Determine target first, then apply encoding ---
         if psi >= self.config.high_coherence_threshold and self.llamacpp:
             target = ComputeTarget.LOCAL_LLAMACPP
-            reason = "high coherence - prefer local llama.cpp"
-            reason_code = "high_coherence_local"
+            reason = "high coherence - Unified GlyphOS pipeline"
+            reason_code = "high_coherence_glyphos_pipeline"
+            # Ensure full pipeline runs even if context_payload was not provided.
+            # High coherence MUST go through encoding-aware routing, never bypass
+            # to direct llama.cpp calls.
+            if context_payload is None:
+                from glyphos_ai.glyph.types import ContextPayload
+
+                context_payload = ContextPayload(
+                    raw_context="",
+                    raw_context_chars=0,
+                    encoding_status="none",
+                )
         elif action in self.config.complex_actions:
             if self.anthropic:
                 target = ComputeTarget.EXTERNAL_ANTHROPIC
@@ -324,6 +350,7 @@ class AdaptiveRouter:
             else:
                 # Cloud: force raw context, skip encoding
                 from glyphos_ai.glyph.types import ContextPayload
+
                 raw_context = getattr(context_payload, "raw_context", "")
                 raw_cp = ContextPayload(
                     raw_context=raw_context,
@@ -355,26 +382,36 @@ class AdaptiveRouter:
                 routing_reason_code="no_backends_configured",
             )
 
-    def route_stream(self, glyph_packet, prompt: Optional[str] = None, context_payload=None, **generation_kwargs: Any) -> tuple[dict[str, Any], Iterator[str]]:
+    def route_stream(
+        self, glyph_packet, prompt: str | None = None, context_payload=None, **generation_kwargs: Any
+    ) -> tuple[dict[str, Any], Iterator[str]]:
         """Stream routing with encoding awareness.
 
         Streaming is only available for local llama.cpp.
-        When context_payload is provided, encoding is applied for local target.
+        High coherence requests ALWAYS use the Unified GlyphOS pipeline.
         """
         if self.llamacpp:
-            # Streaming only works with local llama.cpp — always encode if payload present
-            if context_payload is not None:
-                built_prompt = build_prompt_from_packet(glyph_packet, context_payload, prompt or "")
-                glyph_packet.encoding_status = context_payload.encoding_status
-                glyph_packet.encoding_format = context_payload.encoding_format
-                glyph_packet.encoding_ratio = context_payload.encoding_ratio
-            else:
-                built_prompt = prompt if prompt is not None else glyph_to_prompt(glyph_packet)
-
             psi = self._packet_value(glyph_packet, "psi_coherence", "psiCoherence", 0.5)
+
+            # High coherence MUST use full pipeline — ensure context_payload exists
+            if context_payload is None:
+                from glyphos_ai.glyph.types import ContextPayload
+
+                context_payload = ContextPayload(
+                    raw_context="",
+                    raw_context_chars=0,
+                    encoding_status="none",
+                )
+
+            # Always use encoding-aware prompt builder for streaming
+            built_prompt = build_prompt_from_packet(glyph_packet, context_payload, prompt or "")
+            glyph_packet.encoding_status = context_payload.encoding_status
+            glyph_packet.encoding_format = context_payload.encoding_format
+            glyph_packet.encoding_ratio = context_payload.encoding_ratio
+
             if psi >= self.config.high_coherence_threshold:
-                reason = "high coherence - prefer local llama.cpp"
-                reason_code = "high_coherence_local"
+                reason = "high coherence - Unified GlyphOS pipeline"
+                reason_code = "high_coherence_glyphos_pipeline"
             else:
                 reason = "default - use local llama.cpp"
                 reason_code = "default_local"
@@ -382,7 +419,9 @@ class AdaptiveRouter:
 
         raise RuntimeError("no streaming-capable local llama.cpp backend is configured")
 
-    def _route_llamacpp_stream(self, prompt: str, reason: str, reason_code: str, **generation_kwargs: Any) -> tuple[dict[str, Any], Iterator[str]]:
+    def _route_llamacpp_stream(
+        self, prompt: str, reason: str, reason_code: str, **generation_kwargs: Any
+    ) -> tuple[dict[str, Any], Iterator[str]]:
         if not hasattr(self.llamacpp, "stream_generate"):
             raise RuntimeError("local llama.cpp client does not support streaming")
         start = time.perf_counter()
@@ -418,7 +457,9 @@ class AdaptiveRouter:
         start = time.perf_counter()
         try:
             response = self.llamacpp.generate(prompt, **generation_kwargs)
-            self._track_route(ComputeTarget.LOCAL_LLAMACPP, reason_code, latency_ms=round((time.perf_counter() - start) * 1000))
+            self._track_route(
+                ComputeTarget.LOCAL_LLAMACPP, reason_code, latency_ms=round((time.perf_counter() - start) * 1000)
+            )
             return RoutingResult(
                 target=ComputeTarget.LOCAL_LLAMACPP,
                 response=response,
@@ -444,7 +485,9 @@ class AdaptiveRouter:
         start = time.perf_counter()
         try:
             response = self.openai.generate(prompt, **generation_kwargs)
-            self._track_route(ComputeTarget.EXTERNAL_OPENAI, reason_code, latency_ms=round((time.perf_counter() - start) * 1000))
+            self._track_route(
+                ComputeTarget.EXTERNAL_OPENAI, reason_code, latency_ms=round((time.perf_counter() - start) * 1000)
+            )
             return RoutingResult(
                 target=ComputeTarget.EXTERNAL_OPENAI,
                 response=response,
@@ -470,7 +513,9 @@ class AdaptiveRouter:
         start = time.perf_counter()
         try:
             response = self.anthropic.generate(prompt, **generation_kwargs)
-            self._track_route(ComputeTarget.EXTERNAL_ANTHROPIC, reason_code, latency_ms=round((time.perf_counter() - start) * 1000))
+            self._track_route(
+                ComputeTarget.EXTERNAL_ANTHROPIC, reason_code, latency_ms=round((time.perf_counter() - start) * 1000)
+            )
             return RoutingResult(
                 target=ComputeTarget.EXTERNAL_ANTHROPIC,
                 response=response,
@@ -496,7 +541,9 @@ class AdaptiveRouter:
         start = time.perf_counter()
         try:
             response = self.xai.generate(prompt, **generation_kwargs)
-            self._track_route(ComputeTarget.EXTERNAL_XAI, reason_code, latency_ms=round((time.perf_counter() - start) * 1000))
+            self._track_route(
+                ComputeTarget.EXTERNAL_XAI, reason_code, latency_ms=round((time.perf_counter() - start) * 1000)
+            )
             return RoutingResult(
                 target=ComputeTarget.EXTERNAL_XAI,
                 response=response,
@@ -528,7 +575,7 @@ class AdaptiveRouter:
             return camel_value
         return default
 
-    def get_status(self) -> Dict[str, bool]:
+    def get_status(self) -> dict[str, bool]:
         return {
             "llamacpp": self.llamacpp is not None,
             "openai": self.openai is not None,
@@ -538,15 +585,15 @@ class AdaptiveRouter:
 
 
 def _packet_destination(glyph_packet: Any) -> str:
-    return str(getattr(glyph_packet, 'destination', '') or '').strip().upper()
+    return str(getattr(glyph_packet, "destination", "") or "").strip().upper()
 
 
-def _select_lane(clients: Dict[str, Any], prefix: str, glyph_packet: Any):
+def _select_lane(clients: dict[str, Any], prefix: str, glyph_packet: Any):
     mapping = {
-        'AURORA': f'{prefix}-aurora',
-        'TERRAN': f'{prefix}-terran',
-        'STARLIGHT': f'{prefix}-starlight',
-        'POLARIS': f'{prefix}-polaris',
+        "AURORA": f"{prefix}-aurora",
+        "TERRAN": f"{prefix}-terran",
+        "STARLIGHT": f"{prefix}-starlight",
+        "POLARIS": f"{prefix}-polaris",
     }
     preferred = mapping.get(_packet_destination(glyph_packet))
     if preferred and preferred in clients:
@@ -554,22 +601,24 @@ def _select_lane(clients: Dict[str, Any], prefix: str, glyph_packet: Any):
     return clients.get(prefix)
 
 
-def build_router_from_env(config: Optional[RoutingConfig] = None, glyph_packet: Any | None = None) -> AdaptiveRouter:
+def build_router_from_env(config: RoutingConfig | None = None, glyph_packet: Any | None = None) -> AdaptiveRouter:
     clients = create_configured_clients()
-    selected_llamacpp = _select_lane(clients, 'llamacpp', glyph_packet) if glyph_packet is not None else clients.get('llamacpp')
+    selected_llamacpp = (
+        _select_lane(clients, "llamacpp", glyph_packet) if glyph_packet is not None else clients.get("llamacpp")
+    )
     return AdaptiveRouter(
         llamacpp_client=selected_llamacpp,
-        openai_client=clients.get('openai'),
-        anthropic_client=clients.get('anthropic'),
-        xai_client=clients.get('xai'),
+        openai_client=clients.get("openai"),
+        anthropic_client=clients.get("anthropic"),
+        xai_client=clients.get("xai"),
         config=config,
     )
 
 
 def route_with_configured_clients(
     glyph_packet,
-    prompt: Optional[str] = None,
-    config: Optional[RoutingConfig] = None,
+    prompt: str | None = None,
+    config: RoutingConfig | None = None,
     **generation_kwargs: Any,
 ) -> RoutingResult:
     router = build_router_from_env(config=config, glyph_packet=glyph_packet)
