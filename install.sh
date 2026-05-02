@@ -72,11 +72,28 @@ safe_install() {
     local mode="$1"
     local src="$2"
     local dest="$3"
-    if command -v install >/dev/null 2>&1 && install -m "$mode" "$src" "$dest" 2>/dev/null; then
+
+    # Guard: source must exist
+    if [[ ! -e "$src" ]]; then
+        printf 'warning: source file not found: %s (skipping)\n' "$src" >&2
+        return 1
+    fi
+
+    # Try native install first (preferred)
+    if command -v install >/dev/null 2>&1; then
+        if install -m "$mode" "$src" "$dest" 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    # Fallback: cp + chmod
+    if cp "$src" "$dest" 2>/dev/null; then
+        chmod "$mode" "$dest" 2>/dev/null
         return 0
     fi
-    cp "$src" "$dest"
-    chmod "$mode" "$dest"
+
+    printf 'error: failed to install %s -> %s\n' "$src" "$dest" >&2
+    return 1
 }
 
 ensure_context_mode_mcp_dist() {
@@ -339,8 +356,12 @@ if [[ -d "$ROOT_DIR/runtime" ]]; then
     cp -a "$ROOT_DIR/runtime" "$APP_SHARE_DIR/runtime"
 fi
 mkdir -p "$APP_SHARE_DIR/branding"
-safe_install 0644 "$ROOT_DIR/desktop/llama-model-manager-icon.svg" \
-    "$APP_SHARE_DIR/branding/llama-model-manager-icon.svg"
+if [[ -f "$ROOT_DIR/desktop/llama-model-manager-icon.svg" ]]; then
+    safe_install 0644 "$ROOT_DIR/desktop/llama-model-manager-icon.svg" \
+        "$APP_SHARE_DIR/branding/llama-model-manager-icon.svg"
+else
+    printf 'warning: branding icon not found, skipping\n' >&2
+fi
 
 if [[ ! -f "$CONFIG_DIR/defaults.env" ]]; then
     safe_install 0644 "$ROOT_DIR/config/defaults.env.example" "$CONFIG_DIR/defaults.env"
