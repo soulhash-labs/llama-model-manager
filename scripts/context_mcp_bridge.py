@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+"""Bridge script for Context Mode MCP.
+Spawns the MCP server via stdio and dispatches tools from the gateway.
+"""
+
 from __future__ import annotations
 
 import json
@@ -108,22 +112,14 @@ def extract_context(response: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def main() -> int:
-    gateway_request = read_stdin_json()
-    query = str(gateway_request.get("query", "")).strip()
-    if not query:
-        print(json.dumps({"context": "", "items": []}))
-        return 0
+def _start_mcp_process(project_root: str) -> subprocess.Popen[str]:
+    """Spawn and initialize the MCP server process."""
     entry = MCP_ROOT / "dist" / "index.js"
     if not entry.is_file():
         raise SystemExit("Context MCP entrypoint is missing; run npm install/build in integrations/context-mode-mcp")
 
     command = ["node", str(entry)]
     env = dict(os.environ)
-
-    # Pass the project root to the MCP server so it indexes/searches the correct DB.
-    # The gateway sets this in the request payload; fallback to cwd if not provided.
-    project_root = str(gateway_request.get("project_root") or os.getcwd())
     env["CTX_PROJECT_ROOT"] = project_root
 
     proc = subprocess.Popen(
@@ -150,6 +146,41 @@ def main() -> int:
             },
         )
         send_message(proc, {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+    except Exception:
+        proc.terminate()
+        raise
+    return proc
+
+
+def _terminate_mcp_process(proc: subprocess.Popen[str]) -> None:
+    """Gracefully terminate the MCP server process."""
+    try:
+        proc.terminate()
+        proc.wait(timeout=1)
+    except Exception:
+        proc.kill()
+        try:
+            proc.wait(timeout=1)
+        except Exception:
+            pass
+    for pipe in (proc.stdin, proc.stdout, proc.stderr):
+        try:
+            if pipe:
+                pipe.close()
+        except Exception:
+            pass
+
+
+def _dispatch_search(gateway_request: dict[str, Any]) -> int:
+    """Execute ctx_search tool."""
+    query = str(gateway_request.get("query", "")).strip()
+    if not query:
+        print(json.dumps({"context": "", "items": []}))
+        return 0
+
+    project_root = str(gateway_request.get("project_root") or os.getcwd())
+    proc = _start_mcp_process(project_root)
+    try:
         response = request(
             proc,
             {
@@ -169,21 +200,54 @@ def main() -> int:
         print(json.dumps(context, separators=(",", ":")))
         return 0
     finally:
-        try:
-            proc.terminate()
-            proc.wait(timeout=1)
-        except Exception:
-            proc.kill()
-            try:
-                proc.wait(timeout=1)
-            except Exception:
-                pass
-        for pipe in (proc.stdin, proc.stdout, proc.stderr):
-            try:
-                if pipe:
-                    pipe.close()
-            except Exception:
-                pass
+        _terminate_mcp_process(proc)
+
+
+def _dispatch_index(gateway_request: dict[str, Any]) -> int:
+    """Execute ctx_index tool."""
+    project_root = str(gateway_request.get("project_root") or os.getcwd())
+    proc = _start_mcp_process(project_root)
+    try:
+        response = request(
+            proc,
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "ctx_index",
+                    "arguments": {
+                        "title": str(gateway_request.get("title") or "Full project index"),
+                        "markdown": str(gateway_request.get("markdown") or ""),
+                        "uri": str(gateway_request.get("uri") or project_root),
+                        "tags": list(gateway_request.get("tags", ["full-index"])),
+                    },
+                },
+            },
+        )
+        result = extract_context(response)
+        # For indexing, return a success signal if no error
+        if "error" in result:
+            print(json.dumps({"ok": False, "error": result["error"]}))
+            return 1
+        print(json.dumps({"ok": True, "tool": "ctx_index", **result}, separators=(",", ":")))
+        return 0
+    finally:
+        _terminate_mcp_process(proc)
+
+
+def main() -> int:
+    gateway_request = read_stdin_json()
+    tool = str(gateway_request.get("tool", "ctx_search")).strip() or "ctx_search"
+    print(f"[BRIDGE] Tool: {tool}", file=sys.stderr)
+
+    if tool == "ctx_index":
+        return _dispatch_index(gateway_request)
+    elif tool == "ctx_search":
+        return _dispatch_search(gateway_request)
+    else:
+        print(json.dumps({"error": f"Unsupported tool: {tool}"}), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

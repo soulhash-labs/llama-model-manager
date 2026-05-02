@@ -147,12 +147,74 @@ function typoSuggestions(db: SqlBackend, terms: string[]): string[] {
   return suggestions.slice(0, 5);
 }
 
+function substringFallback(
+  db: SqlBackend,
+  query: string,
+  terms: string[],
+  safeLimit: number,
+  debug: Record<string, unknown>,
+): { strategy: string; degraded: boolean; rows: SearchDoc[]; debug: Record<string, unknown> } {
+  const like = `%${query.toLowerCase()}%`;
+  const rows = db.all<{
+    chunk_id: string;
+    doc_id: string;
+    h2_title: string;
+    content_md: string;
+    uri: string | null;
+  }>(
+    `SELECT c.chunk_id, c.doc_id, c.h2_title, c.content_md, d.uri
+     FROM chunks c
+     LEFT JOIN docs d ON d.doc_id = c.doc_id
+     WHERE lower(c.content_md) LIKE :like OR lower(c.h2_title) LIKE :like
+     LIMIT :limit`,
+    { like, limit: safeLimit * 3 },
+  );
+
+  const scored = rows.map((row, idx) => {
+    const lower = (row.content_md || "").toLowerCase();
+    let score = 0;
+    for (const token of terms) {
+      let from = 0;
+      while (from >= 0) {
+        const found = lower.indexOf(token, from);
+        if (found < 0) break;
+        score += 1;
+        from = found + token.length;
+      }
+    }
+    score += proximityBoost(row.content_md, terms) - idx / 1_000;
+    return {
+      rank: 0,
+      chunk_id: row.chunk_id,
+      doc_id: row.doc_id,
+      title: row.h2_title || "chunk",
+      uri: row.uri || undefined,
+      snippet: snippetFromContent(row.content_md, query),
+      score,
+    } as SearchDoc;
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+  const ranked = scored.slice(0, safeLimit).map((row, idx) => ({ ...row, rank: idx + 1 }));
+
+  return {
+    strategy: "substring_fallback",
+    degraded: true,
+    rows: ranked,
+    debug: {
+      ...debug,
+      fallback: true,
+      suggestions: typoSuggestions(db, terms),
+    },
+  };
+}
+
 export function searchChunks(
   db: SqlBackend,
   query: string,
   limit = 10,
 ): {
-  strategy: "fts_porter" | "fts_trigram" | "rrf" | "substring";
+  strategy: "fts_porter" | "fts_trigram" | "rrf" | "substring" | "substring_fallback";
   degraded: boolean;
   rows: SearchDoc[];
   debug: Record<string, unknown>;
@@ -263,6 +325,12 @@ export function searchChunks(
     rows.sort((a, b) => b.score - a.score);
     const ranked = rows.slice(0, safeLimit).map((row, idx) => ({ ...row, rank: idx + 1 }));
 
+    // FTS zero-hit fallback: if FTS returned nothing, try substring
+    if (ranked.length === 0 && terms.length > 0) {
+      console.log("[SEARCH] FTS5 returned 0 hits → substring fallback");
+      return substringFallback(db, query, terms, safeLimit, debug);
+    }
+
     return {
       strategy: caps.trigram ? "rrf" : "fts_porter",
       degraded: false,
@@ -277,6 +345,7 @@ export function searchChunks(
     };
   }
 
+  // No FTS available: raw substring search
   const like = `%${query.toLowerCase()}%`;
   const rows = db.all<{
     chunk_id: string;
