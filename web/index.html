@@ -15,137 +15,77 @@
   <body>
     <a class="skip-link" href="#dashboard-main">Skip to dashboard</a>
     <div class="page-shell">
-      <header class="hero">
-        <div class="hero-rail">
-          <span class="eyebrow">Local Runtime Control</span>
-          <span class="rail-rule"></span>
-          <span class="brand-link">llama-model-manager</span>
+      <header class="operator-shell-header">
+        <div class="shell-title-row">
+          <div class="shell-brand-wrap">
+            <h1 class="shell-title">LLM Model Manager</h1>
+            <p id="status-subtitle" class="shell-status-copy">Loading live server state...</p>
+          </div>
+          <div class="shell-routing-row">
+            <span class="panel-tag shell-live-label">Live Signal</span>
+            <span id="hero-routing-mode" class="shell-routing-value">-</span>
+          </div>
         </div>
 
-        <div class="hero-grid">
-          <div class="hero-copy-block">
-            <h1>LLM Model Manager</h1>
-            <p class="hero-copy">
-              Serve local llama.cpp models, inspect runtime posture, and keep registry, defaults,
-              and endpoint wiring aligned from one control surface.
-            </p>
-            <div class="hero-pill-row" aria-label="Key capabilities">
-              <span class="hero-pill">Registry-backed switching</span>
-              <span class="hero-pill">OpenAI-compatible local API</span>
-              <span class="hero-pill">Validated runtime selection</span>
-            </div>
-            <div class="hero-actions">
-              <button
-                id="refresh-all"
-                class="button button-primary"
-                title="Reload live server status, registry entries, defaults, and the current discovery root."
-              >Refresh State</button>
-              <button
-                id="toggle-mode"
-                class="button"
-                title="Switch between safer single-client mode and higher-concurrency multi-client mode."
-              >Toggle Client Mode</button>
-            </div>
+        <div class="shell-actions-row">
+          <div class="hero-actions">
+            <button
+              id="refresh-all"
+              class="button button-primary"
+              title="Reload live server status, registry entries, defaults, and the current discovery root."
+            >Refresh State</button>
+            <button
+              id="toggle-mode"
+              class="button"
+              title="Switch between safer single-client mode and higher-concurrency multi-client mode."
+            >Switch to Multi Client</button>
           </div>
-
-          <aside class="hero-stage">
-            <div class="hero-stage-head">
-              <span class="panel-tag">Live Signal</span>
-              <p id="status-subtitle">Loading live server state...</p>
-            </div>
-
-            <div class="hero-stat-grid">
-              <article class="hero-stat">
-                <span class="hero-stat-label">Active Model</span>
-                <strong id="hero-current-model">-</strong>
-                <span id="hero-current-path" class="hero-stat-note">-</span>
-              </article>
-              <article class="hero-stat">
-                <span class="hero-stat-label">Client Mode</span>
-                <strong id="hero-current-mode">-</strong>
-                <span id="hero-lanes" class="hero-stat-note">-</span>
-              </article>
-              <article class="hero-stat">
-                <span class="hero-stat-label">Endpoint</span>
-                <strong id="hero-endpoint">-</strong>
-                <span id="hero-build" class="hero-stat-note">-</span>
-              </article>
-              <article class="hero-stat">
-                <span class="hero-stat-label">Registry</span>
-                <strong id="hero-registry-count">-</strong>
-                <span id="hero-health" class="hero-stat-note">-</span>
-              </article>
-            </div>
-          </aside>
+          <div class="shell-kpi-row">
+            <article class="shell-kpi-card">
+              <span class="shell-kpi-label">Active Model</span>
+              <strong id="hero-current-model">-</strong>
+              <span id="hero-current-path" class="shell-kpi-note">-</span>
+            </article>
+            <article class="shell-kpi-card">
+              <span class="shell-kpi-label">Client Mode</span>
+              <strong id="hero-current-mode">-</strong>
+              <span id="hero-lanes" class="shell-kpi-note">-</span>
+            </article>
+            <article class="shell-kpi-card">
+              <span class="shell-kpi-label">Endpoint</span>
+              <strong id="hero-endpoint">-</strong>
+              <span id="hero-build" class="shell-kpi-note">-</span>
+            </article>
+            <article class="shell-kpi-card">
+              <span class="shell-kpi-label">Registry</span>
+              <strong id="hero-registry-count">-</strong>
+              <span id="hero-health" class="shell-kpi-note">-</span>
+            </article>
+          </div>
         </div>
       </header>
 
-        <section id="top-notice" class="notice-banner hidden" aria-live="polite"></section>
-        <section id="update-notice" class="notice-banner hidden" aria-live="polite"></section>
-
-      <details class="help-strip">
-        <summary>
-          <span class="help-badge">?</span>
-          <span class="help-summary-copy">
-            <strong>Operator Notes</strong>
-            <span>Plain-English guidance for the main actions and runtime terms. Tap to collapse or expand.</span>
-          </span>
-        </summary>
-
-        <div class="help-grid">
-          <article class="help-card">
-            <span class="panel-tag">Action</span>
-            <h3>Serve</h3>
-            <p>Switch the live llama-server to that model right now using its saved presets and your global defaults.</p>
-          </article>
-          <article class="help-card">
-            <span class="panel-tag">Action</span>
-            <h3>Tune</h3>
-            <p>Load a model into the editor so you can inspect or change settings first. This does not switch the live server.</p>
-          </article>
-          <article class="help-card">
-            <span class="panel-tag">Action</span>
-            <h3>Stage</h3>
-            <p>Take a discovered GGUF from the scan list and prefill the editor so you can save it into the registry.</p>
-          </article>
-          <article class="help-card">
-            <span class="panel-tag">Mode</span>
-            <h3>Single vs Multi Client</h3>
-            <p><strong>Single</strong> queues requests one at a time for stability. <strong>Multi</strong> allows concurrent clients but increases contention.</p>
-          </article>
-          <article class="help-card">
-            <span class="panel-tag">Runtime</span>
-            <h3>Context</h3>
-            <p>The maximum token window. Larger values keep more conversation or code history, but they consume more memory.</p>
-          </article>
-          <article class="help-card">
-            <span class="panel-tag">Runtime</span>
-            <h3>NGL And Parallel</h3>
-            <p><strong>NGL</strong> controls GPU layer offload when the selected runtime supports it. CPU fallback forces <strong>NGL=0</strong>. <strong>Parallel</strong> controls how many client lanes the server can handle at once.</p>
-          </article>
-        </div>
-      </details>
+      <section id="top-notice" class="notice-banner hidden" aria-live="polite"></section>
+      <section id="update-notice" class="notice-banner hidden" aria-live="polite"></section>
 
       <div class="operator-workspace">
         <nav class="side-nav" aria-label="Dashboard sections">
           <div class="side-nav-head">
             <span class="panel-tag">Operator Map</span>
-            <strong>Control Surface</strong>
-            <span>Jump between dense work zones without scanning every card.</span>
+            <strong>LLM Manager</strong>
+            <span>Jump between pages from one map.</span>
           </div>
           <a href="#runtime-live" data-page="runtime-live">Overview</a>
           <a href="#dashboard-service-panel" data-page="dashboard-service-panel">Service</a>
-          <a href="#transfers-remote" data-page="transfers-remote">Remote Models</a>
-          <a href="#transfers-downloads" data-page="transfers-downloads">Download Jobs</a>
+          <a href="#transfers-remote" data-page="transfers-remote">Remote Models (huggingface)</a>
           <a href="#models-registry" data-page="models-registry">Model Registry</a>
           <a href="#models-editor" data-page="models-editor">Model Editor</a>
-          <a href="#models-discovery" data-page="models-discovery">Discovery</a>
+          <a href="#models-discovery" data-page="models-discovery">Discovery (add new models)</a>
           <a href="#settings-defaults" data-page="settings-defaults">Settings</a>
           <a href="#integrations-panel" data-page="integrations-panel">Integrations</a>
-          <a href="#glyph-routes-panel" data-page="glyph-routes-panel">Observed Glyph Routes</a>
-          <a href="#gateway-trace-panel" data-page="gateway-trace-panel">Gateway Trace</a>
-          <a href="#audit-panel" data-page="audit-panel">Audit</a>
-          <a href="#session-handoffs-panel" data-page="session-handoffs-panel">Session Handoffs</a>
+          <a href="#gateways-panel" data-page="gateways-panel">Gateways (harness / LLM)</a>
+          <a href="#pipelines-panel" data-page="pipelines-panel">Pipelines</a>
+          <a href="#cloud-providers-panel" data-page="cloud-providers-panel">Cloud providers</a>
         </nav>
 
       <main id="dashboard-main" class="operator-main">
@@ -263,7 +203,7 @@
           <div class="panel-head panel-head-anchored">
             <div>
               <span class="panel-tag">Transfers</span>
-              <h2>Remote Models</h2>
+              <h2>Remote Models (huggingface)</h2>
               <p>
                 <span id="remote-count">0</span> cached artifacts from Hugging Face.
                 <span id="remote-fetched-at"></span>
@@ -308,89 +248,89 @@
               <tbody></tbody>
             </table>
           </div>
-        </section>
 
-        <section id="transfers-downloads" class="panel dashboard-page">
-          <div class="panel-head panel-head-anchored">
-            <div>
-              <span class="panel-tag">Transfers</span>
-              <h2>Download Jobs</h2>
-              <p>
-                <span id="download-count">0</span> persisted remote jobs with resume-aware lifecycle controls.
-                <span id="download-storage-summary"></span>
-              </p>
-              <p id="download-duplicate-guidance" class="panel-guidance hidden"></p>
+          <div class="panel-subpanel">
+            <div class="panel-head panel-head-anchored">
+              <div>
+                <span class="panel-tag">Transfers</span>
+                <h3>Download Jobs</h3>
+                <p>
+                  <span id="download-count">0</span> persisted remote jobs with resume-aware lifecycle controls.
+                  <span id="download-storage-summary"></span>
+                </p>
+                <p id="download-duplicate-guidance" class="panel-guidance hidden"></p>
+              </div>
+              <div class="inline-actions">
+                <label
+                  class="inline-field"
+                  title="Partial files newer than this many days are kept when cleaning old interrupted downloads."
+                >
+                  Keep
+                  <input id="cleanup-retention-days" type="number" min="0" step="1" value="7" aria-label="Partial cleanup retention days">
+                  days
+                </label>
+                <label
+                  class="inline-field"
+                  title="Maximum number of download workers that may run at the same time."
+                >
+                  Slots
+                  <input id="download-slot-limit" type="number" min="1" step="1" value="2" aria-label="Maximum running download slots">
+                </label>
+                <button
+                  id="save-download-policy"
+                  class="button"
+                  title="Save the maximum running download slots for future web-manager starts."
+                >Save Slots</button>
+                <button
+                  id="recover-downloads"
+                  class="button"
+                  title="Mark stale running jobs from an old web-manager process as failed so they can be resumed or retried."
+                >Recover Stale</button>
+                <button
+                  id="pause-download-queue"
+                  class="button"
+                  title="Pause starting queued downloads. Running jobs continue."
+                >Pause Queue</button>
+                <button
+                  id="resume-download-queue"
+                  class="button button-primary"
+                  title="Resume starting queued downloads up to the running slot limit."
+                >Resume Queue</button>
+                <button
+                  id="clear-download-queue"
+                  class="button"
+                  title="Remove all queued jobs. Running jobs and files are not touched."
+                >Clear Queue</button>
+                <button
+                  id="cleanup-downloads"
+                  class="button"
+                  title="Remove stale partial files from old cancelled or failed jobs. Active and fresh partials are kept."
+                >Clean Old Partials</button>
+                <button
+                  id="cleanup-duplicate-downloads"
+                  class="button"
+                  title="Remove redundant completed job records that point at the same artifact path. Model files are kept."
+                >Clean Duplicate Records</button>
+                <button
+                  id="delete-orphaned-artifacts"
+                  class="button button-danger"
+                  title="Delete orphaned GGUF files under known download roots. Registry and completed-job artifacts are kept."
+                >Delete Orphaned Files</button>
+              </div>
             </div>
-            <div class="inline-actions">
-              <label
-                class="inline-field"
-                title="Partial files newer than this many days are kept when cleaning old interrupted downloads."
-              >
-                Keep
-                <input id="cleanup-retention-days" type="number" min="0" step="1" value="7" aria-label="Partial cleanup retention days">
-                days
-              </label>
-              <label
-                class="inline-field"
-                title="Maximum number of download workers that may run at the same time."
-              >
-                Slots
-                <input id="download-slot-limit" type="number" min="1" step="1" value="2" aria-label="Maximum running download slots">
-              </label>
-              <button
-                id="save-download-policy"
-                class="button"
-                title="Save the maximum running download slots for future web-manager starts."
-              >Save Slots</button>
-              <button
-                id="recover-downloads"
-                class="button"
-                title="Mark stale running jobs from an old web-manager process as failed so they can be resumed or retried."
-              >Recover Stale</button>
-              <button
-                id="pause-download-queue"
-                class="button"
-                title="Pause starting queued downloads. Running jobs continue."
-              >Pause Queue</button>
-              <button
-                id="resume-download-queue"
-                class="button button-primary"
-                title="Resume starting queued downloads up to the running slot limit."
-              >Resume Queue</button>
-              <button
-                id="clear-download-queue"
-                class="button"
-                title="Remove all queued jobs. Running jobs and files are not touched."
-              >Clear Queue</button>
-              <button
-                id="cleanup-downloads"
-                class="button"
-                title="Remove stale partial files from old cancelled or failed jobs. Active and fresh partials are kept."
-              >Clean Old Partials</button>
-              <button
-                id="cleanup-duplicate-downloads"
-                class="button"
-                title="Remove redundant completed job records that point at the same artifact path. Model files are kept."
-              >Clean Duplicate Records</button>
-              <button
-                id="delete-orphaned-artifacts"
-                class="button button-danger"
-                title="Delete orphaned GGUF files under known download roots. Registry and completed-job artifacts are kept."
-              >Delete Orphaned Files</button>
+            <div class="table-wrap">
+              <table class="data-table" id="downloads-table">
+                <thead>
+                  <tr>
+                    <th>Artifact</th>
+                    <th>Status</th>
+                    <th>Progress</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
             </div>
-          </div>
-          <div class="table-wrap">
-            <table class="data-table" id="downloads-table">
-              <thead>
-                <tr>
-                  <th>Artifact</th>
-                  <th>Status</th>
-                  <th>Progress</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
           </div>
         </section>
 
@@ -713,33 +653,14 @@
             <div>
               <span class="panel-tag">Wiring</span>
               <h2>Integrations</h2>
-              <p>Use the live endpoint below for tools that expect an OpenAI-compatible local server.</p>
+              <p>Keep editor/runtime integrations in sync with the active local llama.cpp model.</p>
             </div>
-          </div>
-          <div id="integration-local-first-banner" class="notice-integration-banner hidden">
-            <strong>Local-First Architecture Active</strong>
-            All local <code>llama.cpp</code> inference routes through the <strong>Unified GlyphOS Pipeline</strong> — with Ψ encoding, context awareness, and intelligent routing.
           </div>
           <div class="integration-grid">
             <article class="integration-card">
               <span class="metric-label">OpenCode / Harness Gateway</span>
               <code id="api-base">-</code>
               <span id="integration-endpoint-note" class="metric-note">-</span>
-            </article>
-            <article class="integration-card">
-              <span class="metric-label">LMM Gateway + GlyphOS</span>
-              <div class="integration-chip-row">
-                <span id="lmm-gateway-badge" class="integration-badge integration-badge-muted">-</span>
-              </div>
-              <code id="gateway-status">-</code>
-              <span id="gateway-route" class="metric-note">-</span>
-              <div class="inline-actions integration-actions">
-                <button id="gateway-start" class="button button-small button-primary" title="Start the LMM OpenAI-compatible gateway.">Start Gateway</button>
-                <button id="gateway-restart" class="button button-small" title="Restart the LMM gateway.">Restart</button>
-                <button id="gateway-stop" class="button button-small button-danger" title="Stop the LMM gateway.">Stop</button>
-                <button id="gateway-logs" class="button button-small" title="Show recent LMM gateway logs.">Logs</button>
-              </div>
-              <pre id="gateway-logs-output" class="log-box hidden"></pre>
             </article>
             <article class="integration-card">
               <span class="metric-label">opencode</span>
@@ -771,6 +692,32 @@
                 <button id="sync-claude" class="button button-small button-primary" title="Sync Claude Code settings to the local Claude gateway.">Sync Claude</button>
               </div>
             </article>
+          </div>
+        </section>
+
+        <section id="gateways-panel" class="panel dashboard-page">
+          <div class="panel-head">
+            <div>
+              <span class="panel-tag">Gateways</span>
+              <h2>Gateways</h2>
+              <p>Start and observe the OpenAI-compatible LMM and Anthropic-compatible Claude gateway services.</p>
+            </div>
+          </div>
+          <div class="integration-grid">
+            <article class="integration-card">
+              <span class="metric-label">LMM Gateway + GlyphOS</span>
+              <div class="integration-chip-row">
+                <span id="lmm-gateway-badge" class="integration-badge integration-badge-muted">-</span>
+              </div>
+              <code id="gateway-status">-</code>
+              <span id="gateway-route" class="metric-note">-</span>
+              <div class="inline-actions integration-actions">
+                <button id="gateway-start" class="button button-small button-primary" title="Start the LMM OpenAI-compatible gateway.">Start Gateway</button>
+                <button id="gateway-restart" class="button button-small" title="Restart the LMM gateway.">Restart</button>
+                <button id="gateway-stop" class="button button-small button-danger" title="Stop the LMM gateway.">Stop</button>
+                <button id="gateway-logs" class="button button-small" title="Show recent LMM gateway logs.">Logs</button>
+              </div>
+            </article>
             <article class="integration-card">
               <span class="metric-label">Claude Gateway</span>
               <code id="claude-gateway-status">-</code>
@@ -782,6 +729,25 @@
                 <button id="claude-gateway-logs" class="button button-small" title="Show recent Claude gateway logs.">Logs</button>
               </div>
             </article>
+          </div>
+
+          <pre id="gateway-logs-output" class="log-box hidden"></pre>
+          <pre id="claude-gateway-logs-output" class="log-box hidden"></pre>
+        </section>
+
+        <section id="pipelines-panel" class="panel dashboard-page">
+          <div class="panel-head">
+            <div>
+              <span class="panel-tag">Pipelines</span>
+              <h2>Pipelines</h2>
+              <p>Inspect local-first routing, fallback policy, and routed request trace for the active pipeline.</p>
+            </div>
+          </div>
+          <div id="integration-local-first-banner" class="notice-integration-banner hidden">
+            <strong>Local-First Architecture Active</strong>
+            All local <code>llama.cpp</code> inference routes through the <strong>Unified GlyphOS Pipeline</strong> — with Ψ encoding, context awareness, and intelligent routing.
+          </div>
+          <div class="integration-grid">
             <article id="glyphos-card" class="integration-card pipeline-card">
               <span class="metric-label">GlyphOS AI Compute</span>
               <div class="integration-chip-row">
@@ -813,6 +779,79 @@
                 <button id="sync-glyphos-combined" class="button button-small button-primary" title="Activate the combined Context + GlyphOS pipeline: enables the setting, syncs GlyphOS, and refreshes the readiness card.">Activate Feature</button>
               </div>
             </article>
+          </div>
+
+          <div class="panel-subpanel">
+            <div class="panel-head panel-head-anchored">
+              <div>
+                <span class="panel-tag">Observed Traffic</span>
+                <h3>Observed Glyph Routes</h3>
+                <p>Actual GlyphOS-routed traffic observed by this dashboard session. Sync and activation only change configuration.</p>
+              </div>
+            </div>
+            <div class="observed-grid">
+              <article class="observed-card">
+                <span class="metric-label">Last Route</span>
+                <strong id="observed-glyph-last-status">Never observed</strong>
+                <span id="observed-glyph-last-detail" class="metric-note">No glyph-routed traffic has been seen by this dashboard session yet.</span>
+              </article>
+              <article class="observed-card">
+                <span class="metric-label">Observed This Session</span>
+                <strong id="observed-glyph-total">0</strong>
+                <span id="observed-glyph-total-detail" class="metric-note">No glyph route attempts observed in this dashboard session.</span>
+              </article>
+              <article class="observed-card">
+                <span class="metric-label">Recent Targets</span>
+                <strong id="observed-glyph-targets">None yet</strong>
+                <span id="observed-glyph-targets-detail" class="metric-note">Targets will appear here after the first observed glyph route.</span>
+              </article>
+            </div>
+
+            <div id="observed-glyph-feed" class="telemetry-list observed-feed" aria-live="polite"></div>
+          </div>
+
+          <div class="panel-subpanel">
+            <div class="panel-head panel-head-anchored">
+              <div>
+                <span class="panel-tag">Gateway Trace</span>
+                <h3>Context + Glyph Encoding + GlyphOS</h3>
+                <p>Latest routed gateway request stages: context enrichment, glyph compression, GlyphOS routing, and backend completion.</p>
+              </div>
+            </div>
+            <div class="observed-grid">
+              <article class="observed-card">
+                <span class="metric-label">Gateway Request</span>
+                <strong id="context-trace-status">Not observed</strong>
+                <span id="context-trace-latency" class="metric-note">No LMM gateway request observed yet.</span>
+              </article>
+              <article class="observed-card">
+                <span class="metric-label">Context MCP</span>
+                <strong id="context-trace-context">Skipped</strong>
+                <span id="context-trace-context-detail" class="metric-note">Context status appears after the next routed request.</span>
+              </article>
+              <article class="observed-card">
+                <span class="metric-label">Glyph Encoding</span>
+                <strong id="context-trace-encoding">Skipped</strong>
+                <span id="context-trace-encoding-detail" class="metric-note">Compression ratio appears when structured context is encoded.</span>
+              </article>
+              <article class="observed-card">
+                <span class="metric-label">Route + Backend</span>
+                <strong id="context-trace-route">Not routed</strong>
+                <span id="context-trace-route-detail" class="metric-note">GlyphOS target and backend result appear here.</span>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section id="cloud-providers-panel" class="panel dashboard-page">
+          <div class="panel-head">
+            <div>
+              <span class="panel-tag">Cloud</span>
+              <h2>Cloud Providers</h2>
+              <p>Inspect cloud fallback providers and active preference chain for resiliency.</p>
+            </div>
+          </div>
+          <div class="integration-grid">
             <article id="cloud-providers-card" class="integration-card">
               <span class="metric-label">Cloud Providers</span>
               <div class="integration-chip-row">
@@ -822,67 +861,6 @@
               <span id="cloud-preferred" class="metric-note">-</span>
               <span id="cloud-fallback-order" class="metric-note">-</span>
               <div id="cloud-provider-list" class="telemetry-list"></div>
-            </article>
-          </div>
-          <pre id="claude-gateway-logs-output" class="log-box hidden"></pre>
-        </section>
-
-        <section id="glyph-routes-panel" class="panel observed-panel dashboard-page">
-          <div class="panel-head">
-            <div>
-              <span class="panel-tag">Observed Traffic</span>
-              <h2>Observed Glyph Routes</h2>
-              <p>Actual GlyphOS-routed traffic observed by this dashboard session. Sync and activation only change configuration.</p>
-            </div>
-          </div>
-          <div class="observed-grid">
-            <article class="observed-card">
-              <span class="metric-label">Last Route</span>
-              <strong id="observed-glyph-last-status">Never observed</strong>
-              <span id="observed-glyph-last-detail" class="metric-note">No glyph-routed traffic has been seen by this dashboard session yet.</span>
-            </article>
-            <article class="observed-card">
-              <span class="metric-label">Observed This Session</span>
-              <strong id="observed-glyph-total">0</strong>
-              <span id="observed-glyph-total-detail" class="metric-note">No glyph route attempts observed in this dashboard session.</span>
-            </article>
-            <article class="observed-card">
-              <span class="metric-label">Recent Targets</span>
-              <strong id="observed-glyph-targets">None yet</strong>
-              <span id="observed-glyph-targets-detail" class="metric-note">Targets will appear here after the first observed glyph route.</span>
-            </article>
-          </div>
-          <div id="observed-glyph-feed" class="telemetry-list observed-feed" aria-live="polite"></div>
-        </section>
-
-        <section id="gateway-trace-panel" class="panel observed-panel dashboard-page">
-          <div class="panel-head">
-            <div>
-              <span class="panel-tag">Gateway Trace</span>
-              <h2>Context + Glyph Encoding + GlyphOS</h2>
-              <p>Latest routed gateway request stages. This separates context enrichment, glyph compression, GlyphOS routing, and backend completion.</p>
-            </div>
-          </div>
-          <div class="observed-grid">
-            <article class="observed-card">
-              <span class="metric-label">Gateway Request</span>
-              <strong id="context-trace-status">Not observed</strong>
-              <span id="context-trace-latency" class="metric-note">No LMM gateway request observed yet.</span>
-            </article>
-            <article class="observed-card">
-              <span class="metric-label">Context MCP</span>
-              <strong id="context-trace-context">Skipped</strong>
-              <span id="context-trace-context-detail" class="metric-note">Context status appears after the next routed request.</span>
-            </article>
-            <article class="observed-card">
-              <span class="metric-label">Glyph Encoding</span>
-              <strong id="context-trace-encoding">Skipped</strong>
-              <span id="context-trace-encoding-detail" class="metric-note">Compression ratio appears when structured context is encoded.</span>
-            </article>
-            <article class="observed-card">
-              <span class="metric-label">Route + Backend</span>
-              <strong id="context-trace-route">Not routed</strong>
-              <span id="context-trace-route-detail" class="metric-note">GlyphOS target and backend result appear here.</span>
             </article>
           </div>
         </section>

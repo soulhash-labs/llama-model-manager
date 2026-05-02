@@ -83,6 +83,46 @@ function isAtOrAfter(value, startValue) {
   return itemDate.getTime() >= startDate.getTime();
 }
 
+function isFeatureEnabled(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return true;
+  return !["0", "false", "no", "off", "disabled"].includes(normalized);
+}
+
+function routingSignal(data) {
+  const telemetry = data.glyphos_telemetry || {};
+  const configured = Boolean(data.glyphos_config_exists);
+  const cloudEnabled = isFeatureEnabled(data.defaults?.GLYPHOS_CLOUD_ENABLED);
+  const available = Boolean(telemetry.available);
+
+  if (!available || !configured) {
+    return cloudEnabled ? "Routing signal: unavailable" : "Routing signal: disabled";
+  }
+
+  const routing = telemetry.routing && typeof telemetry.routing === "object" ? telemetry.routing : {};
+  const recent = Array.isArray(routing.recent_attempts) ? routing.recent_attempts : [];
+  const latestAttempt = recent[0] || null;
+  const cloudProviders = telemetry.cloud_providers && typeof telemetry.cloud_providers === "object" ? telemetry.cloud_providers : {};
+  const providerNames = Object.keys(cloudProviders)
+    .map((name) => String(name).toLowerCase())
+    .filter(Boolean);
+
+  if (latestAttempt) {
+    const latestTarget = String(latestAttempt.target || "").toLowerCase();
+    const isCloud = providerNames.some((name) => latestTarget.includes(name));
+    if (isCloud && latestTarget) {
+      return `Cloud routing observed (${latestTarget})`;
+    }
+    if (latestTarget) {
+      return `Local routing observed (${latestTarget})`;
+    }
+  }
+
+  return cloudEnabled
+    ? "Local routing active (cloud fallback armed)"
+    : "Local routing active";
+}
+
 function setNodeHidden(node, hidden) {
   if (node) node.classList.toggle("hidden", Boolean(hidden));
 }
@@ -414,9 +454,11 @@ function renderHero(data) {
   const activeMode = modeLabel(mode.active_mode);
   const activeLanes = laneLabel(mode.active_parallel);
   const health = healthLabel(current.health);
+  const routingText = routingSignal(data);
 
   const unifiedMemoryLabel = (current.cuda_unified_memory || doctor.cuda_unified_memory) === "enabled" ? "Unified memory enabled." : "Unified memory disabled.";
   setText("#status-subtitle", `${health}. ${activeMode}. ${activeLanes}. ${registryLabel(registryCount)} in registry. ${unifiedMemoryLabel}`);
+  setText("#hero-routing-mode", routingText);
   setText("#hero-current-model", current.alias || "stopped");
   setText("#hero-current-path", basename(current.model) || "No model loaded");
   setText("#hero-current-mode", activeMode);
@@ -509,7 +551,7 @@ function renderStatus(data) {
   const doctor = data.doctor || {};
   const mode = data.mode || {};
   const effectiveMode = mode.active_mode || mode.configured_mode || "";
-  const nextMode = effectiveMode === "single-client" ? "Switch To Multi Client" : "Switch To Single Client";
+  const nextMode = effectiveMode === "single-client" ? "Switch to Multi Client" : "Switch to Single Client";
 
   renderNotice(data);
   renderUpdateStatus(data.update_status || {});
@@ -591,10 +633,10 @@ function renderStatus(data) {
   ]));
   const gateway = data.gateway || {};
   const gatewayRunning = gateway.running === "yes" || gateway.health === "yes";
-  const glyphosAvailable = Boolean(data.glyphos_telemetry?.available);
-  const glyphosConfigured = Boolean(data.glyphos_config_exists);
+  const gatewayGlyphosAvailable = Boolean(data.glyphos_telemetry?.available);
+  const gatewayGlyphosConfigured = Boolean(data.glyphos_config_exists);
   const lmmBadge = $("#lmm-gateway-badge");
-  if (gatewayRunning && glyphosAvailable && glyphosConfigured) {
+  if (gatewayRunning && gatewayGlyphosAvailable && gatewayGlyphosConfigured) {
     setText("#gateway-status", "Running");
     lmmBadge.textContent = "Local-First · GlyphOS Enforced";
     lmmBadge.classList.add("integration-badge-ready");
@@ -614,7 +656,7 @@ function renderStatus(data) {
     data.gateway_api_base || "",
     data.gateway_backend_api_base ? `backend ${data.gateway_backend_api_base}` : "",
     gateway.health ? `health ${gateway.health}` : "",
-    glyphosAvailable ? "all local traffic → GlyphOS pipeline" : "",
+    gatewayGlyphosAvailable ? "all local traffic → GlyphOS pipeline" : "",
   ]) || "-");
   setText("#opencode-model", data.opencode_model || "-");
   setText("#opencode-path", joinNotes([
