@@ -311,30 +311,45 @@ def context_mcp_db_path() -> Path:
     return Path.home() / ".claude" / "context-mode" / "sessions" / f"{project_hash}.db"
 
 
-def _maybe_run_indexer(timeout_seconds: float) -> None:
-    """Run the project indexer if the DB doesn't exist yet (first-run only)."""
-    db_path = context_mcp_db_path()
-    if db_path.is_file():
-        return  # Already indexed
+def _maybe_run_indexer(timeout_seconds: float) -> dict[str, Any]:
+    """Run the project indexer (incremental — skips unchanged files).
+
+    Returns a dict with indexing stats: indexed, skipped, errors, duration_ms.
+    The indexer is now fast enough to call on every search request.
+    """
+    empty = {"indexed": 0, "skipped": 0, "errors": 0, "duration_ms": 0}
     mcp_entry = context_mcp_root() / "dist" / "index.js"
     if not mcp_entry.is_file():
-        return
+        return empty
 
-    # Find the node binary
     node_bin = shutil.which("node")
     if not node_bin:
-        return
+        return empty
 
     try:
-        subprocess.run(
+        completed = subprocess.run(
             [node_bin, str(mcp_entry), "--index-project"],
             cwd=str(context_mcp_root()),
             env={**os.environ, "CTX_PROJECT_ROOT": os.getcwd()},
             timeout=timeout_seconds,
             capture_output=True,
+            text=True,
         )
+        # The MCP indexer prints a JSON summary to stdout on success.
+        try:
+            result = json.loads(completed.stdout.strip())
+            if isinstance(result, dict):
+                return {
+                    "indexed": int(result.get("indexed", 0)),
+                    "skipped": int(result.get("skipped", 0)),
+                    "errors": int(result.get("errors", 0)),
+                    "duration_ms": int(result.get("duration_ms", 0)),
+                }
+        except (json.JSONDecodeError, ValueError):
+            pass  # No JSON summary — indexer ran silently
+        return empty
     except Exception:
-        pass  # Indexing is best-effort; search will still work (empty results)
+        return empty  # Best-effort; search will still work
 
 
 def _extract_session_metadata(payload: dict[str, Any]) -> dict[str, Any]:
@@ -582,8 +597,8 @@ def retrieve_context(payload: dict[str, Any], prompt: str, *, model: str, stream
         "project_root": os.getcwd(),
     }
 
-    # First-run: populate the project index before searching.
-    _maybe_run_indexer(timeout_seconds=max(5, timeout_ms / 2000))
+    # Incremental index refresh before every search (fast — skips unchanged files).
+    index_stats = _maybe_run_indexer(timeout_seconds=max(5, timeout_ms / 2000))
 
     try:
         completed = run_context_command(

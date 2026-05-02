@@ -212,6 +212,7 @@ export function scanAndIndexProject(db: SqlBackend, projectRoot: string, project
   files.sort((a, b) => priority(a) - priority(b));
 
   let indexedCount = 0;
+  let skippedUnchanged = 0;
 
   for (const filePath of files) {
     if (indexedCount >= MAX_FILES) break;
@@ -259,29 +260,40 @@ export function scanAndIndexProject(db: SqlBackend, projectRoot: string, project
     const relPath = relative(projectRoot, filePath).replace(/\\/g, "/");
     const title = relPath;
     const docId = `proj_${shaHex(filePath).slice(0, 16)}`;
+    const contentHash = shaHex(content);
+    const mtime = stat.mtime.toISOString();
 
     const markdown = lang === "markdown" || lang === "text"
       ? content
       : wrapCodeAsMarkdown(filePath, content, lang);
 
     try {
-      indexDocument(db, {
+      const indexResult = indexDocument(db, {
         projectHash,
         source: "index",
         title,
         uri: `file://${filePath}`,
         markdown,
         tags: ["project-scan", lang, relPath.split(sep)[0] || "root"],
+        docId,
+        mtime,
+        contentHash,
       });
 
-      indexedCount++;
-      result.totalBytes += Buffer.byteLength(markdown, "utf8");
+      // indexDocument returns updated=false for unchanged files (incremental skip).
+      if (indexResult.updated) {
+        indexedCount++;
+        result.totalBytes += Buffer.byteLength(markdown, "utf8");
+      } else {
+        skippedUnchanged++;
+      }
     } catch {
       result.errors++;
     }
   }
 
   result.indexed = indexedCount;
+  result.skipped += skippedUnchanged;
   result.durationMs = Date.now() - started;
   return result;
 }

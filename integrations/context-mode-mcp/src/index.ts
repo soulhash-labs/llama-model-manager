@@ -137,6 +137,15 @@ async function runProjectIndex(): Promise<void> {
   process.stderr.write(`[MCP-INDEX] scanned ${context.project_root}\n`);
   process.stderr.write(`[MCP-INDEX] indexed: ${result.indexed}, skipped: ${result.skipped}, errors: ${result.errors}, bytes: ${result.totalBytes}, duration: ${result.durationMs}ms\n`);
 
+  // Print JSON summary to stdout for the gateway to parse.
+  process.stdout.write(JSON.stringify({
+    indexed: result.indexed,
+    skipped: result.skipped,
+    errors: result.errors,
+    total_bytes: result.totalBytes,
+    duration_ms: result.durationMs,
+  }) + "\n");
+
   try { db.close(); } catch { /* soft-fail */ }
   process.exit(result.errors > result.indexed ? 1 : 0);
 }

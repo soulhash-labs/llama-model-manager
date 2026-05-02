@@ -12,6 +12,12 @@ export interface IndexInput {
   title: string;
   markdown: string;
   tags?: string[];
+  /** Deterministic doc_id for upsert semantics (e.g. from file path hash). */
+  docId?: string;
+  /** File modification time for incremental indexing. */
+  mtime?: string;
+  /** Content hash for change detection. */
+  contentHash?: string;
 }
 
 export interface IndexResult {
@@ -20,6 +26,8 @@ export interface IndexResult {
   source: "execute" | "execute_file" | "index" | "fetch" | "events";
   uri?: string;
   title?: string;
+  /** True when this call created or updated the document. False when content was unchanged (incremental skip). */
+  updated: boolean;
 }
 
 function chunkId(prefix: string, index: number): string {
@@ -50,13 +58,53 @@ function placeHolders(count: number): string {
 }
 
 export function indexDocument(db: SqlBackend, input: IndexInput): IndexResult {
-  const docId = `doc_${randomBytes(8).toString("hex")}`;
   const now = toISO();
   const chunks = toChunks(input.markdown || "", input.title || "Indexed document");
 
+  // Determine doc_id: use provided deterministic ID, or generate random one.
+  const docId = input.docId || `doc_${randomBytes(8).toString("hex")}`;
+
+  // Incremental indexing: if docId is deterministic and content unchanged, skip.
+  if (input.docId && input.contentHash) {
+    const existing = db.get<{ content_hash: string }>(
+      `SELECT content_hash FROM docs WHERE doc_id = :doc_id`,
+      { doc_id: input.docId },
+    );
+    if (existing && existing.content_hash === input.contentHash) {
+      // File unchanged — return existing doc info without re-indexing.
+      const existingChunks = db.all<{ chunk_id: string }>(
+        `SELECT chunk_id FROM chunks WHERE doc_id = :doc_id`,
+        { doc_id: input.docId },
+      );
+      return {
+        doc_id: input.docId,
+        chunk_ids: existingChunks.map((r) => r.chunk_id),
+        source: input.source,
+        uri: input.uri,
+        title: input.title,
+        updated: false,
+      };
+    }
+  }
+
+  // If upserting (deterministic docId), delete old chunks and FTS entries first.
+  if (input.docId) {
+    const oldChunks = db.all<{ chunk_id: string }>(
+      `SELECT chunk_id FROM chunks WHERE doc_id = :doc_id`,
+      { doc_id: input.docId },
+    );
+    for (const chunk of oldChunks) {
+      try { db.execute(`DELETE FROM chunks_fts WHERE chunk_id = :id`, { id: chunk.chunk_id }); } catch { /* best-effort */ }
+      try { db.execute(`DELETE FROM chunks_fts_trigram WHERE chunk_id = :id`, { id: chunk.chunk_id }); } catch { /* best-effort */ }
+    }
+    db.execute(`DELETE FROM chunks WHERE doc_id = :doc_id`, { doc_id: input.docId });
+    db.execute(`DELETE FROM docs WHERE doc_id = :doc_id`, { doc_id: input.docId });
+  }
+
+  // Insert (or replace) the document record.
   db.execute(
-    `INSERT INTO docs(doc_id, project_hash, source, uri, title, tags_json, created_at)
-     VALUES(:doc_id, :project_hash, :source, :uri, :title, :tags_json, :created_at)`,
+    `INSERT INTO docs(doc_id, project_hash, source, uri, title, tags_json, mtime, content_hash, created_at)
+     VALUES(:doc_id, :project_hash, :source, :uri, :title, :tags_json, :mtime, :content_hash, :created_at)`,
     {
       doc_id: docId,
       project_hash: input.projectHash,
@@ -64,6 +112,8 @@ export function indexDocument(db: SqlBackend, input: IndexInput): IndexResult {
       uri: input.uri || "",
       title: input.title,
       tags_json: JSON.stringify(input.tags || []),
+      mtime: input.mtime || "",
+      content_hash: input.contentHash || "",
       created_at: now,
     },
   );
@@ -99,6 +149,7 @@ export function indexDocument(db: SqlBackend, input: IndexInput): IndexResult {
     source: input.source,
     uri: input.uri,
     title: input.title,
+    updated: true,
   };
 }
 

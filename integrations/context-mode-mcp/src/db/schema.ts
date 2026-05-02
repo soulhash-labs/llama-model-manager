@@ -36,6 +36,11 @@ function safeExecute(db: SqlBackend, sql: string, warnLabel?: string): boolean {
   }
 }
 
+/** Silently add a column to a table — no-op if column already exists. */
+function addColumnSilent(db: SqlBackend, sql: string): void {
+  try { db.execute(sql); } catch { /* column already exists */ }
+}
+
 export function initSchema(db: SqlBackend): DbCapabilities {
   ensureDbDirectory(db.dbPath);
   const warnings: string[] = [];
@@ -46,6 +51,10 @@ export function initSchema(db: SqlBackend): DbCapabilities {
       warnings.push(`failed to create table: ${table}`);
     }
   }
+
+  // Add incremental indexing columns to docs table (migration for existing databases).
+  addColumnSilent(db, `ALTER TABLE docs ADD COLUMN mtime TEXT`);
+  addColumnSilent(db, `ALTER TABLE docs ADD COLUMN content_hash TEXT`);
 
   const indexes = [
     ["idx_chunks_doc", "CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id)"],
@@ -90,7 +99,7 @@ function getTableDef(name: string): string {
     case "meta":
       return `meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)`;
     case "docs":
-      return `docs (doc_id TEXT PRIMARY KEY, project_hash TEXT, source TEXT, uri TEXT, title TEXT, tags_json TEXT, created_at TEXT)`;
+      return `docs (doc_id TEXT PRIMARY KEY, project_hash TEXT, source TEXT, uri TEXT, title TEXT, tags_json TEXT, mtime TEXT, content_hash TEXT, created_at TEXT)`;
     case "chunks":
       return `chunks (chunk_id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, h2_title TEXT, content_md TEXT, created_at TEXT, FOREIGN KEY (doc_id) REFERENCES docs(doc_id) ON DELETE CASCADE)`;
     case "events":
