@@ -4,9 +4,10 @@
 
 ## The engine room for local AI
 
-llama-model-manager is a production-grade operations dashboard for `llama.cpp` and GlyphOS™ AI Compute. It turns local LLM inference from a fragile CLI experiment into a resilient, browser-first control surface.
+**llama-model-manager** turns raw `llama.cpp` inference into a stable, production-grade local AI platform.
+It gives you a clean browser dashboard, intelligent routing, project-aware context, and GlyphOS™ AI Compute — all while staying sovereign and local-first.
 
-If you're running Claude Code, OpenClaw, or opencode, this is where your stability lives.
+If you're running Claude Code, OpenClaw, or opencode, this is where your reliability lives.
 
 ![Dashboard overview](docs/screenshots/dashboard-overview.png)
 
@@ -18,124 +19,141 @@ If you're running Claude Code, OpenClaw, or opencode, this is where your stabili
 curl -fsSL https://soulhash.ai/install_lmm.sh | sh
 ```
 
-Then get started:
+Then run:
 
 ```bash
-llama-model-web
-llama-model list
-llama-model doctor
+llama-model-web          # Browser dashboard
+llama-model doctor       # System health check
+llama-model list         # See your models
 ```
 
-Or install from a local checkout:
+Or install from source:
 
 ```bash
+git clone https://github.com/soulhash-labs/llama-model-manager.git
+cd llama-model-manager
 ./install.sh
 ```
 
-No root access. No silent compilation. Installs to `~/.local/` and asks before building anything.
+**Zero root required.** Installs to `~/.local/`. Asks before building anything.
 
 ---
 
-## What it does
+## Core Capabilities
 
-| Capability | What you get |
-|------------|--------------|
-| Model management | Discover, register, and hot-swap GGUF models from a local registry |
-| Runtime control | Real-time tuning of context limits, GPU offload, batch sizes, threads, health metrics, and guarded startup auto-fit |
-| AI routing | Route workloads across local `llama.cpp` and cloud providers (OpenAI, Anthropic, xAI) with intelligent fallback |
-| Context intelligence | Indexed project search (FTS5), MCP bridge for context injection, Ψ Glyph Encoding for context compression |
-| Observability | Telemetry, doctor diagnostics, run records, and dashboard health cards |
-| Dev tool integration | CLI wrappers, desktop launchers, systemd background service, and coding environment sync |
+### 🔱 GlyphOS AI Compute
+Intelligent routing + context compression layer.
+
+- **Ψ Encoding** — GE1-JSON / GE1-LINES compression for long context
+- **Adaptive Routing** — psi coherence, action type, and context quality aware
+- **Local-First Guarantee** — All local traffic goes through the unified GlyphOS pipeline
+- **Cloud Control** — Master toggle, per-provider toggles, xAI-first default ordering
+
+### 🧠 Context Mode MCP
+Project-aware memory for your AI.
+
+- Automatic project indexing (FTS5)
+- Smart context retrieval + injection
+- Context quality scoring (0.0–1.0)
+- Graceful fallback on empty/degraded results
+
+### 📊 Dashboard + Observability
+Clean browser UI with real-time health, model switching, and run records.
+
+---
+
+## Why it matters
+
+| Benefit           | How it works |
+|-------------------|--------------|
+| **Stay local**    | Local-first routing with GlyphOS pipeline. Cloud only when you want it. |
+| **Stay sovereign**| Your data never leaves your machine unless you explicitly choose cloud. |
+| **Stay fast**     | Ψ (Glyph) encoding compresses context. Auto-fit optimizes GPU usage. |
+| **Stay stable**   | Context quality scoring, graceful degradation, guarded runtime startup. |
+| **Stay observable**| Real-time dashboard, doctor diagnostics, detailed telemetry. |
+
+---
 
 ## What ships
 
-| Component | Purpose |
-|-----------|---------|
-| `bin/llama-model` | CLI for registry management, switching, restart, discovery, and diagnostics |
-| `bin/llama-model-web` | Browser dashboard launcher |
-| `bin/llama-model-gui` | Desktop launcher (prefers web, falls back to Zenity) |
-| `scripts/build-llama-server.sh` | Fetches and compiles a host-specific `llama.cpp` runtime |
-| `integrations/public-glyphos-ai-compute/` | Bundled public GlyphOS AI Compute lane |
-| `integrations/context-mode-mcp/` | Optional Context Mode MCP package for indexed context and lifecycle checks |
-| `web/` | Browser dashboard assets and Python server |
-| `config/HELP.txt` | End-user help text |
-| `install.sh` | Local installer for user-space deployment |
+| Component                        | Purpose |
+|----------------------------------|-------|
+| `llama-model`                    | Main CLI (list, switch, doctor, sync, etc.) |
+| `llama-model-web`                | Browser dashboard |
+| `llama-model-gui`                | Desktop launcher |
+| `GlyphOS AI Compute`             | Bundled public routing + encoding engine |
+| `Context Mode MCP`               | Optional indexed context system |
+| `install.sh` + `safe_install`    | Portable installer (works on Alpine/minimal systems) |
 
 ---
 
-## Key features
+## Quick Start
 
-### 🔱 GlyphOS AI Compute pipeline
+```bash
+llama-model doctor
+llama-model build-runtime --backend auto
+llama-model-web
+```
 
-GlyphOS AI Compute is bundled as a public local integration lane. It turns glyph state into model-ready prompts and routes requests through the same local `llama.cpp` endpoint managed by Llama Model Manager.
-
-![Animated demo showing a verbose local AI request being converted into compact GlyphOS tokens, reducing the displayed payload by 60–90%, then routing through a local llama.cpp endpoint at 127.0.0.1:8081/v1. The final frame reads: Stay local. Stay private. Stay fast.](docs/branding/glyphos-encoding-demo.gif)
-
-- **Ψ Encoding** — compresses structured context payloads (GE1-JSON, GE1-LINES) to reduce token usage in long-context workflows
-- **Adaptive routing** — automatically routes requests based on psi coherence, action complexity, and context quality
-- **Local-first guarantee** — all local traffic goes through the unified GlyphOS pipeline; cloud is only used when local is unavailable
-- **Cloud provider control** — master toggle (`GLYPHOS_CLOUD_ENABLED`), per-provider toggles, xAI-first default ordering, and config.yaml API key support
-
-Terran sustained a continuous 8h 59m coding session using GlyphOS AI Compute routed through local LMM-managed `llama.cpp`: `Qwen3.5-9B-Q8_0.gguf`, context 128000, parallel 1. No fatal session drops. Reference: [Terran GlyphOS Long-Run Validation](docs/TERRAN-GLYPHOS-LONG-RUN-VALIDATION.md)
-
-### 🧠 Context-MCP integration
-
-![Animated demo showing the sovereignty bridge: Context Mode MCP indexes project files, retrieves relevant snippets, and injects them into prompts before GlyphOS routing.](docs/branding/sovereignty-bridge.gif)
-
-- **Project indexing** — auto-indexes project files into an FTS5 SQLite database for fast full-text search
-- **Context injection** — searches project context and injects relevant snippets into prompts before routing
-- **Context quality scoring** — 0.0–1.0 score based on result count, search strategy quality, degradation status, and index recency
-- **Graceful fallback** — handles empty, degraded, stale, and error context states without breaking the request
-
-### 📦 Installation and portability
-
-- **One-line install** — `curl -fsSL https://soulhash.ai/install_lmm.sh | sh`
-- **`safe_install`** — works on Alpine, minimal Docker, and stripped containers (no GNU coreutils dependency)
-- **`npm_hardened_ci`** — supply-chain safe npm installs with `--omit=optional` toggle for frontend and backend builds
-- **Zero root** — installs to `~/.local/`, never requires sudo
+Recommended first commands:
+- `llama-model doctor`
+- `llama-model list`
+- `llama-model sync-opencode --preset balanced`
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│                 Browser dashboard               │
-│              (http://127.0.0.1:8765)            │
-└─────────────────────┬───────────────────────────┘
-                      │ HTTP API
-┌─────────────────────▼───────────────────────────┐
-│           llama-model (CLI wrapper)              │
-│  registry · doctor · switch · restart · build   │
-└─────────────────────┬───────────────────────────┘
-                      │
-┌─────────────────────▼───────────────────────────┐
-│         GlyphOS OpenAI gateway                   │
-│  ┌──────────┐  ┌──────────┐  ┌──────────────┐  │
-│  │ Context  │  │ Ψ Encode │  │ Adaptive     │  │
-│  │ Pipeline │→ │ Pipeline │→ │ Router       │  │
-│  │ (FTS5)   │  │ (GE1)    │  │ (Local/Cloud)│  │
-│  └──────────┘  └──────────┘  └──────┬───────┘  │
-└─────────────────────────────────────┼──────────┘
-                                      │
-                    ┌─────────────────┼─────────────┐
-                    ▼                 ▼             ▼
-              llama.cpp          OpenAI/        Anthropic/
-              (local)            Claude         xAI (cloud)
+Browser Dashboard
+        ↓
+LMM Gateway (GlyphOS)
+   ┌──────────────┐
+   │ Context MCP  │ → Indexed project search
+   │ Ψ Encoding   │ → Context compression
+   │ Adaptive Router │ → Local-first + intelligent cloud fallback
+   └───────┬───────┘
+           │
+    llama.cpp (local)   ←→   Cloud (xAI / OpenAI / Anthropic)
 ```
 
 ---
 
-## Why it matters
+## Key Features Deep Dive
 
-| Benefit | How |
-|---------|-----|
-| Stay local | Local-first routing with cloud fallback only when needed |
-| Stay sovereign | No data leaves your machine unless you explicitly route to cloud |
-| Stay fast | Ψ encoding reduces token counts; auto-fit optimizes GPU offload |
-| Stay stable | Guarded startup, context quality scoring, graceful degradation |
-| Stay observable | Telemetry, doctor diagnostics, dashboard health cards |
-| Stay portable | Works on bare metal, Docker, Alpine, and stripped containers |
+**Local-First Guarantee**
+All local `llama.cpp` traffic is routed through the unified GlyphOS pipeline. No more direct bypasses.
+
+**Cloud Control**
+- `GLYPHOS_CLOUD_ENABLED` master toggle
+- Per-provider toggles
+- `GLYPHOS_PREFERRED_CLOUD_PROVIDER` (defaults to xAI)
+- API keys from env vars **or** `~/.glyphos/config.yaml`
+
+**Context Intelligence**
+Auto-indexing + quality-aware retrieval with graceful degradation.
+
+---
+
+## Installation & Portability
+
+- Works on Ubuntu, Debian, Fedora, Alpine, Docker, and stripped containers
+- `safe_install` fallback (no dependency on GNU `install`)
+- No silent compilation — always asks
+- Everything installs under `~/.local/`
+
+---
+
+## Common Commands
+
+```bash
+llama-model doctor
+llama-model list
+llama-model switch qwen3.5-8b-q8
+llama-model sync-opencode --preset balanced
+llama-model sync-glyphos
+llama-model claude-gateway start
+```
 
 ---
 
@@ -312,28 +330,6 @@ The dashboard has a `Context + GlyphOS` preference in global defaults. The toggl
 This toggle is operator-facing. It does not create a new network service or claim extra sandboxing; it makes the bundled combined workflow clear when Context Mode MCP retrieval and GlyphOS routing are used together.
 
 The Integrations panel also includes an **Activate feature** button for this card. That one click persists `LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE=1`, enables GlyphOS auto-sync, runs `llama-model sync-glyphos`, and refreshes the readiness card.
-
----
-
-## Common commands
-
-```bash
-llama-model list
-llama-model show gemma4-e4b-q8
-llama-model add gemma4-e4b-q8 /absolute/path/to/model.gguf --mmproj /absolute/path/to/mmproj.gguf
-llama-model discover ~/models
-llama-model build-runtime --backend auto
-llama-model switch qwen35-9b-q8
-llama-model sync-opencode --preset balanced
-llama-model sync-opencode --preset long-run
-llama-model sync-openclaw --profile lmm-eval qwen35-9b-q8
-llama-model sync-claude qwen35-9b-q8
-llama-model claude-gateway start
-llama-model sync-glyphos
-llama-model doctor
-```
-
-`llama-model doctor` also checks install health. After a curl or bootstrap install it should report `install_ok: yes`. If it reports `install_ok: no`, rerun `./install.sh` from the current checkout or rerun the latest bootstrap installer, then restart `llama-model-web`.
 
 ---
 
