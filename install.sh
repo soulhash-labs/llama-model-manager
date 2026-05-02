@@ -64,6 +64,20 @@ die() {
     exit 1
 }
 
+# safe_install — portable replacement for `install -m` (GNU coreutils).
+# Falls back to cp + chmod on minimal systems (Alpine, stripped containers).
+safe_install() {
+    local mode="$1"
+    local src="$2"
+    local dest="$3"
+    if command -v install >/dev/null 2>&1; then
+        install -m "$mode" "$src" "$dest"
+    else
+        cp "$src" "$dest"
+        chmod "$mode" "$dest"
+    fi
+}
+
 ensure_context_mode_mcp_dist() {
     local mcp_dir="$ROOT_DIR/integrations/context-mode-mcp"
 
@@ -306,10 +320,10 @@ require_source_tree
 ensure_context_mode_mcp_dist
 mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$APP_DIR" "$APP_SHARE_DIR"
 
-install -m 0755 "$ROOT_DIR/bin/llama-model" "$BIN_DIR/llama-model"
-install -m 0755 "$ROOT_DIR/bin/llama-model-gui" "$BIN_DIR/llama-model-gui"
-install -m 0755 "$ROOT_DIR/bin/llama-model-web" "$BIN_DIR/llama-model-web"
-install -m 0644 "$ROOT_DIR/config/HELP.txt" "$CONFIG_DIR/HELP.txt"
+safe_install 0755 "$ROOT_DIR/bin/llama-model" "$BIN_DIR/llama-model"
+safe_install 0755 "$ROOT_DIR/bin/llama-model-gui" "$BIN_DIR/llama-model-gui"
+safe_install 0755 "$ROOT_DIR/bin/llama-model-web" "$BIN_DIR/llama-model-web"
+safe_install 0644 "$ROOT_DIR/config/HELP.txt" "$CONFIG_DIR/HELP.txt"
 rm -rf "$APP_SHARE_DIR/web"
 cp -a "$ROOT_DIR/web" "$APP_SHARE_DIR/web"
 rm -rf "$APP_SHARE_DIR/scripts"
@@ -324,11 +338,11 @@ if [[ -d "$ROOT_DIR/runtime" ]]; then
     cp -a "$ROOT_DIR/runtime" "$APP_SHARE_DIR/runtime"
 fi
 mkdir -p "$APP_SHARE_DIR/branding"
-install -m 0644 "$ROOT_DIR/desktop/llama-model-manager-icon.svg" \
+safe_install 0644 "$ROOT_DIR/desktop/llama-model-manager-icon.svg" \
     "$APP_SHARE_DIR/branding/llama-model-manager-icon.svg"
 
 if [[ ! -f "$CONFIG_DIR/defaults.env" ]]; then
-    install -m 0644 "$ROOT_DIR/config/defaults.env.example" "$CONFIG_DIR/defaults.env"
+    safe_install 0644 "$ROOT_DIR/config/defaults.env.example" "$CONFIG_DIR/defaults.env"
     printf 'installed %s\n' "$CONFIG_DIR/defaults.env"
 else
     printf 'kept existing %s\n' "$CONFIG_DIR/defaults.env"
