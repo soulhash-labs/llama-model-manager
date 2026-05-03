@@ -272,51 +272,75 @@ EOF
 write_runtime_profiles_store() {
     mkdir -p "$CONFIG_DIR"
     command_available python3 || return 0
-    python3 - "$LLAMA_SERVER_RUNTIME_DIR" "$RUNTIME_PROFILES_FILE" <<'PY'
-import json
-import os
-import sys
+    # Validate each profile and build JSON in bash, then write via Python
+    {
+        echo '{"schema_version": 1, "items": ['
+        first=true
+        if [[ -d "$LLAMA_SERVER_RUNTIME_DIR/llama-server" ]]; then
+            for compat in "$LLAMA_SERVER_RUNTIME_DIR/llama-server"/*/llama-server.compat.env; do
+                [[ -f "$compat" ]] || continue
+                profile_dir="$(dirname "$compat")"
+                # Source the profile env to get expected backend
+                expected_backend="$(source "$compat" 2>/dev/null; echo "$LLAMA_BUNDLE_BACKEND")"
+                # Run validation
+                validate_runtime_profile "$profile_dir" "$expected_backend"
+                # Read validation results from global vars
+                $first || echo ","
+                first=false
+                python3 - "$profile_dir" "$compat" "$VALIDATE_RUNTIME_OK" "$VALIDATE_RUNTIME_STATUS" "$VALIDATE_RUNTIME_MESSAGE" "$VALIDATE_RUNTIME_MISSING_LIBS" "$VALIDATE_RUNTIME_VERSION_TEXT" "$VALIDATE_RUNTIME_BACKEND_DETECTED" <<'PY'
+import json, sys
 from pathlib import Path
-
-runtime_dir = Path(sys.argv[1])
-root = runtime_dir / "llama-server"
-out_path = Path(sys.argv[2])
-
-def parse_env_file(path: Path) -> dict[str, str]:
-    data: dict[str, str] = {}
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError:
-        return data
+profile_dir = Path(sys.argv[1])
+compat = Path(sys.argv[2])
+validation_ok = sys.argv[3]
+validation_status = sys.argv[4]
+validation_message = sys.argv[5]
+validation_missing_libs = sys.argv[6]
+validation_version_text = sys.argv[7]
+validation_backend_detected = sys.argv[8]
+# Parse compat env
+meta = {}
+try:
+    raw = compat.read_text(encoding="utf-8")
     for line in raw.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        value = value.strip().strip('"').strip("'")
-        data[key.strip()] = value
-    return data
-
-items: list[dict[str, str]] = []
-if root.is_dir():
-    for compat in sorted(root.glob("*/llama-server.compat.env")):
-        meta = parse_env_file(compat)
-        profile_id = compat.parent.name
-        items.append({
-            "id": profile_id,
-            "os": meta.get("LLAMA_BUNDLE_OS", ""),
-            "arch": meta.get("LLAMA_BUNDLE_ARCH", ""),
-            "backend": meta.get("LLAMA_BUNDLE_BACKEND", ""),
-            "label": meta.get("LLAMA_BUNDLE_LABEL", profile_id),
-            "source_ref": meta.get("LLAMA_BUNDLE_SOURCE_REF", ""),
-            "built_at": meta.get("LLAMA_BUNDLE_BUILT_AT", ""),
-            "binary_path": str((compat.parent / "llama-server").resolve()),
-            "manifest_path": str(compat.resolve()),
-        })
-
-payload = {"schema_version": 1, "items": items}
-out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        meta[key.strip()] = value.strip().strip('"').strip("'")
+except Exception:
+    pass
+item = {
+    "id": compat.parent.name,
+    "os": meta.get("LLAMA_BUNDLE_OS", ""),
+    "arch": meta.get("LLAMA_BUNDLE_ARCH", ""),
+    "backend": meta.get("LLAMA_BUNDLE_BACKEND", ""),
+    "label": meta.get("LLAMA_BUNDLE_LABEL", compat.parent.name),
+    "source_ref": meta.get("LLAMA_BUNDLE_SOURCE_REF", ""),
+    "built_at": meta.get("LLAMA_BUNDLE_BUILT_AT", ""),
+    "binary_path": str((compat.parent / "llama-server").resolve()),
+    "manifest_path": str(compat.resolve()),
+    "validation_ok": validation_ok == "yes",
+    "status": validation_status,
+    "validation_message": validation_message,
+    "missing_libs": validation_missing_libs,
+    "version_text": validation_version_text,
+    "binary_backend_detected": validation_backend_detected,
+}
+print(json.dumps(item), end="")
 PY
+            done
+        fi
+        echo ']}'
+    } | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+path = sys.argv[1]
+import json
+from pathlib import Path
+p = Path(path)
+p.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+' "$RUNTIME_PROFILES_FILE"
 }
 
 write_host_capability_store() {
@@ -1837,6 +1861,17 @@ select_compatible_bundled_binary() {
                     SELECTED_LLAMA_SERVER_SOURCE="bundled-cpu-fallback"
                     SELECTED_LLAMA_SERVER_STATUS="fallback"
                     SELECTED_LLAMA_SERVER_MESSAGE="${BUNDLED_SELECTION_FAILURE_REASON}; using validated bundled CPU fallback instead"
+                fi
+
+                # Run runtime profile validation
+                profile_dir="$(dirname "$candidate")"
+                validate_runtime_profile "$profile_dir" "$BUNDLE_VALIDATE_BACKEND"
+                if [[ "$VALIDATE_RUNTIME_OK" == "yes" ]]; then
+                    SELECTED_LLAMA_SERVER_STATUS="compatible"
+                    SELECTED_LLAMA_SERVER_MESSAGE="validated bundled ${BUNDLE_VALIDATE_LABEL} binary (runtime profile validated)"
+                else
+                    SELECTED_LLAMA_SERVER_STATUS="$VALIDATE_RUNTIME_STATUS"
+                    SELECTED_LLAMA_SERVER_MESSAGE="bundled ${BUNDLE_VALIDATE_LABEL} binary failed validation: $VALIDATE_RUNTIME_MESSAGE"
                 fi
                 return 0
             elif [[ -z "$BUNDLED_SELECTION_FAILURE_REASON" && -n "$BUNDLE_VALIDATE_REASON" ]]; then
@@ -3598,6 +3633,12 @@ print("glyphos_config=" + ("yes" if data.get("glyphos_config_exists") else "no")
     printf 'binary_message: %s\n' "${SELECTED_LLAMA_SERVER_MESSAGE:-}"
     printf 'binary_guidance: %s\n' "${SELECTED_LLAMA_SERVER_GUIDANCE:-}"
     printf 'binary_label: %s\n' "${SELECTED_LLAMA_SERVER_LABEL:-}"
+    printf 'validation_ok: %s\n' "${VALIDATE_RUNTIME_OK:-}"
+    printf 'validation_status: %s\n' "${VALIDATE_RUNTIME_STATUS:-}"
+    printf 'validation_message: %s\n' "${VALIDATE_RUNTIME_MESSAGE:-}"
+    printf 'validation_missing_libs: %s\n' "${VALIDATE_RUNTIME_MISSING_LIBS:-}"
+    printf 'validation_version_text: %s\n' "${VALIDATE_RUNTIME_VERSION_TEXT:-}"
+    printf 'validation_backend_detected: %s\n' "${VALIDATE_RUNTIME_BACKEND_DETECTED:-}"
     printf 'external_owner: %s\n' "$external_owner"
     printf 'external_owner_unit: %s\n' "$external_owner_unit"
     printf 'external_owner_message: %s\n' "$external_owner_message"
