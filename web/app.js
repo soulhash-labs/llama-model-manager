@@ -746,8 +746,14 @@ function renderStatus(data) {
     ]),
   );
   setText("#api-base", data.gateway_api_base || data.api_base || "-");
+  setText("#anthropic-api-base", data.gateway_anthropic_api_base || "-");
+  const formats = data.gateway_formats || [];
+  const formatText = formats.length > 0
+    ? formats.map(f => f.charAt(0).toUpperCase() + f.slice(1)).join(" + ")
+    : "-";
+  setText("#lmm-gateway-formats", formatText);
   setText("#integration-endpoint-note", joinNotes([
-    "Routed through LMM + GlyphOS.",
+    "Gateway serves both OpenAI (/v1/chat/completions) and Anthropic (/v1/messages) formats",
     data.gateway_backend_api_base ? `backend ${data.gateway_backend_api_base}` : "",
     data.gateway_harness_mode_default ? `default ${routeModeLabel(data.gateway_harness_mode_default)}` : "",
     "All requests benefit from context injection and Ψ encoding.",
