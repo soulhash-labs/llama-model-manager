@@ -4,17 +4,17 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 12
 current_phase_name: runtime-packaging
-current_plan: 2
+current_plan: 3
 status: in-progress
-stopped_at: Completed 12-runtime-packaging-02-PLAN.md
-last_updated: "2026-05-03T06:08:27Z"
+stopped_at: Completed 12-runtime-packaging-03-PLAN.md
+last_updated: "2026-05-03T06:26:11.156Z"
 last_activity: 2026-05-03
 progress:
   total_phases: 12
   completed_phases: 7
-  total_plans: 13
-  completed_plans: 12
-  percent: 61
+  total_plans: 5
+  completed_plans: 3
+  percent: 60
 ---
 
 # Project State
@@ -27,7 +27,7 @@ progress:
 **Current Plan:** 0
 **Status:** Phase 12 planned — ready to execute
 **Last Activity:** 2026-05-03
-**Progress:** [█████░░░░░] 48%
+**Progress:** [█████░░░░░] 52%
 
 ## Phase Summary
 
@@ -48,9 +48,13 @@ progress:
 |------|-------|---------|-----------|
 | 2026-05-03 | 12 | Wrapper script + payload binary pattern for runtime bundles | Simpler, no external dependency, works with colocated libs |
 | 2026-05-03 | 12 | Centralized payload resolution via resolve_bundle_payload_binary() | All validation functions need to inspect the real ELF binary, not the wrapper script |
+| 2026-05-03 | 12 | 4-tier runtime selection priority (explicit → bundled GPU → bundled CPU → external) | Ensures user's explicit choice honored while providing sensible fallbacks |
+| 2026-05-03 | 12 | CUDA guardrail blocks silent CPU fallback for CUDA models | Silent fallback causes confusing performance issues |
+| 2026-05-03 | 12 | Persist only bundled runtimes (not external PATH binaries) to defaults.env | External binaries may not be stable across environments |
 - [Phase 12-runtime-packaging]: Run validate_runtime_profile() during runtime profile discovery to mark invalid bundles before selection
 - [Phase 12-runtime-packaging]: Expose validation results (ok, status, missing_libs, version_text, backend_detected) in runtime profile JSON for dashboard consumption
 - [Phase 12-runtime-packaging]: Show validation status in doctor output so operators can diagnose broken CUDA/vulkan bundles
+- [Phase 12-runtime-packaging]: Added 4-tier selection with CUDA guardrail and runtime persistence
 
 ## Blockers
 
