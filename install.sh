@@ -64,6 +64,104 @@ die() {
     exit 1
 }
 
+# build_runtime_during_install — auto-build a bundled llama.cpp runtime after
+# the installer binaries are in place.  Replaces the old interactive-only prompt
+# at the end of the script so fresh installs get GPU offload out of the box.
+#
+# Behaviour:
+#   - Detects host OS/arch/backends using the installed `llama-model doctor`
+#   - If a GPU backend (cuda/vulkan/metal) is available on the host, attempts
+#     to build that backend + CPU fallback automatically
+#   - Silently degrades to CPU-only if GPU build dependencies are missing
+#   - Never blocks; build failures are logged, not fatal
+build_runtime_during_install() {
+    local bin="$BIN_DIR/llama-model"
+    [[ -x "$bin" ]] || { printf 'post-install: skipping runtime build — %s not installed yet\n' "$bin" >&2; return 0; }
+
+    printf 'post-install: detecting host GPU capabilities for runtime build...\n'
+
+    # Fast-path: check for any GPU runtime signal.  We probe for the common
+    # indicators that detect_host_backends() would use, without invoking
+    # the full doctor output.
+    local has_gpu="no"
+    local primary_backend=""
+    local os
+    os="$(uname -s)"
+
+    case "$os" in
+        Linux)
+            if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+                has_gpu="yes"
+                primary_backend="cuda"
+            elif ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so'; then
+                has_gpu="yes"
+                primary_backend="vulkan"
+            fi
+            ;;
+        Darwin)
+            # macOS always has Metal if it's Apple Silicon or recent Intel
+            has_gpu="yes"
+            primary_backend="metal"
+            ;;
+    esac
+
+    if [[ "$has_gpu" != "yes" ]]; then
+        printf 'post-install: no GPU runtime detected on this host; building CPU fallback only\n'
+        primary_backend="cpu"
+    fi
+
+    if [[ -t 0 && -t 1 ]]; then
+        # Interactive: show what we're doing and ask
+        printf 'post-install: host %s backend detected\n' "$primary_backend"
+        printf 'Would you like to compile a local llama.cpp runtime now? [Y/n] '
+        local reply
+        read -r reply || reply=""
+        reply="${reply,,}"
+        if [[ "$reply" == "n" || "$reply" == "no" ]]; then
+            printf 'post-install: runtime build skipped by user\n'
+            return 0
+        fi
+    else
+        # Non-interactive / headless: only auto-build if deps are trivially
+        # available (no sudo prompts, no user interaction needed).
+        if [[ "$primary_backend" == "cpu" ]]; then
+            printf 'post-install: non-interactive install on CPU-only host; building CPU runtime\n'
+        elif [[ "$primary_backend" == "cuda" ]] && ! command -v nvcc >/dev/null 2>&1; then
+            printf 'post-install: CUDA host detected but nvcc not in PATH; skipping GPU build\n'
+            printf 'note: set LMM_AUTO_BUILD_RUNTIME=1 to force, or run manually after installing CUDA toolkit\n'
+            primary_backend="cpu"
+            printf 'post-install: falling back to CPU-only runtime\n'
+        elif [[ "$primary_backend" == "vulkan" ]] && ! command -v glslc >/dev/null 2>&1 && ! command -v glslangValidator >/dev/null 2>&1; then
+            printf 'post-install: Vulkan host detected but SDK tools not in PATH; skipping GPU build\n'
+            printf 'note: set LMM_AUTO_BUILD_RUNTIME=1 to force, or run manually after installing Vulkan SDK\n'
+            primary_backend="cpu"
+            printf 'post-install: falling back to CPU-only runtime\n'
+        else
+            printf 'post-install: non-interactive install with %s build tools available; building %s runtime\n' "$primary_backend" "$primary_backend"
+        fi
+    fi
+
+    # Force the build to write into the installed app share, not the source
+    # checkout.  Without this, build-runtime resolves APP_ROOT to the repo
+    # directory (because web/ exists there) and writes binaries to the wrong
+    # location.
+    LLAMA_SERVER_RUNTIME_DIR="${APP_SHARE_DIR}/runtime" \
+    LLAMA_AUTO_INSTALL_DEPS=1 \
+        "$bin" build-runtime --backend "$primary_backend" 2>&1 || true
+
+    # Verify something was produced
+    local runtime_dir="${APP_SHARE_DIR}/runtime/llama-server"
+    if [[ -d "$runtime_dir" ]] && find "$runtime_dir" -name 'llama-server' -type f -print -quit 2>/dev/null | grep -q .; then
+        printf 'post-install: runtime build completed successfully\n'
+        find "$runtime_dir" -name 'llama-server' -type f | while read -r b; do
+            printf '  -> %s\n' "$b"
+        done
+    else
+        printf 'post-install: runtime build did not produce a binary\n'
+        printf 'post-install: run "%s build-runtime --backend auto" manually to retry\n' "$bin"
+    fi
+}
+
 # safe_install — portable replacement for `install -m` (GNU coreutils).
 # Uses `install` if available and working, otherwise falls back to cp + chmod.
 # This handles minimal environments (Alpine, stripped containers) where
@@ -351,6 +449,16 @@ rm -rf "$APP_SHARE_DIR/integrations"
 cp -a "$ROOT_DIR/integrations" "$APP_SHARE_DIR/integrations"
 clean_python_cache "$APP_SHARE_DIR/integrations"
 printf 'refreshed bundled integrations under %s/integrations\n' "$(compact_home_path "$APP_SHARE_DIR")"
+
+# Step 1: Build bundled llama.cpp runtime for the host.  This replaces the old
+# "no runtime shipped" gap — we now compile GPU/CPU binaries during install so
+# fresh installs can actually run models on their hardware.
+build_runtime_during_install
+
+# Step 2: Copy any pre-built runtime bundles from the source tree (rare: only
+# if the developer built them locally before packaging).  The install build
+# from Step 1 already wrote to $APP_SHARE_DIR/runtime, so this only layers
+# on extras that aren't host-matched.
 if [[ -d "$ROOT_DIR/runtime" ]]; then
     rm -rf "$APP_SHARE_DIR/runtime"
     cp -a "$ROOT_DIR/runtime" "$APP_SHARE_DIR/runtime"
@@ -434,15 +542,25 @@ printf '  harness endpoint: http://%s:%s/v1\n' "$(default_value LLAMA_MODEL_GATE
 printf '  backend endpoint: http://%s:%s/v1\n' "$(default_value LLAMA_SERVER_HOST 127.0.0.1)" "$(default_value LLAMA_SERVER_PORT 8081)"
 printf '  default route mode: LLAMA_MODEL_HARNESS_MODE=%s\n' "$(default_value LLAMA_MODEL_HARNESS_MODE routed)"
 
+# Conditional runtime retry — only prompt if the earlier build attempt
+# (build_runtime_during_install) did not produce a usable binary.
+# This catches cases where deps were missing or the build failed silently.
 if [[ -t 0 && -t 1 ]]; then
-    printf '\nWould you like to check/install build dependencies and compile a local llama.cpp runtime now? [Y/n] '
-    read -r reply || reply=""
-    reply="${reply,,}"
-    if [[ -z "$reply" || "$reply" == "y" || "$reply" == "yes" ]]; then
-        if "$BIN_DIR/llama-model" build-runtime --backend auto; then
-            printf 'Local runtime build completed.\n'
-        else
-            printf 'Runtime build did not complete. Resolve any missing dependencies and rerun: llama-model build-runtime --backend auto\n' >&2
+    runtime_dir="${APP_SHARE_DIR}/runtime/llama-server"
+    has_runtime="no"
+    if [[ -d "$runtime_dir" ]] && find "$runtime_dir" -name 'llama-server' -type f -print -quit 2>/dev/null | grep -q .; then
+        has_runtime="yes"
+    fi
+    if [[ "$has_runtime" != "yes" ]]; then
+        printf '\nNo llama.cpp runtime was built during install. Compile one now? [Y/n] '
+        read -r reply || reply=""
+        reply="${reply,,}"
+        if [[ -z "$reply" || "$reply" == "y" || "$reply" == "yes" ]]; then
+            if "$BIN_DIR/llama-model" build-runtime --backend auto; then
+                printf 'Local runtime build completed.\n'
+            else
+                printf 'Runtime build did not complete. Resolve any missing dependencies and rerun: llama-model build-runtime --backend auto\n' >&2
+            fi
         fi
     fi
 fi
