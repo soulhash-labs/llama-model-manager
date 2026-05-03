@@ -1889,6 +1889,9 @@ probe_server_binary() {
     local configured_path="${REQUESTED_LLAMA_SERVER_BIN:-}"
     local default_path="$DEFAULT_LLAMA_SERVER_BIN"
     local runtime_root
+    local preferred_backend
+    local cuda_runtime_found="no"
+    local selected_cuda_binary=""
 
     SELECTED_LLAMA_SERVER_HOST_OS="$(detect_host_os)"
     SELECTED_LLAMA_SERVER_HOST_ARCH="$(detect_host_arch)"
@@ -1902,28 +1905,42 @@ probe_server_binary() {
     SELECTED_LLAMA_SERVER_LABEL=""
     SELECTED_LLAMA_SERVER_BUNDLE_MANIFEST=""
     SELECTED_LLAMA_SERVER_PATH_KIND=""
+    SELECTED_LLAMA_SERVER_CUDA_OK="no"
 
     requested_backend="$(infer_backend_from_device "${LLAMA_SERVER_DEVICE:-}")"
     runtime_root="$(canonicalize_path "$LLAMA_SERVER_RUNTIME_DIR" 2>/dev/null || printf '%s\n' "$LLAMA_SERVER_RUNTIME_DIR")"
+    preferred_backend="$(detect_primary_build_backend "${requested_backend:-auto}")"
 
+    # === PRIORITY 1: Explicit LLAMA_SERVER_BIN (if set and validates) ===
     if [[ -n "$configured_path" ]]; then
         SELECTED_LLAMA_SERVER_PATH_KIND="configured"
         if [[ -x "$configured_path" ]]; then
             if [[ -n "$runtime_root" ]] && [[ "$(canonicalize_path "$configured_path" 2>/dev/null || printf '%s\n' "$configured_path")" == "$runtime_root"* ]]; then
+                # It's a bundled binary
                 if validate_bundled_binary "$configured_path"; then
-                    select_binary_record \
-                        "$configured_path" \
-                        "bundled" \
-                        "$BUNDLE_VALIDATE_BACKEND" \
-                        "compatible" \
-                        "validated configured bundled ${BUNDLE_VALIDATE_LABEL} binary" \
-                        "" \
-                        "$BUNDLE_VALIDATE_LABEL" \
-                        "$BUNDLE_VALIDATE_MANIFEST"
-                    return 0
+                    # Run runtime profile validation
+                    local profile_dir="$(dirname "$configured_path")"
+                    validate_runtime_profile "$profile_dir" "$BUNDLE_VALIDATE_BACKEND"
+                    if [[ "$VALIDATE_RUNTIME_OK" == "yes" ]]; then
+                        select_binary_record \
+                            "$configured_path" \
+                            "bundled" \
+                            "$BUNDLE_VALIDATE_BACKEND" \
+                            "compatible" \
+                            "validated configured bundled ${BUNDLE_VALIDATE_LABEL} binary (runtime profile validated)" \
+                            "" \
+                            "$BUNDLE_VALIDATE_LABEL" \
+                            "$BUNDLE_VALIDATE_MANIFEST"
+                        SELECTED_LLAMA_SERVER_CUDA_OK="$([[ "$BUNDLE_VALIDATE_BACKEND" == "cuda" ]] && printf 'yes' || printf 'no')"
+                        return 0
+                    else
+                        die "configured bundled binary ${configured_path} failed validation: $VALIDATE_RUNTIME_MESSAGE. Fix the bundle or select a different binary."
+                    fi
+                else
+                    die "configured bundled binary ${configured_path} failed validation: ${BUNDLE_VALIDATE_REASON}. Fix the bundle or select a different binary."
                 fi
-                fallback_note="configured bundled binary rejected: ${BUNDLE_VALIDATE_REASON}"
             else
+                # External binary
                 if validate_external_binary "$configured_path"; then
                     local ext_backend="${EXTERNAL_VALIDATE_BACKEND:-cpu}"
                     select_binary_record \
@@ -1934,14 +1951,36 @@ probe_server_binary() {
                         "using external llama-server binary (${ext_backend} backend detected)" \
                         "" \
                         "${ext_backend^} external"
+                    SELECTED_LLAMA_SERVER_CUDA_OK="$([[ "$ext_backend" == "cuda" ]] && printf 'yes' || printf 'no')"
                     return 0
+                else
+                    die "configured external binary ${configured_path} is not valid: ${EXTERNAL_VALIDATE_REASON}. Fix the binary or select a different one."
                 fi
-                fallback_note="configured binary rejected: ${EXTERNAL_VALIDATE_REASON}"
             fi
         else
-            fallback_note="configured binary not found: ${configured_path}"
+            die "configured binary not found: ${configured_path}"
         fi
-    elif [[ -x "$default_path" ]]; then
+    fi
+
+    # === PRIORITY 2: Validated bundled runtime matching preferred backend ===
+    if select_compatible_bundled_binary_with_validation "$preferred_backend"; then
+        SELECTED_LLAMA_SERVER_CUDA_OK="$([[ "$SELECTED_LLAMA_SERVER_BACKEND" == "cuda" ]] && printf 'yes' || printf 'no')"
+        return 0
+    fi
+
+    # === PRIORITY 3: Validated bundled CPU runtime ===
+    if [[ "$preferred_backend" != "cpu" ]] && select_compatible_bundled_binary_with_validation "cpu"; then
+        SELECTED_LLAMA_SERVER_CUDA_OK="no"
+        if [[ -n "$fallback_note" ]]; then
+            SELECTED_LLAMA_SERVER_SOURCE="bundled-cpu-fallback"
+            SELECTED_LLAMA_SERVER_STATUS="fallback"
+            SELECTED_LLAMA_SERVER_MESSAGE="${fallback_note}; using validated bundled CPU fallback"
+        fi
+        return 0
+    fi
+
+    # === PRIORITY 4: Validated external binary with warning ===
+    if [[ -x "$default_path" ]]; then
         SELECTED_LLAMA_SERVER_PATH_KIND="default"
         if validate_external_binary "$default_path"; then
             local ext_backend="${EXTERNAL_VALIDATE_BACKEND:-cpu}"
@@ -1949,26 +1988,18 @@ probe_server_binary() {
                 "$default_path" \
                 "external" \
                 "$ext_backend" \
-                "external-detected" \
-                "using installed llama-server from PATH (${ext_backend} backend detected)" \
-                "" \
+                "external-with-warning" \
+                "No validated bundled runtime found; using external binary from PATH. Run 'llama-model build-runtime --backend auto' for best results." \
+                "$(runtime_build_guidance)" \
                 "${ext_backend^} external"
+            SELECTED_LLAMA_SERVER_CUDA_OK="$([[ "$ext_backend" == "cuda" ]] && printf 'yes' || printf 'no')"
             return 0
         fi
         fallback_note="default installed binary rejected: ${EXTERNAL_VALIDATE_REASON}"
     fi
 
-    if select_compatible_bundled_binary "$requested_backend"; then
-        if [[ -n "$fallback_note" && "$SELECTED_LLAMA_SERVER_BACKEND" == "cpu" ]]; then
-            SELECTED_LLAMA_SERVER_SOURCE="bundled-cpu-fallback"
-            SELECTED_LLAMA_SERVER_STATUS="fallback"
-            SELECTED_LLAMA_SERVER_MESSAGE="${fallback_note}; using validated bundled CPU fallback instead"
-        elif [[ -n "$fallback_note" ]]; then
-            SELECTED_LLAMA_SERVER_MESSAGE="${fallback_note}; using validated bundled ${SELECTED_LLAMA_SERVER_BACKEND} binary instead"
-        fi
-        return 0
-    fi
-
+    # Nothing found
+    SELECTED_LLAMA_SERVER_CUDA_OK="no"
     select_binary_record \
         "" \
         "none" \
@@ -1976,6 +2007,47 @@ probe_server_binary() {
         "unavailable" \
         "${fallback_note:-${BUNDLED_SELECTION_FAILURE_REASON:-no compatible llama-server binary found}}" \
         "$(runtime_build_guidance)"
+    return 1
+}
+
+# Helper: select compatible bundled binary WITH runtime profile validation
+select_compatible_bundled_binary_with_validation() {
+    local requested_backend="$1"
+    local order
+    local backend
+    local candidate
+    local profile_dir
+
+    BUNDLED_SELECTION_FAILURE_REASON=""
+    order="$(bundled_binary_preference_order "$requested_backend")"
+    for backend in ${order//,/ }; do
+        while IFS= read -r -d '' candidate; do
+            if validate_bundled_binary "$candidate" && [[ "$BUNDLE_VALIDATE_BACKEND" == "$backend" ]]; then
+                # Run runtime profile validation
+                profile_dir="$(dirname "$candidate")"
+                validate_runtime_profile "$profile_dir" "$BUNDLE_VALIDATE_BACKEND"
+                if [[ "$VALIDATE_RUNTIME_OK" == "yes" ]]; then
+                    select_binary_record \
+                        "$candidate" \
+                        "bundled" \
+                        "$BUNDLE_VALIDATE_BACKEND" \
+                        "compatible" \
+                        "validated bundled ${BUNDLE_VALIDATE_LABEL} binary (runtime profile validated)" \
+                        "" \
+                        "$BUNDLE_VALIDATE_LABEL" \
+                        "$BUNDLE_VALIDATE_MANIFEST"
+                    return 0
+                else
+                    if [[ -z "$BUNDLED_SELECTION_FAILURE_REASON" ]]; then
+                        BUNDLED_SELECTION_FAILURE_REASON="bundled ${BUNDLE_VALIDATE_LABEL} binary failed validation: $VALIDATE_RUNTIME_MESSAGE"
+                    fi
+                fi
+            elif [[ -z "$BUNDLED_SELECTION_FAILURE_REASON" && -n "$BUNDLE_VALIDATE_REASON" ]]; then
+                BUNDLED_SELECTION_FAILURE_REASON="$BUNDLE_VALIDATE_REASON"
+            fi
+        done < <(list_bundled_binaries)
+    done
+
     return 1
 }
 
@@ -2997,6 +3069,20 @@ ${SELECTED_LLAMA_SERVER_GUIDANCE}"
 
     LLAMA_SERVER_BIN="$SELECTED_LLAMA_SERVER_BIN"
     expected_device_backend="$(infer_backend_from_device "$device")"
+
+    # === CUDA GUARDRAIL: Block silent CPU fallback for CUDA models on CUDA hosts ===
+    if [[ "$expected_device_backend" == "cuda" || "$device" == cuda* ]]; then
+        # Model requests CUDA
+        if [[ "$SELECTED_LLAMA_SERVER_CUDA_OK" != "yes" ]]; then
+            # No validated CUDA runtime selected
+            if [[ ",$SELECTED_LLAMA_SERVER_HOST_BACKENDS," == *",cuda,"* ]]; then
+                die "Model requests CUDA but no validated CUDA runtime is available. Run 'llama-model build-runtime --backend cuda' to build one."
+            else
+                die "Model requests CUDA but host does not have CUDA capability. Use a CPU-compatible model or switch device to 'cpu'."
+            fi
+        fi
+    fi
+
     if [[ "$SELECTED_LLAMA_SERVER_BACKEND" == "cpu" ]]; then
         if [[ ",$SELECTED_LLAMA_SERVER_HOST_BACKENDS," == *",cuda,"* ]]; then
             printf 'warning: host has CUDA capability but selected llama-server binary is CPU-only; GPU offload will not be used\n' >&2

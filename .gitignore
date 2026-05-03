@@ -38,3 +38,4 @@ docs/
 # Local branding/media artifacts
 web/branding/
 desktop/*icon*.svg
+.planning/
