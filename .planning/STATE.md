@@ -4,17 +4,17 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 12
 current_phase_name: runtime-packaging
-current_plan: 4
+current_plan: 5
 status: in-progress
-stopped_at: Completed 12-runtime-packaging-04-PLAN.md
-last_updated: "2026-05-03T06:46:35Z"
+stopped_at: Completed 12-runtime-packaging-05-PLAN.md
+last_updated: "2026-05-03T07:01:49Z"
 last_activity: 2026-05-03
 progress:
   total_phases: 1
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 5
-  completed_plans: 4
-  percent: 57
+  completed_plans: 5
+  percent: 61
 ---
 
 # Project State
@@ -27,7 +27,7 @@ progress:
 **Current Plan:** 0
 **Status:** Phase 12 planned — ready to execute
 **Last Activity:** 2026-05-03
-**Progress:** [██████░░░░] 57%
+**Progress:** [██████░░░░] 61%
 
 ## Phase Summary
 
@@ -51,6 +51,9 @@ progress:
 | 2026-05-03 | 12 | 4-tier runtime selection priority (explicit → bundled GPU → bundled CPU → external) | Ensures user's explicit choice honored while providing sensible fallbacks |
 | 2026-05-03 | 12 | CUDA guardrail blocks silent CPU fallback for CUDA models | Silent fallback causes confusing performance issues |
 | 2026-05-03 | 12 | Persist only bundled runtimes (not external PATH binaries) to defaults.env | External binaries may not be stable across environments |
+| 2026-05-03 | 12 | Reuse existing doctor dict in /api/state response | Runtime validation fields already included via llama-model doctor output |
+| 2026-05-03 | 12 | Render runtime validation as subpanel in dashboard hero section | Consistent with other dashboard panels, clear visual status indicators |
+| 2026-05-03 | 12 | Post-build validation gates in installer (ldd + --version) | Prevent persisting broken runtime bundles, explicit error messages |
 - [Phase 12-runtime-packaging]: Run validate_runtime_profile() during runtime profile discovery to mark invalid bundles before selection
 - [Phase 12-runtime-packaging]: Expose validation results (ok, status, missing_libs, version_text, backend_detected) in runtime profile JSON for dashboard consumption
 - [Phase 12-runtime-packaging]: Show validation status in doctor output so operators can diagnose broken CUDA/vulkan bundles
@@ -62,6 +65,6 @@ progress:
 
 ## Session
 
-**Last Date:** 2026-05-03T06:46:35Z
-**Stopped At:** Completed 12-runtime-packaging-04-PLAN.md
+**Last Date:** 2026-05-03T07:01:49Z
+**Stopped At:** Completed 12-runtime-packaging-05-PLAN.md
 **Resume File:** None
