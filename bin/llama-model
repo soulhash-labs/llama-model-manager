@@ -1648,6 +1648,78 @@ validate_bundled_binary() {
     return 0
 }
 
+validate_runtime_profile() {
+    local profile_dir="$1"
+    local expected_backend="$2"
+    local binary=""
+    local payload=""
+    local info=""
+    local ldd_output=""
+    local version_output=""
+    local detected_backend=""
+    local missing_libs=""
+
+    # Reset global validation variables
+    VALIDATE_RUNTIME_OK="no"
+    VALIDATE_RUNTIME_STATUS="unknown"
+    VALIDATE_RUNTIME_MESSAGE=""
+    VALIDATE_RUNTIME_MISSING_LIBS=""
+    VALIDATE_RUNTIME_VERSION_TEXT=""
+    VALIDATE_RUNTIME_BACKEND_DETECTED=""
+
+    # 1. Check binary exists and is executable
+    binary="$profile_dir/llama-server"
+    if [[ ! -x "$binary" ]]; then
+        VALIDATE_RUNTIME_STATUS="invalid-binary-missing"
+        VALIDATE_RUNTIME_MESSAGE="runtime profile binary not found or not executable: $binary"
+        return 1
+    fi
+
+    # 2. Run ldd check on payload binary
+    payload="$(resolve_bundle_payload_binary "$binary")"
+    info="$(binary_file_info "$payload")"
+
+    if [[ -n "$info" && "$info" != *"script"* && "$info" != *"text executable"* ]]; then
+        if command_available ldd && [[ "$info" == *ELF* ]]; then
+            ldd_output="$(ldd "$payload" 2>&1 || true)"
+            missing_libs="$(printf '%s' "$ldd_output" | grep -E 'not found' | grep -E 'libggml|libllama|libmtmd' | awk '{print $1}' | tr '\n' ',' | sed 's/,$//' || true)"
+            if [[ -n "$missing_libs" ]]; then
+                VALIDATE_RUNTIME_OK="no"
+                VALIDATE_RUNTIME_STATUS="invalid-missing-libs"
+                VALIDATE_RUNTIME_MISSING_LIBS="$missing_libs"
+                VALIDATE_RUNTIME_MESSAGE="runtime profile has missing libraries: $missing_libs"
+                return 1
+            fi
+        fi
+    fi
+
+    # 3. Check --version works
+    version_output="$($binary --version 2>&1 || true)"
+    if [[ -z "$version_output" ]]; then
+        VALIDATE_RUNTIME_STATUS="invalid-version-check"
+        VALIDATE_RUNTIME_MESSAGE="runtime profile binary --version check failed"
+        return 1
+    fi
+    VALIDATE_RUNTIME_VERSION_TEXT="$version_output"
+
+    # 4. Detect backend
+    detected_backend="$(detect_external_binary_backend "$binary")"
+    VALIDATE_RUNTIME_BACKEND_DETECTED="$detected_backend"
+
+    # 5. Check backend match
+    if [[ -n "$expected_backend" && "$detected_backend" != "$expected_backend" ]]; then
+        VALIDATE_RUNTIME_STATUS="invalid-backend-mismatch"
+        VALIDATE_RUNTIME_MESSAGE="runtime profile backend ($detected_backend) does not match expected ($expected_backend)"
+        return 1
+    fi
+
+    # All checks passed
+    VALIDATE_RUNTIME_OK="yes"
+    VALIDATE_RUNTIME_STATUS="compatible"
+    VALIDATE_RUNTIME_MESSAGE="runtime profile validated successfully"
+    return 0
+}
+
 detect_external_binary_backend() {
     local binary="$1"
     local info=""
