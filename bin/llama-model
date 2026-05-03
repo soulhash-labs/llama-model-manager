@@ -2308,6 +2308,36 @@ locate_built_llama_server() {
     find "$build_dir" -type f -name 'llama-server' -perm -u+x | sort | head -n 1
 }
 
+locate_built_runtime_dir() {
+    local binary="$1"
+    local dir
+    dir="$(dirname "$binary")"
+    (cd "$dir" && pwd -P)
+}
+
+copy_runtime_bundle_files() {
+    local runtime_dir="$1"
+    local install_dir="$2"
+    mkdir -p "$install_dir"
+    # Copy the llama-server binary
+    find "$runtime_dir" -maxdepth 1 -type f -name 'llama-server' -perm -u+x -exec cp -a {} "$install_dir/" \;
+    # Copy all .so files (libllama*, libmtmd*, libggml*)
+    find "$runtime_dir" -maxdepth 1 \( -name 'libllama*.so*' -o -name 'libmtmd*.so*' -o -name 'libggml*.so*' \) -exec cp -a {} "$install_dir/" \;
+}
+
+resolve_bundle_payload_binary() {
+    local binary="$1"
+    local bin_dir
+    local base_name
+    bin_dir="$(dirname "$binary")"
+    base_name="$(basename "$binary")"
+    if [[ -x "$bin_dir/${base_name}.bin" ]]; then
+        printf '%s\n' "$bin_dir/${base_name}.bin"
+        return 0
+    fi
+    printf '%s\n' "$binary"
+}
+
 build_runtime_backend() {
     local src_dir="$1"
     local backend="$2"
