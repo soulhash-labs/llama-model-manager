@@ -1557,6 +1557,21 @@ input:focus {
   }
 }
 
+.runtime-status-invalid {
+  border-color: rgba(208, 67, 97, 0.18);
+  background: linear-gradient(145deg, rgba(208, 67, 97, 0.08), rgba(255, 255, 255, 0.92));
+}
+
+.runtime-status-compatible {
+  border-color: rgba(24, 143, 104, 0.2);
+  background: linear-gradient(145deg, rgba(24, 143, 104, 0.08), rgba(255, 255, 255, 0.92));
+}
+
+.runtime-status-warning {
+  border-color: rgba(197, 72, 26, 0.2);
+  background: linear-gradient(145deg, rgba(197, 72, 26, 0.07), rgba(255, 255, 255, 0.92));
+}
+
 /* Remote model search and serialized download lifecycle controls. */
 .inline-field {
   display: inline-flex;

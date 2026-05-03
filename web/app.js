@@ -239,6 +239,126 @@ function binarySummary(doctor) {
   ]);
 }
 
+function renderRuntimeValidation(state) {
+  const doctor = state.doctor || {};
+  const runtimeValidationOk = String(doctor.runtime_validation_ok || "unknown").trim();
+  const runtimeStatus = String(doctor.runtime_status || "").trim();
+  const runtimeMissingLibs = doctor.runtime_missing_libs || "";
+  const binarySource = String(doctor.binary_source || "").trim();
+  const startupCategory = String(doctor.startup_category || "").trim();
+
+  // Find or create the runtime validation card in the hero section
+  let card = document.getElementById("runtime-validation-card");
+  if (!card) {
+    // Create the card if it doesn't exist - insert after hero-build element
+    const heroBuild = document.getElementById("hero-build");
+    if (heroBuild) {
+      card = document.createElement("div");
+      card.id = "runtime-validation-card";
+      card.className = "panel subpanel";
+      heroBuild.parentNode.insertBefore(card, heroBuild.nextSibling);
+    }
+  }
+  if (!card) return;
+
+  // Handle startup blocked state (shown at top of page)
+  const startupBanner = document.getElementById("startup-blocked-banner");
+  if (startupCategory) {
+    if (!startupBanner) {
+      const banner = document.createElement("div");
+      banner.id = "startup-blocked-banner";
+      banner.className = "notice-banner notice-warning";
+      const hero = document.querySelector(".hero");
+      if (hero) {
+        hero.parentNode.insertBefore(banner, hero);
+      }
+    }
+    const banner = document.getElementById("startup-blocked-banner");
+    if (banner) {
+      banner.classList.remove("hidden");
+      banner.innerHTML = `
+        <div style="display:flex;align-items:center;gap:0.55rem;margin-bottom:0.4rem;">
+          <span class="panel-tag">Startup Blocked</span>
+          <strong>${escapeHtml(startupCategory)}</strong>
+        </div>
+        <div>${escapeHtml(doctor.startup_diagnosis || "")}</div>
+        <div style="margin-top:0.4rem;font-weight:600;">Suggested fix: ${escapeHtml(doctor.startup_suggested_fix || "")}</div>
+      `;
+    }
+  } else if (startupBanner) {
+    startupBanner.classList.add("hidden");
+  }
+
+  // Runtime validation card
+  if (runtimeValidationOk === "yes") {
+    // VALID - show green indicator
+    const backend = String(doctor.runtime_backend_detected || doctor.binary_backend || "").trim();
+    card.innerHTML = `
+      <div style="display:flex;align-items:center;gap:0.55rem;margin-bottom:0.3rem;">
+        <span class="status-pill status-good-fit">Compatible</span>
+        <strong>Runtime: compatible${backend ? ` (${backend})` : ""}</strong>
+      </div>
+      <div class="secondary-line">${escapeHtml(doctor.binary_path || "Runtime bundle")}</div>
+    `;
+    card.className = "panel subpanel runtime-status-compatible";
+  } else if (runtimeStatus === "invalid-missing-libs") {
+    // INVALID - missing libs
+    const libs = Array.isArray(runtimeMissingLibs) ? runtimeMissingLibs.join(", ") : String(runtimeMissingLibs || "");
+    card.innerHTML = `
+      <div style="display:flex;align-items:center;gap:0.55rem;margin-bottom:0.3rem;">
+        <span class="status-pill status-failed">Invalid</span>
+        <strong>CUDA runtime invalid: missing ${libs ? libs : "libraries"}</strong>
+      </div>
+      <div class="secondary-line">Run 'llama-model build-runtime --backend cuda' to rebuild</div>
+    `;
+    card.className = "panel subpanel runtime-status-invalid";
+  } else if (runtimeStatus === "invalid-backend-mismatch") {
+    // INVALID - backend mismatch
+    const expected = String(doctor.binary_backend || "cuda").trim();
+    card.innerHTML = `
+      <div style="display:flex;align-items:center;gap:0.55rem;margin-bottom:0.3rem;">
+        <span class="status-pill status-failed">Invalid</span>
+        <strong>Selected binary reports '${String(doctor.runtime_backend_detected || "cpu")}' backend but profile expects '${expected}'</strong>
+      </div>
+      <div class="secondary-line">Run 'llama-model build-runtime --backend ${expected}' or set LLAMA_SERVER_BIN</div>
+    `;
+    card.className = "panel subpanel runtime-status-invalid";
+  } else if (runtimeStatus === "invalid-version-check") {
+    // INVALID - version check failed
+    card.innerHTML = `
+      <div style="display:flex;align-items:center;gap:0.55rem;margin-bottom:0.3rem;">
+        <span class="status-pill status-failed">Invalid</span>
+        <strong>Runtime binary failed --version check</strong>
+      </div>
+      <div class="secondary-line">Binary may be corrupted or incompatible</div>
+    `;
+    card.className = "panel subpanel runtime-status-invalid";
+  } else if (runtimeStatus === "invalid-binary-missing") {
+    // INVALID - binary missing
+    card.innerHTML = `
+      <div style="display:flex;align-items:center;gap:0.55rem;margin-bottom:0.3rem;">
+        <span class="status-pill status-failed">Invalid</span>
+        <strong>No llama-server binary found in runtime profile</strong>
+      </div>
+      <div class="secondary-line">Run 'llama-model build-runtime --backend auto'</div>
+    `;
+    card.className = "panel subpanel runtime-status-invalid";
+  } else if (binarySource === "external-with-warning") {
+    // EXTERNAL WITH WARNING
+    card.innerHTML = `
+      <div style="display:flex;align-items:center;gap:0.55rem;margin-bottom:0.3rem;">
+        <span class="status-pill status-likely-tight">Warning</span>
+        <strong>Using external llama-server from PATH; no validated bundled runtime available</strong>
+      </div>
+      <div class="secondary-line">Run 'llama-model build-runtime --backend auto' for best results</div>
+    `;
+    card.className = "panel subpanel runtime-status-warning";
+  } else {
+    // Unknown or no validation data
+    card.classList.add("hidden");
+  }
+}
+
 function basename(path) {
   return String(path || "").split("/").filter(Boolean).pop() || "";
 }
@@ -556,6 +676,7 @@ function renderStatus(data) {
   renderNotice(data);
   renderUpdateStatus(data.update_status || {});
   renderHero(data);
+  renderRuntimeValidation(data);
   renderDashboardService(data.dashboard_service || {});
   renderOwnershipConflict(doctor);
   renderOperationActivity(data.operation_activity || {}, data.meta || {});
