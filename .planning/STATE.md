@@ -40,7 +40,7 @@ progress:
 | 05 | devex | 1 | ✅ Complete |
 | 06 | long-run-handoff | 1 | ✅ Complete |
 | 07 | update-watcher | 1 | ✅ Complete |
-| 12 | runtime-packaging | 5 | In Progress |
+| 12 | runtime-packaging | 5 | ✅ Complete |
 
 ## Decisions
 
