@@ -159,6 +159,7 @@ Usage:
   llama-model current
   llama-model doctor
   llama-model build-runtime [--backend auto|cpu|cuda|vulkan|metal] [--ref REF]
+  llama-model persist-runtime <path-to-bundled-binary>
   llama-model mode
   llama-model set-mode <single|multi> [--restart]
   llama-model switch <alias|/path/to/model.gguf> [extra llama-server args...]
@@ -1932,6 +1933,7 @@ probe_server_binary() {
                             "$BUNDLE_VALIDATE_LABEL" \
                             "$BUNDLE_VALIDATE_MANIFEST"
                         SELECTED_LLAMA_SERVER_CUDA_OK="$([[ "$BUNDLE_VALIDATE_BACKEND" == "cuda" ]] && printf 'yes' || printf 'no')"
+                        persist_selected_runtime "$configured_path"
                         return 0
                     else
                         die "configured bundled binary ${configured_path} failed validation: $VALIDATE_RUNTIME_MESSAGE. Fix the bundle or select a different binary."
@@ -2036,6 +2038,7 @@ select_compatible_bundled_binary_with_validation() {
                         "" \
                         "$BUNDLE_VALIDATE_LABEL" \
                         "$BUNDLE_VALIDATE_MANIFEST"
+                    persist_selected_runtime "$candidate"
                     return 0
                 else
                     if [[ -z "$BUNDLED_SELECTION_FAILURE_REASON" ]]; then
@@ -2844,7 +2847,7 @@ ensure_defaults_file() {
 set_default_value() {
     local key="$1"
     local value="$2"
-    local tmp
+    local tmp;
 
     ensure_defaults_file
     tmp="$(mktemp)"
@@ -2863,6 +2866,19 @@ set_default_value() {
         }
     ' "$DEFAULTS_FILE" >"$tmp"
     mv "$tmp" "$DEFAULTS_FILE"
+}
+
+persist_selected_runtime() {
+    local bin_path="$1"
+    local abs_path
+
+    [[ -n "$bin_path" ]] || return 0
+    [[ "$SELECTED_LLAMA_SERVER_SOURCE" == "bundled" ]] || return 0
+    [[ "$SELECTED_LLAMA_SERVER_STATUS" == "compatible" || "$SELECTED_LLAMA_SERVER_STATUS" == "fallback" ]] || return 0
+
+    abs_path="$(canonicalize_path "$bin_path" 2>/dev/null || printf '%s' "$bin_path")"
+    set_default_value "LLAMA_SERVER_BIN" "$abs_path"
+    printf 'persisted LLAMA_SERVER_BIN=%s to %s\n' "$abs_path" "$DEFAULTS_FILE"
 }
 
 resolve_model() {
@@ -5574,6 +5590,11 @@ main() {
         build-runtime)
             shift
             build_runtime "$@"
+            ;;
+        persist-runtime)
+            shift
+            [[ $# -ge 1 ]] || die "persist-runtime requires a path to a bundled llama-server binary"
+            persist_selected_runtime "$1"
             ;;
         mode)
             shift

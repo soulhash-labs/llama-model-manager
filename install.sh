@@ -149,13 +149,24 @@ build_runtime_during_install() {
     LLAMA_AUTO_INSTALL_DEPS=1 \
         "$bin" build-runtime --backend "$primary_backend" 2>&1 || true
 
-    # Verify something was produced
+    # Verify something was produced and persist the first valid bundled runtime
     local runtime_dir="${APP_SHARE_DIR}/runtime/llama-server"
     if [[ -d "$runtime_dir" ]] && find "$runtime_dir" -name 'llama-server' -type f -print -quit 2>/dev/null | grep -q .; then
         printf 'post-install: runtime build completed successfully\n'
         find "$runtime_dir" -name 'llama-server' -type f | while read -r b; do
             printf '  -> %s\n' "$b"
         done
+        # Persist the first bundled runtime binary to defaults.env
+        local persisted="no"
+        while IFS= read -r -d '' b; do
+            if "$bin" persist-runtime "$b" 2>/dev/null; then
+                persisted="yes"
+                break
+            fi
+        done < <(find "$runtime_dir" -name 'llama-server' -type f -print0 | sort -z)
+        if [[ "$persisted" == "yes" ]]; then
+            printf 'post-install: persisted LLAMA_SERVER_BIN to defaults.env\n'
+        fi
     else
         printf 'post-install: runtime build did not produce a binary\n'
         printf 'post-install: run "%s build-runtime --backend auto" manually to retry\n' "$bin"
