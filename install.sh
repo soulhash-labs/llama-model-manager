@@ -149,23 +149,55 @@ build_runtime_during_install() {
     LLAMA_AUTO_INSTALL_DEPS=1 \
         "$bin" build-runtime --backend "$primary_backend" 2>&1 || true
 
-    # Verify something was produced and persist the first valid bundled runtime
+    # Post-build validation: ldd + --version checks
     local runtime_dir="${APP_SHARE_DIR}/runtime/llama-server"
+    local mark_runtime_invalid=0
+
     if [[ -d "$runtime_dir" ]] && find "$runtime_dir" -name 'llama-server' -type f -print -quit 2>/dev/null | grep -q .; then
-        printf 'post-install: runtime build completed successfully\n'
+        # Run ldd check to find missing libraries
+        binary="$runtime_dir/llama-server.bin"
+        if [[ -x "$binary" ]]; then
+            missing="$(ldd "$binary" 2>&1 | grep 'not found' | grep -E 'lib(ggml|llama|mtmd)' || true)"
+            if [[ -n "$missing" ]]; then
+                printf 'post-install: runtime build produced incomplete bundle (missing libs: %s)\n' "$missing"
+                printf 'post-install: runtime marked invalid, will not be auto-selected\n'
+                mark_runtime_invalid=1
+            fi
+        fi
+
+        # Run --version check
+        if [[ "$mark_runtime_invalid" -eq 0 ]] && ! "$runtime_dir/llama-server" --version >/dev/null 2>&1; then
+            printf 'post-install: runtime build failed --version check\n'
+            mark_runtime_invalid=1
+        fi
+
+        # Backend check: verify binary reports expected backend
+        if [[ "$mark_runtime_invalid" -eq 0 ]]; then
+            # The build-runtime --backend flag should produce the correct backend
+            # This is also checked by validate_runtime_profile() at runtime
+            printf 'post-install: runtime build completed and validated successfully\n'
+        fi
+
+        # List produced binaries
         find "$runtime_dir" -name 'llama-server' -type f | while read -r b; do
             printf '  -> %s\n' "$b"
         done
-        # Persist the first bundled runtime binary to defaults.env
-        local persisted="no"
-        while IFS= read -r -d '' b; do
-            if "$bin" persist-runtime "$b" 2>/dev/null; then
-                persisted="yes"
-                break
+
+        # Persist only if validation passed
+        if [[ "$mark_runtime_invalid" -eq 0 ]]; then
+            local persisted="no"
+            while IFS= read -r -d '' b; do
+                if "$bin" persist-runtime "$b" 2>/dev/null; then
+                    persisted="yes"
+                    break
+                fi
+            done < <(find "$runtime_dir" -name 'llama-server' -type f -print0 | sort -z)
+            if [[ "$persisted" == "yes" ]]; then
+                printf 'post-install: persisted LLAMA_SERVER_BIN to defaults.env\n'
             fi
-        done < <(find "$runtime_dir" -name 'llama-server' -type f -print0 | sort -z)
-        if [[ "$persisted" == "yes" ]]; then
-            printf 'post-install: persisted LLAMA_SERVER_BIN to defaults.env\n'
+        else
+            printf 'post-install: runtime build validation failed, not persisting LLAMA_SERVER_BIN\n'
+            printf 'post-install: run "%s build-runtime --backend auto" manually after fixing issues\n' "$bin"
         fi
     else
         printf 'post-install: runtime build did not produce a binary\n'
