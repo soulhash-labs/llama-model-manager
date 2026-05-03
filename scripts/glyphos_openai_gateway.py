@@ -1577,6 +1577,21 @@ class GatewayHandler(BaseHTTPRequestHandler):
         if path in {"/healthz", "/v1", "/v1/health"}:
             json_response(self, 200, self.gateway().health())
             return
+        if path in {"/v1/messages", "/v1/message"}:
+            json_response(
+                self,
+                200,
+                {
+                    "service": "lmm-glyphos-anthropic-gateway",
+                    "status": "ok",
+                    "format": "anthropic",
+                    "endpoints": {
+                        "messages": "/v1/messages",
+                        "count_tokens": "/v1/messages/count_tokens",
+                    },
+                },
+            )
+            return
         if path == "/readyz":
             checker = self.gateway().health_checker
             if checker.is_ready():
@@ -1621,6 +1636,152 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
+
+        # Anthropic /v1/messages/count_tokens — token counting endpoint
+        if path == "/v1/messages/count_tokens":
+            started = now()
+            try:
+                payload = read_json(self)
+                text = anthropic_messages_to_text(payload.get("messages", []), payload.get("system"))
+                # Try backend tokenization; fall back to word-count approximation
+                backend_base_url = getattr(self.server, "backend_base_url", "http://127.0.0.1:8081/v1")
+                try:
+                    status_code, token_data = http_json(
+                        "POST", f"{backend_base_url}/tokenize", {"content": text}, timeout=5
+                    )
+                    if isinstance(token_data.get("tokens"), list):
+                        token_count = len(token_data["tokens"])
+                    elif isinstance(token_data.get("count"), int):
+                        token_count = token_data["count"]
+                    else:
+                        token_count = max(1, len(text.split())) if text.strip() else 0
+                except Exception:
+                    token_count = max(1, len(text.split())) if text.strip() else 0
+                json_response(self, 200, {"input_tokens": token_count})
+            except InvalidRequestError as exc:
+                json_response(self, 400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+            except Exception as exc:
+                json_response(self, 500, {"error": {"message": str(exc), "type": "internal_error"}})
+            return
+
+        # Anthropic /v1/messages — non-streaming only (streaming in Plan 02)
+        if path == "/v1/messages":
+            started = now()
+            try:
+                payload = read_json(self)
+                if payload.get("stream") is True:
+                    json_response(
+                        self,
+                        400,
+                        {"error": {"message": "streaming not yet supported", "type": "invalid_request_error"}},
+                    )
+                    return
+                prompt = anthropic_messages_to_text(payload.get("messages", []), payload.get("system"))
+                if not prompt.strip():
+                    raise InvalidRequestError("messages must contain text content")
+                model = str(payload.get("model") or self.server.model_id or "claude-3")
+                max_tokens = request_int(payload, "max_tokens", int(os.environ.get("LMM_DEFAULT_MAX_TOKENS", "32768")))
+                temperature = request_float(payload, "temperature", 0.7)
+                stream = False
+
+                # Build telemetry record with Anthropic format marker
+                record: dict[str, Any] = {
+                    "time": started,
+                    "started_at": _current_iso_timestamp(),
+                    "harness": self.headers.get("User-Agent", "unknown"),
+                    "mode": "routed-basic",
+                    "format": "anthropic",
+                    "context_status": "unknown",
+                    "context_used": False,
+                    "glyph_encoding_status": "skipped",
+                    "glyph_encoding_used": False,
+                    "route_target": "unknown",
+                    "reason_code": "unresolved",
+                    "success": False,
+                    "fallback_mode": "",
+                    "latency_ms": 0,
+                    "status": RunStatus.RUNNING.value,
+                    "exit_result": None,
+                    "provider": "unknown",
+                    "prompt": prompt,
+                    "model": model,
+                }
+
+                assembled_prompt, pipeline = prepare_gateway_pipeline(payload, prompt, model=model, stream=stream)
+
+                # Build ContextPayload for encoding-aware routing
+                context_payload = _build_context_payload(
+                    raw_context=pipeline.get("context_payload_raw", ""),
+                    raw_context_chars=pipeline.get("raw_context_chars", 0),
+                    encoding_status=pipeline.get("context_payload_encoding_status", "none"),
+                    encoded_context=pipeline.get("context_payload_encoded", ""),
+                    encoding_format=pipeline.get("context_payload_encoding_format", ""),
+                    encoding_ratio=pipeline.get("context_payload_encoding_ratio", 1.0),
+                )
+
+                record.update(
+                    {
+                        "mode": pipeline.get("mode", "routed-basic"),
+                        "context_status": pipeline.get("context_status", "unknown"),
+                        "context_used": bool(pipeline.get("context_used")),
+                        "context_source": pipeline.get("context_source", ""),
+                        "context_error": pipeline.get("context_error", ""),
+                        "context_latency_ms": pipeline.get("context_latency_ms", 0),
+                        "glyph_encoding_status": pipeline.get("glyph_encoding_status", "skipped"),
+                        "glyph_encoding_used": bool(pipeline.get("glyph_encoding_used")),
+                        "raw_context_chars": pipeline.get("raw_context_chars", 0),
+                        "encoded_context_chars": pipeline.get("encoded_context_chars", 0),
+                        "estimated_token_delta": pipeline.get("estimated_token_delta", 0),
+                        "encoding_ratio": pipeline.get("encoding_ratio", 1.0),
+                        "assembly_status": pipeline.get("assembly_status", "raw_prompt"),
+                        "assembled_prompt_chars": pipeline.get("assembled_prompt_chars", 0),
+                        "context_block_chars": pipeline.get("context_block_chars", 0),
+                        "request": pipeline.get("request", {}),
+                    }
+                )
+
+                routed, headers = _invoke_route_prompt(
+                    route_fn=route_prompt,
+                    prompt=assembled_prompt,
+                    fallback_prompt=_fallback_prompt_for_legacy_route(prompt, pipeline, context_payload),
+                    model=model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    context_payload=context_payload,
+                )
+
+                record.update(
+                    {
+                        "route_target": routed["target"],
+                        "reason_code": routed["reason_code"],
+                        "success": True,
+                        "latency_ms": routed["latency_ms"],
+                        "provider": routed["target"],
+                        "status": RunStatus.COMPLETED.value,
+                        "exit_result": ExitResult.SUCCESS.value,
+                        "completed_at": _current_iso_timestamp(),
+                    }
+                )
+
+                response = build_anthropic_response(
+                    text=routed["text"],
+                    model=model,
+                    started=started,
+                    routed=routed,
+                    pipeline=pipeline,
+                )
+
+                safe_record_gateway_request(record)
+                json_response(self, 200, response)
+            except InvalidRequestError as exc:
+                json_response(self, 400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+            except GatewayError as exc:
+                json_response(self, 502, {"error": {"message": str(exc), "type": "gateway_error"}})
+            except Exception as exc:
+                json_response(self, 500, {"error": {"message": str(exc), "type": "internal_error"}})
+            return
+
+        # OpenAI /v1/chat/completions — existing handler (unchanged)
         if path != "/v1/chat/completions":
             json_response(self, 404, {"error": {"message": "unknown route", "type": "not_found"}})
             return
