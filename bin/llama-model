@@ -2347,9 +2347,10 @@ build_runtime_backend() {
     local install_dir="$LLAMA_SERVER_RUNTIME_DIR/llama-server/${SELECTED_LLAMA_SERVER_HOST_OS}-${SELECTED_LLAMA_SERVER_HOST_ARCH}-${backend}"
     local -a cmake_args=()
     local binary=""
+    local runtime_dir=""
 
     rm -rf "$build_dir"
-    mkdir -p "$build_dir" "$install_dir"
+    mkdir -p "$build_dir"
 
     if command_available ninja; then
         cmake_args+=(-G Ninja)
@@ -2380,7 +2381,25 @@ build_runtime_backend() {
     binary="$(locate_built_llama_server "$build_dir")"
     [[ -n "$binary" ]] || die "llama-server binary was not produced for backend ${backend}"
 
-    install -m 0755 "$binary" "$install_dir/llama-server"
+    runtime_dir="$(locate_built_runtime_dir "$binary")"
+    rm -rf "$install_dir"
+    mkdir -p "$install_dir"
+
+    copy_runtime_bundle_files "$runtime_dir" "$install_dir"
+
+    if [[ -x "$install_dir/llama-server" ]]; then
+        mv "$install_dir/llama-server" "$install_dir/llama-server.bin"
+    fi
+
+    cat > "$install_dir/llama-server" <<'WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export LD_LIBRARY_PATH="$SCRIPT_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$SCRIPT_DIR/llama-server.bin" "$@"
+WRAPPER
+    chmod 0755 "$install_dir/llama-server"
+
     write_bundle_manifest "$install_dir/llama-server" "$backend" "$ref"
     printf 'built %s runtime at %s\n' "$backend" "$install_dir/llama-server"
 }
