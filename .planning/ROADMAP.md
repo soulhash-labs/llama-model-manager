@@ -15,7 +15,7 @@
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 12-runtime-packaging | 2/5 | In Progress|  |
+| 12-runtime-packaging | 4/5 | In Progress|  |
 
 Plans:
 - [ ] 12-runtime-packaging-01-PLAN.md — Self-contained runtime bundles (wrapper + payload + all .so files)
