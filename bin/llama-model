@@ -1429,8 +1429,10 @@ binary_file_info() {
 binary_platform_matches_host() {
     local binary="$1"
     local info
+    local payload
 
-    info="$(binary_file_info "$binary")"
+    payload="$(resolve_bundle_payload_binary "$binary")"
+    info="$(binary_file_info "$payload")"
     if [[ -z "$info" ]] || [[ "$info" == *"script"* ]] || [[ "$info" == *"text executable"* ]]; then
         return 0
     fi
@@ -1460,8 +1462,10 @@ binary_dynamic_links_resolve() {
     local binary="$1"
     local info
     local output
+    local payload
 
-    info="$(binary_file_info "$binary")"
+    payload="$(resolve_bundle_payload_binary "$binary")"
+    info="$(binary_file_info "$payload")"
     if [[ -z "$info" ]] || [[ "$info" == *"script"* ]] || [[ "$info" == *"text executable"* ]]; then
         return 0
     fi
@@ -1469,13 +1473,13 @@ binary_dynamic_links_resolve() {
     case "$SELECTED_LLAMA_SERVER_HOST_OS" in
         linux)
             if command_available ldd; then
-                output="$(ldd "$binary" 2>&1 || true)"
+                output="$(ldd "$payload" 2>&1 || true)"
                 [[ "$output" != *"not found"* ]] || return 1
             fi
             ;;
         darwin)
             if command_available otool; then
-                output="$(otool -L "$binary" 2>&1 || true)"
+                output="$(otool -L "$payload" 2>&1 || true)"
                 [[ "$output" != *"not found"* ]] || return 1
             fi
             ;;
@@ -1621,6 +1625,19 @@ validate_bundled_binary() {
         return 1
     }
 
+    # Extra strictness check: verify no llama/ggml/mtmd libs are "not found"
+    {
+        payload="$(resolve_bundle_payload_binary "$binary")"
+        if command_available ldd && [[ "$(binary_file_info "$payload")" == *ELF* ]]; then
+            strict_output="$(env -i PATH="$PATH" LD_LIBRARY_PATH="$(dirname "$payload")" ldd "$payload" 2>&1 || true)"
+            missing_libs="$(printf '%s' "$strict_output" | grep -E 'not found' | grep -E 'libggml|libllama|libmtmd' || true)"
+            if [[ -n "$missing_libs" ]]; then
+                BUNDLE_VALIDATE_REASON="bundled binary has missing llama/ggml/mtmd libraries: ${missing_libs}"
+                return 1
+            fi
+        fi
+    }
+
     if [[ "$bundle_backend" == "cuda" ]]; then
         validate_cuda_bundle "$manifest" || return 1
     fi
@@ -1634,11 +1651,14 @@ validate_bundled_binary() {
 detect_external_binary_backend() {
     local binary="$1"
     local info=""
+    local payload=""
+
+    payload="$(resolve_bundle_payload_binary "$binary")"
 
     case "$SELECTED_LLAMA_SERVER_HOST_OS" in
         linux)
             if command_available ldd; then
-                info="$(ldd "$binary" 2>&1 || true)"
+                info="$(ldd "$payload" 2>&1 || true)"
                 if printf '%s' "$info" | grep -qiE 'libcublas|libcudart|libggml_cuda'; then
                     printf 'cuda\n'
                     return 0
@@ -1651,7 +1671,7 @@ detect_external_binary_backend() {
             ;;
         darwin)
             if command_available otool; then
-                info="$(otool -L "$binary" 2>/dev/null || true)"
+                info="$(otool -L "$payload" 2>/dev/null || true)"
                 if printf '%s' "$info" | grep -qi 'Metal'; then
                     printf 'metal\n'
                     return 0
