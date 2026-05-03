@@ -1745,6 +1745,83 @@ validate_runtime_profile() {
     return 0
 }
 
+preflight_runtime_check() {
+    local model_path="$1"
+    local model_device="$2"
+    local ngl="$3"
+    local device="$4"
+
+    # 1. Check if probe_server_binary() was called and SELECTED_LLAMA_SERVER_STATUS is set
+    if [[ -z "$SELECTED_LLAMA_SERVER_STATUS" ]]; then
+        return 0  # probe_server_binary wasn't called or didn't set status
+    fi
+
+    # 2. If status indicates validation failure, map to failure category
+    case "$SELECTED_LLAMA_SERVER_STATUS" in
+        unavailable)
+            STARTUP_FAILURE_CATEGORY="runtime-missing"
+            STARTUP_FAILURE_SUMMARY="No compatible llama-server binary found"
+            STARTUP_FAILURE_ACTION="Run 'llama-model build-runtime' to build a runtime, or set LLAMA_SERVER_BIN to a valid binary"
+            printf 'startup_category: %s\n' "$STARTUP_FAILURE_CATEGORY"
+            printf 'startup diagnosis: %s\n' "$STARTUP_FAILURE_SUMMARY"
+            printf 'suggested_fix: %s\n' "$STARTUP_FAILURE_ACTION"
+            return 1
+            ;;
+    esac
+
+    # Also check VALIDATE_RUNTIME_STATUS for invalid-* statuses from validate_runtime_profile()
+    case "$VALIDATE_RUNTIME_STATUS" in
+        invalid-missing-libs)
+            STARTUP_FAILURE_CATEGORY="runtime-missing-libs"
+            STARTUP_FAILURE_SUMMARY="Runtime profile has missing libraries: $VALIDATE_RUNTIME_MISSING_LIBS"
+            STARTUP_FAILURE_ACTION="Rebuild the runtime (llama-model build-runtime --backend ${VALIDATE_RUNTIME_BACKEND_DETECTED}) or install missing libraries: $VALIDATE_RUNTIME_MISSING_LIBS"
+            printf 'startup_category: %s\n' "$STARTUP_FAILURE_CATEGORY"
+            printf 'startup diagnosis: %s\n' "$STARTUP_FAILURE_SUMMARY"
+            printf 'suggested_fix: %s\n' "$STARTUP_FAILURE_ACTION"
+            return 1
+            ;;
+        invalid-backend-mismatch)
+            STARTUP_FAILURE_CATEGORY="runtime-backend-mismatch"
+            STARTUP_FAILURE_SUMMARY="Runtime profile backend (${VALIDATE_RUNTIME_BACKEND_DETECTED}) does not match expected (${VALIDATE_RUNTIME_BACKEND_DETECTED})"
+            STARTUP_FAILURE_ACTION="Select a runtime with matching backend or rebuild with 'llama-model build-runtime --backend ${VALIDATE_RUNTIME_BACKEND_DETECTED}'"
+            printf 'startup_category: %s\n' "$STARTUP_FAILURE_CATEGORY"
+            printf 'startup diagnosis: %s\n' "$STARTUP_FAILURE_SUMMARY"
+            printf 'suggested_fix: %s\n' "$STARTUP_FAILURE_ACTION"
+            return 1
+            ;;
+        invalid-version-check)
+            STARTUP_FAILURE_CATEGORY="runtime-version-incompatible"
+            STARTUP_FAILURE_SUMMARY="Runtime profile version check failed: $VALIDATE_RUNTIME_MESSAGE"
+            STARTUP_FAILURE_ACTION="Rebuild the runtime with 'llama-model build-runtime' or use a different one"
+            printf 'startup_category: %s\n' "$STARTUP_FAILURE_CATEGORY"
+            printf 'startup diagnosis: %s\n' "$STARTUP_FAILURE_SUMMARY"
+            printf 'suggested_fix: %s\n' "$STARTUP_FAILURE_ACTION"
+            return 1
+            ;;
+    esac
+
+    # 3. If model_device or device contains "cuda" and SELECTED_LLAMA_SERVER_BACKEND is "cpu"
+    if [[ "$device" == *cuda* || "$model_device" == *cuda* ]]; then
+        if [[ "$SELECTED_LLAMA_SERVER_BACKEND" == "cpu" ]]; then
+            STARTUP_FAILURE_CATEGORY="runtime-backend-mismatch"
+            STARTUP_FAILURE_SUMMARY="Model requests CUDA but selected llama-server binary is CPU-only"
+            STARTUP_FAILURE_ACTION="Run 'llama-model build-runtime --backend cuda' to build a CUDA-enabled runtime"
+            printf 'startup_category: %s\n' "$STARTUP_FAILURE_CATEGORY"
+            printf 'startup diagnosis: %s\n' "$STARTUP_FAILURE_SUMMARY"
+            printf 'suggested_fix: %s\n' "$STARTUP_FAILURE_ACTION"
+            return 1
+        fi
+    fi
+
+    # 4. If SELECTED_LLAMA_SERVER_SOURCE is "external-with-warning", print warning
+    if [[ "$SELECTED_LLAMA_SERVER_SOURCE" == "external-with-warning" ]]; then
+        printf 'warning: Using external llama-server from PATH; no validated bundled runtime available\n' >&2
+        # Continue - user explicitly chose this or no alternative exists
+    fi
+
+    return 0
+}
+
 detect_external_binary_backend() {
     local binary="$1"
     local info=""
@@ -3079,8 +3156,12 @@ start_server() {
     done
 
     probe_server_binary || die "${SELECTED_LLAMA_SERVER_MESSAGE}
-
 ${SELECTED_LLAMA_SERVER_GUIDANCE}"
+
+    # Preflight runtime check - fail fast on runtime problems before model load
+    preflight_runtime_check "$model_path" "$model_device" "$ngl" "$device" || die "${STARTUP_FAILURE_SUMMARY}
+${STARTUP_FAILURE_ACTION}"
+
     [[ -f "$model_path" ]] || die "model not found: $model_path"
 
     LLAMA_SERVER_BIN="$SELECTED_LLAMA_SERVER_BIN"
