@@ -3282,6 +3282,9 @@ class Manager:
 
         current = self.parse_key_values(self.run_cli("current"))
         doctor = self.parse_key_values(self.run_cli("doctor"))
+        # Runtime validation fields (runtime_validation_ok, runtime_status, runtime_missing_libs,
+        # runtime_version_text, runtime_backend_detected, startup_category, startup_diagnosis,
+        # startup_suggested_fix) are included in the response via the doctor dict.
         mode = self.parse_key_values(self.run_cli("mode"))
         defaults = self.defaults()
         phase0 = self.phase0_contracts(doctor)
