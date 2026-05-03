@@ -658,8 +658,18 @@
           </div>
           <div class="integration-grid">
             <article class="integration-card">
-              <span class="metric-label">OpenCode / Harness Gateway</span>
-              <code id="api-base">-</code>
+              <span class="metric-label">LMM Gateway Endpoints</span>
+              <div class="integration-chip-row">
+                <span id="lmm-gateway-formats" class="integration-badge">-</span>
+              </div>
+              <div>
+                <span class="metric-label" style="font-size: 0.75rem; opacity: 0.7;">OpenAI</span>
+                <code id="api-base">-</code>
+              </div>
+              <div>
+                <span class="metric-label" style="font-size: 0.75rem; opacity: 0.7;">Anthropic</span>
+                <code id="anthropic-api-base">-</code>
+              </div>
               <span id="integration-endpoint-note" class="metric-note">-</span>
             </article>
             <article class="integration-card">
@@ -705,9 +715,11 @@
           </div>
           <div class="integration-grid">
             <article class="integration-card">
-              <span class="metric-label">LMM Gateway + GlyphOS</span>
+              <span class="metric-label">LMM Gateway</span>
               <div class="integration-chip-row">
                 <span id="lmm-gateway-badge" class="integration-badge integration-badge-muted">-</span>
+                <span class="integration-badge">OpenAI</span>
+                <span class="integration-badge">Anthropic</span>
               </div>
               <code id="gateway-status">-</code>
               <span id="gateway-route" class="metric-note">-</span>
