@@ -2721,6 +2721,8 @@ class Manager:
             "claude_gateway": claude_gateway_status,
             "gateway": gateway_status,
             "gateway_api_base": gateway_api_base,
+            "gateway_anthropic_api_base": gateway_api_base,  # Same base URL; Anthropic clients use /v1/messages
+            "gateway_formats": ["openai", "anthropic"],
             "gateway_backend_api_base": backend_api_base,
             "gateway_harness_mode_default": harness_mode_default,
             "gateway_requests": gateway_requests if isinstance(gateway_requests, dict) else {},
