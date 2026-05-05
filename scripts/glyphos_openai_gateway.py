@@ -10,7 +10,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import threading
 import time
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,6 +26,15 @@ if str(INTEGRATION_ROOT) not in sys.path:
     sys.path.insert(0, str(INTEGRATION_ROOT))
 
 from gateway.context_provider import build_upstream_context  # noqa: E402
+from gateway.health_runtime import GatewayRuntime as _GatewayRuntime  # noqa: E402
+from gateway.health_runtime import cloud_routing_config as _cloud_routing_config_impl  # noqa: E402
+from gateway.health_runtime import coerce_bool as _coerce_bool_impl  # noqa: E402
+from gateway.health_runtime import get_cloud_provider_status as _get_cloud_provider_status_impl  # noqa: E402
+from gateway.health_runtime import load_glyphos_config as _load_glyphos_config_impl  # noqa: E402
+from gateway.health_runtime import maybe_start_update_watcher as _maybe_start_update_watcher  # noqa: E402
+from gateway.health_runtime import normalize_cloud_provider as _normalize_cloud_provider_impl  # noqa: E402
+from gateway.health_runtime import parse_cloud_fallback_order as _parse_cloud_fallback_order_impl  # noqa: E402
+from gateway.health_runtime import provider_status as _provider_status_impl  # noqa: E402
 from gateway.http_utils import http_json as gateway_http_json  # noqa: E402
 from gateway.http_utils import json_response as gateway_json_response  # noqa: E402
 from gateway.http_utils import read_json as gateway_read_json  # noqa: E402
@@ -45,44 +53,25 @@ from gateway.sse import sse_comment as gateway_sse_comment  # noqa: E402
 from gateway.sse import sse_event as gateway_sse_event  # noqa: E402
 from gateway.sse import stream_anthropic_completion as gateway_stream_anthropic_completion  # noqa: E402
 from gateway.sse import stream_completion as gateway_stream_completion  # noqa: E402
-from lmm_updates import UpdateChecker  # noqa: E402
+from gateway.telemetry import current_iso_timestamp as _telemetry_current_iso_timestamp  # noqa: E402
+from gateway.telemetry import generate_handoff_summary as _telemetry_generate_handoff_summary  # noqa: E402
+from gateway.telemetry import load_gateway_state as _load_gateway_state  # noqa: E402
+from gateway.telemetry import record_gateway_request as _record_gateway_request  # noqa: E402
+from gateway.telemetry import redact_gateway_telemetry_record as _redact_gateway_telemetry_record_impl  # noqa: E402
+from gateway.telemetry import run_record_from_dict as _telemetry_run_record_from_dict  # noqa: E402
+from gateway.telemetry import run_record_store as _run_record_store  # noqa: E402
+from gateway.telemetry import safe_record_run_record as _safe_record_run_record  # noqa: E402
+from gateway.telemetry import telemetry_store as _telemetry_store  # noqa: E402
 
 from lmm_config import load_lmm_config_from_env  # noqa: E402
 from lmm_errors import GatewayError, InvalidRequestError  # noqa: E402
-from lmm_health import ComponentHealth, HealthChecker  # noqa: E402
-from lmm_notifications import NotificationType, create_notification_manager  # noqa: E402
-from lmm_storage import JsonGatewayTelemetryStore, JsonRunRecordStore  # noqa: E402
+from lmm_notifications import create_notification_manager  # noqa: E402
 from lmm_types import ExitResult, RunRecord, RunStatus  # noqa: E402
 
 anthropic_messages_summary = gateway_anthropic_messages_summary
 sse_event = gateway_sse_event
 sse_comment = gateway_sse_comment
 anthropic_sse_event = gateway_anthropic_sse_event
-
-# Phase 06: Handoff module (optional import for backward compat)
-try:
-    from lmm_handoff import HandoffSummary, format_handoff_text  # type: ignore
-except ImportError:
-    HandoffSummary = None  # type: ignore
-    format_handoff_text = None  # type: ignore
-
-
-def _generate_handoff_summary(record: dict[str, Any], duration_ms: int) -> None:
-    """Generate handoff summary for long-running sessions and store in record.
-
-    Phase 06: For runs exceeding the handoff threshold, populate the
-    handoff_summary field with a human-readable summary.
-    """
-    if HandoffSummary is None or format_handoff_text is None:
-        return
-    threshold_ms = int(os.environ.get("LMM_HANDOFF_THRESHOLD_MS", "60000"))
-    if duration_ms < threshold_ms:
-        return
-    try:
-        summary = HandoffSummary.from_run_record(record)
-        record["handoff_summary"] = format_handoff_text(summary)
-    except Exception:
-        pass  # Never break recording for handoff generation failure
 
 
 def now() -> float:
@@ -144,33 +133,20 @@ def state_file() -> Path:
     return load_lmm_config_from_env().gateway.state_file
 
 
-def telemetry_store() -> JsonGatewayTelemetryStore:
-    config = load_lmm_config_from_env().gateway
-    return JsonGatewayTelemetryStore(config.state_file, recent_limit=config.telemetry_recent_limit)
+def telemetry_store():
+    return _telemetry_store()
 
 
-def run_record_store() -> JsonRunRecordStore:
-    config = load_lmm_config_from_env().gateway
-    run_path = Path(
-        os.environ.get(
-            "LMM_RUN_RECORDS_FILE", str(Path.home() / ".local" / "state" / "llama-server" / "lmm-run-records.json")
-        )
-    ).expanduser()
-    return JsonRunRecordStore(run_path, recent_limit=config.telemetry_recent_limit)
+def run_record_store():
+    return _run_record_store()
 
 
 def load_gateway_state() -> dict[str, Any]:
-    return telemetry_store().read_state()
+    return _load_gateway_state()
 
 
 def _redact_gateway_telemetry_record(record: dict[str, Any]) -> dict[str, Any]:
-    redacted = dict(record)
-    prompt = redacted.pop("prompt", "")
-    if isinstance(prompt, str):
-        redacted.setdefault("prompt_chars", len(prompt))
-    elif prompt:
-        redacted.setdefault("prompt_chars", len(json.dumps(prompt)))
-    return redacted
+    return _redact_gateway_telemetry_record_impl(record)
 
 
 def _build_context_payload(
@@ -205,7 +181,7 @@ def _build_context_payload(
 
 
 def record_gateway_request(record: dict[str, Any]) -> None:
-    telemetry_store().append_event(_redact_gateway_telemetry_record(record))
+    return _record_gateway_request(record)
 
 
 def safe_record_gateway_request(record: dict[str, Any]) -> None:
@@ -216,53 +192,19 @@ def safe_record_gateway_request(record: dict[str, Any]) -> None:
 
 
 def safe_record_run_record(record: RunRecord) -> None:
-    try:
-        run_record_store().append_record(record.to_dict())
-    except Exception as exc:
-        sys.stderr.write(f"warning: failed to persist LMM run record: {exc}\n")
+    return _safe_record_run_record(record)
 
 
 def _current_iso_timestamp() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return _telemetry_current_iso_timestamp()
 
 
 def _run_record_from_dict(record: dict[str, Any]) -> RunRecord:
-    raw_prompt = record.get("prompt", "")
-    if not isinstance(raw_prompt, str):
-        raw_prompt = json.dumps(raw_prompt)
+    return _telemetry_run_record_from_dict(record)
 
-    provider = str(record.get("provider") or record.get("route_target") or "")
-    status = RunStatus(record.get("status", RunStatus.PENDING))
-    exit_result = record.get("exit_result")
-    if isinstance(exit_result, str):
-        exit_result = ExitResult(exit_result)
-    elif not isinstance(exit_result, ExitResult):
-        exit_result = None
 
-    return RunRecord(
-        prompt=raw_prompt,
-        model=str(record.get("model", "")),
-        provider=provider,
-        status=status,
-        exit_result=exit_result,
-        started_at=str(record.get("started_at")) if record.get("started_at") else None,
-        completed_at=str(record.get("completed_at")) if record.get("completed_at") else None,
-        error_message=str(record.get("error")) if isinstance(record.get("error"), str) else None,
-        route_target=str(record.get("route_target", "")),
-        route_reason_code=str(record.get("reason_code", "")),
-        completion_chars=int(record.get("completion_chars", 0) or 0),
-        harness=str(record.get("harness", "")),
-        context_status=str(record.get("context_status", "")),
-        context_used=bool(record.get("context_used", False)),
-        duration_ms=record.get("duration_ms")
-        if isinstance(record.get("duration_ms"), int)
-        else (record.get("latency_ms") if isinstance(record.get("latency_ms"), int) else None),
-        session_id=str(record.get("session_id", "")),
-        upstream_session_ref=str(record.get("upstream_session_ref", "")),
-        handoff_summary=str(record.get("handoff_summary", "")),
-        artifacts=list(record.get("artifacts", [])),
-        tags=list(record.get("tags", [])),
-    )
+def _generate_handoff_summary(record: dict[str, Any], duration_ms: int) -> None:
+    return _telemetry_generate_handoff_summary(record, duration_ms)
 
 
 def context_pipeline_enabled() -> bool:
@@ -852,137 +794,31 @@ def prepare_gateway_pipeline(
 
 
 def _normalize_cloud_provider(raw: str) -> str:
-    provider = str(raw or "").strip().lower()
-    if provider in {"openai", "anthropic", "xai"}:
-        return provider
-    return ""
+    return _normalize_cloud_provider_impl(raw)
 
 
 def _parse_cloud_fallback_order(raw: Any) -> list[str]:
-    if not raw:
-        return []
-    if isinstance(raw, list | tuple):
-        values = list(raw)
-    else:
-        values = str(raw).split(",")
-    providers: list[str] = []
-    for value in values:
-        provider = _normalize_cloud_provider(str(value))
-        if provider and provider not in providers:
-            providers.append(provider)
-    return providers
+    return _parse_cloud_fallback_order_impl(raw)
 
 
 def _coerce_bool(raw: Any, default: bool = False) -> bool:
-    if isinstance(raw, bool):
-        return raw
-    text = str(raw or "").strip().lower()
-    if text in {"1", "true", "yes", "on", "enabled", "y"}:
-        return True
-    if text in {"0", "false", "no", "off", "disabled", "n"}:
-        return False
-    return default
+    return _coerce_bool_impl(raw, default=default)
 
 
 def _load_glyphos_config() -> dict[str, Any]:
-    from glyphos_ai.ai_compute.api_client import _load_glyphos_config as integration_load_config  # type: ignore
-
-    return integration_load_config()
+    return _load_glyphos_config_impl()
 
 
 def _cloud_routing_config() -> tuple[list[str], str]:
-    config = _load_glyphos_config()
-    cloud_root = config.get("ai_compute", {}).get("cloud", {}) if isinstance(config, dict) else {}
-    preferred_raw = os.environ.get("GLYPHOS_CLOUD_PREFERRED", "").strip()
-    if not preferred_raw and isinstance(config, dict):
-        preferred_raw = (
-            str(config.get("ai_compute", {}).get("cloud", {}).get("preferred_cloud", "")).strip()
-            if isinstance(cloud_root, dict)
-            else ""
-        )
-    if not preferred_raw and isinstance(config, dict):
-        preferred_raw = (
-            str(config.get("ai_compute", {}).get("cloud", {}).get("preferred_provider", "")).strip()
-            if isinstance(cloud_root, dict)
-            else ""
-        )
-    preferred_cloud = (
-        _normalize_cloud_provider(preferred_raw)
-        or _normalize_cloud_provider(os.environ.get("GLYPHOS_CLOUD_PREFERRED_PROVIDER", ""))
-        or "xai"
-    )
-
-    fallback_order = os.environ.get("GLYPHOS_CLOUD_FALLBACK_ORDER", "").strip()
-    if not fallback_order and isinstance(config, dict):
-        cloud_root = config.get("ai_compute", {}).get("cloud", {})
-        fallback_order = cloud_root.get("fallback_order", "") if isinstance(cloud_root, dict) else ""
-    return (
-        _parse_cloud_fallback_order(fallback_order),
-        preferred_cloud,
-    )
+    return _cloud_routing_config_impl()
 
 
 def _provider_status(enabled: bool, configured: bool, client: Any, reason: str) -> dict[str, Any]:
-    return {
-        "enabled": bool(enabled),
-        "configured": bool(configured),
-        "available": bool(client is not None),
-        "model": getattr(client, "model", ""),
-        "max_tokens": getattr(client, "max_tokens", 0),
-        "reason": reason,
-    }
+    return _provider_status_impl(enabled=enabled, configured=configured, client=client, reason=reason)
 
 
 def _get_cloud_provider_status() -> dict[str, Any]:
-    status = {"xai": {}, "openai": {}, "anthropic": {}}
-    try:
-        from glyphos_ai.ai_compute.api_client import (
-            _load_glyphos_config as integration_load_config,  # type: ignore
-        )
-        from glyphos_ai.ai_compute.api_client import (
-            create_configured_clients,  # type: ignore
-        )
-    except Exception:
-        return status
-
-    try:
-        clients = create_configured_clients()
-    except Exception:
-        clients = {}
-    config = integration_load_config()
-    cloud_root = config.get("ai_compute", {}).get("cloud", {}) if isinstance(config, dict) else {}
-    cloud_root_enabled = _coerce_bool(cloud_root.get("enabled"), default=True)
-
-    for provider in ("xai", "openai", "anthropic"):
-        provider_key = provider.upper()
-        cfg_provider = (
-            config.get("ai_compute", {}).get(provider, {}) if isinstance(config.get("ai_compute", {}), dict) else {}
-        )
-        cfg_enabled = cfg_provider.get("enabled", "true") if isinstance(cfg_provider, dict) else "true"
-        enabled = _coerce_bool(
-            os.environ.get(f"GLYPHOS_CLOUD_{provider_key}_ENABLED"),
-            default=_coerce_bool(cfg_enabled, default=True),
-        )
-        if not cloud_root_enabled:
-            enabled = False
-        api_key = os.environ.get(f"GLYPHOS_CLOUD_{provider_key}_API_KEY") or os.environ.get(
-            f"{provider_key}_API_KEY", ""
-        )
-        if not api_key and isinstance(cfg_provider, dict):
-            api_key = cfg_provider.get("api_key", "")
-        configured = bool(enabled and str(api_key).strip())
-        client = clients.get(provider) if isinstance(clients, dict) else None
-        if client is not None:
-            reason = "ready"
-        elif not enabled:
-            reason = "disabled"
-        elif not configured:
-            reason = "api_key_missing"
-        else:
-            reason = "not_available"
-        status[provider] = _provider_status(enabled=enabled, configured=configured, client=client, reason=reason)
-
-    return status
+    return _get_cloud_provider_status_impl()
 
 
 def create_router():
@@ -1260,12 +1096,7 @@ def completion_payload(
     }
 
 
-class LMMOpenAIGateway:
-    def __init__(self, *, backend_base_url: str, model_id: str = "") -> None:
-        self.backend_base_url = backend_base_url.rstrip("/")
-        self.model_id = model_id
-        self._health = HealthChecker(backend_url=backend_base_url, config=load_lmm_config_from_env())
-
+class LMMOpenAIGateway(_GatewayRuntime):
     def health(self) -> dict[str, Any]:
         fallback_order, preferred_cloud = _cloud_routing_config()
         return {
@@ -1278,26 +1109,8 @@ class LMMOpenAIGateway:
             "cloud_providers": _get_cloud_provider_status(),
         }
 
-    def list_models(self) -> tuple[int, dict[str, Any]]:
-        try:
-            return http_json("GET", f"{self.backend_base_url}/models", timeout=5)
-        except Exception as exc:
-            model = self.model_id or "local-llama"
-            return 200, {
-                "object": "list",
-                "data": [{"id": model, "object": "model", "owned_by": "lmm"}],
-                "warning": str(exc),
-            }
-
     def telemetry(self) -> dict[str, Any]:
         return load_gateway_state()
-
-    @property
-    def health_checker(self) -> HealthChecker:
-        return self._health
-
-    def health_check(self) -> dict[str, ComponentHealth]:
-        return self.health_checker.check_all()
 
 
 class GatewayHandler(BaseHTTPRequestHandler):
@@ -1766,53 +1579,11 @@ def create_gateway_server(
 def start_update_watcher(
     server: ThreadingHTTPServer,
     *,
-    watcher_config: Any,
+    watcher_config: Any | None = None,
 ) -> None:
-    current_version = os.environ.get("LMM_VERSION", "v2.1.0")
-    checker = UpdateChecker(
-        current_lmm_version=current_version,
-        lmm_repo=watcher_config.lmm_repo,
-        llamacpp_repo=watcher_config.llamacpp_repo,
-        timeout=watcher_config.timeout_seconds,
-        state_file=watcher_config.state_file,
-    )
-    server.update_checker = checker  # type: ignore[attr-defined]
-    interval_seconds = int(watcher_config.check_interval_hours) * 3600
-    if interval_seconds < 60:
-        interval_seconds = 60
-
-    def periodic_check() -> None:
-        try:
-            lmm_result = checker.check_lmm_update()
-            llamacpp_result = checker.check_llamacpp_update()
-        except Exception:
-            lmm_result = None
-            llamacpp_result = None
-
-        manager = create_notification_manager(True)
-        if manager is not None:
-            if lmm_result and lmm_result.update_available:
-                manager.notify(
-                    "LMM update available",
-                    f"Current: {lmm_result.current_version}. Latest: {lmm_result.latest_version}.",
-                    NotificationType.UPDATE_AVAILABLE,
-                )
-            if llamacpp_result and llamacpp_result.update_available:
-                manager.notify(
-                    "llama.cpp update available",
-                    f"Current: {llamacpp_result.current_version}. Latest: {llamacpp_result.latest_version}.",
-                    NotificationType.UPDATE_AVAILABLE,
-                )
-
-        timer = threading.Timer(interval_seconds, periodic_check)
-        timer.daemon = True
-        server.update_timer = timer  # type: ignore[attr-defined]
-        timer.start()
-
-    initial_timer = threading.Timer(0, periodic_check)
-    initial_timer.daemon = True
-    server.update_timer = initial_timer  # type: ignore[attr-defined]
-    initial_timer.start()
+    if watcher_config is None:
+        watcher_config = load_lmm_config_from_env().update_watcher
+    return _maybe_start_update_watcher(server, watcher_config=watcher_config)
 
 
 def main(argv: list[str]) -> int:
