@@ -9,13 +9,14 @@ import json
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from ..glyph.types import ContextPacket, ContextPayload, validate_context_packet_shape
 from .api_client import create_configured_clients
 from .glyph_to_prompt import build_prompt_from_packet, glyph_to_prompt
 
@@ -233,6 +234,30 @@ def reset_routing_telemetry() -> None:
             _write_shared_state(_GLOBAL_ROUTING_STATE)
 
 
+def _normalize_upstream_context(upstream_context: str | ContextPacket | None) -> ContextPacket:
+    if upstream_context is None:
+        return {}
+    if isinstance(upstream_context, str):
+        return {"content": upstream_context}
+    if isinstance(upstream_context, Mapping):
+        return validate_context_packet_shape(dict(upstream_context))
+    return {"content": str(upstream_context)}
+
+
+def _context_preferred_backend(ctx: ContextPacket) -> str | None:
+    hints = ctx.get("routing_hints") or {}
+    if isinstance(hints, dict):
+        preferred = hints.get("preferred_backend")
+        if preferred:
+            return str(preferred).strip().lower()
+    return None
+
+
+def _context_locality(ctx: ContextPacket) -> str | None:
+    locality = ctx.get("locality")
+    return str(locality).strip().lower() if locality else None
+
+
 class AdaptiveRouter:
     _ATTEMPT_HISTORY_LIMIT = 24
 
@@ -331,33 +356,56 @@ class AdaptiveRouter:
             return "fallback - use xAI", reason_code
         return "fallback - use cloud", reason_code
 
-    def _build_local_prompt(self, glyph_packet, prompt: str | None, context_payload=None) -> str:
-        if context_payload is None:
+    def _build_local_prompt(
+        self,
+        glyph_packet,
+        prompt: str | None,
+        context_payload: ContextPayload | None = None,
+        upstream_context: str | ContextPacket | None = None,
+    ) -> str:
+        if context_payload is None and upstream_context is None:
             return prompt if prompt is not None else glyph_to_prompt(glyph_packet)
 
-        built_prompt = build_prompt_from_packet(glyph_packet, context_payload, prompt or "")
-        glyph_packet.encoding_status = getattr(context_payload, "encoding_status", "")
-        glyph_packet.encoding_format = getattr(context_payload, "encoding_format", "")
-        glyph_packet.encoding_ratio = getattr(context_payload, "encoding_ratio", 1.0)
-        return built_prompt
-
-    def _build_cloud_prompt(self, glyph_packet, prompt: str | None, context_payload=None) -> str:
-        if context_payload is None:
-            return prompt if prompt is not None else glyph_to_prompt(glyph_packet)
-
-        from glyphos_ai.glyph.types import ContextPayload
-
-        raw_context = getattr(context_payload, "raw_context", "")
-        raw_context_payload = ContextPayload(
-            raw_context=str(raw_context),
-            raw_context_chars=len(str(raw_context)),
-            encoding_status="skipped",
+        built_prompt = build_prompt_from_packet(
+            glyph_packet,
+            context_payload=context_payload,
+            user_message=prompt or "",
+            upstream_context=upstream_context,
         )
-        built_prompt = build_prompt_from_packet(glyph_packet, raw_context_payload, prompt or "")
-        glyph_packet.encoding_status = "skipped"
-        glyph_packet.encoding_format = ""
-        glyph_packet.encoding_ratio = 1.0
+        if context_payload is not None:
+            glyph_packet.encoding_status = getattr(context_payload, "encoding_status", "")
+            glyph_packet.encoding_format = getattr(context_payload, "encoding_format", "")
+            glyph_packet.encoding_ratio = getattr(context_payload, "encoding_ratio", 1.0)
         return built_prompt
+
+    def _build_cloud_prompt(
+        self,
+        glyph_packet,
+        prompt: str | None,
+        context_payload: ContextPayload | None = None,
+        upstream_context: str | ContextPacket | None = None,
+    ) -> str:
+        if context_payload is None and upstream_context is None:
+            return prompt if prompt is not None else glyph_to_prompt(glyph_packet)
+
+        raw_context_payload: ContextPayload | None = None
+        if context_payload is not None:
+            raw_context = getattr(context_payload, "raw_context", "")
+            raw_context_payload = ContextPayload(
+                raw_context=str(raw_context),
+                raw_context_chars=len(str(raw_context)),
+                encoding_status="skipped",
+            )
+            glyph_packet.encoding_status = "skipped"
+            glyph_packet.encoding_format = ""
+            glyph_packet.encoding_ratio = 1.0
+
+        return build_prompt_from_packet(
+            glyph_packet,
+            context_payload=raw_context_payload,
+            user_message=prompt or "",
+            upstream_context=upstream_context,
+        )
 
     def _route_cloud(self, prompt: str, action: str, **generation_kwargs: Any) -> RoutingResult:
         last_error: RoutingResult | None = None
@@ -389,25 +437,116 @@ class AdaptiveRouter:
         )
 
     def route(
-        self, glyph_packet, prompt: str | None = None, context_payload=None, **generation_kwargs: Any
+        self,
+        glyph_packet,
+        prompt: str | None = None,
+        context_payload: ContextPayload | None = None,
+        upstream_context: str | ContextPacket | None = None,
+        **generation_kwargs: Any,
     ) -> RoutingResult:
         """Route a glyph packet across local-first / cloud fallback policy."""
         psi = self._packet_value(glyph_packet, "psi_coherence", "psiCoherence", 0.5)
         action = glyph_packet.action
+        ctx = _normalize_upstream_context(upstream_context)
+        preferred_backend = _context_preferred_backend(ctx)
+        locality = _context_locality(ctx)
+
+        if preferred_backend == "llamacpp" and self.llamacpp:
+            built_prompt = self._build_local_prompt(
+                glyph_packet,
+                prompt,
+                context_payload=context_payload,
+                upstream_context=upstream_context,
+            )
+            return self._route_llamacpp(
+                built_prompt,
+                "routing_hints - prefer local llama.cpp",
+                "context_hint_llamacpp",
+                **generation_kwargs,
+            )
+
+        if preferred_backend == "openai" and self.openai:
+            built_prompt = self._build_cloud_prompt(
+                glyph_packet,
+                prompt,
+                context_payload=context_payload,
+                upstream_context=upstream_context,
+            )
+            return self._route_openai(
+                built_prompt,
+                "routing_hints - prefer OpenAI",
+                "context_hint_openai",
+                **generation_kwargs,
+            )
+
+        if preferred_backend == "anthropic" and self.anthropic:
+            built_prompt = self._build_cloud_prompt(
+                glyph_packet,
+                prompt,
+                context_payload=context_payload,
+                upstream_context=upstream_context,
+            )
+            return self._route_anthropic(
+                built_prompt,
+                "routing_hints - prefer Anthropic",
+                "context_hint_anthropic",
+                **generation_kwargs,
+            )
+
+        if preferred_backend == "xai" and self.xai:
+            built_prompt = self._build_cloud_prompt(
+                glyph_packet,
+                prompt,
+                context_payload=context_payload,
+                upstream_context=upstream_context,
+            )
+            return self._route_xai(
+                built_prompt,
+                "routing_hints - prefer xAI",
+                "context_hint_xai",
+                **generation_kwargs,
+            )
+
+        if locality in {"cloud", "external"}:
+            return self._route_cloud(
+                prompt=self._build_cloud_prompt(
+                    glyph_packet,
+                    prompt,
+                    context_payload=context_payload,
+                    upstream_context=upstream_context,
+                ),
+                action=action,
+                **generation_kwargs,
+            )
 
         if not self.llamacpp:
             return self._route_cloud(
-                prompt=self._build_cloud_prompt(glyph_packet, prompt, context_payload=context_payload),
+                prompt=self._build_cloud_prompt(
+                    glyph_packet,
+                    prompt,
+                    context_payload=context_payload,
+                    upstream_context=upstream_context,
+                ),
                 action=action,
                 **generation_kwargs,
             )
 
         reason, reason_code = self._local_routing_reason(action=action, psi=psi)
-        built_prompt = self._build_local_prompt(glyph_packet, prompt, context_payload=context_payload)
+        built_prompt = self._build_local_prompt(
+            glyph_packet,
+            prompt,
+            context_payload=context_payload,
+            upstream_context=upstream_context,
+        )
         return self._route_llamacpp(built_prompt, reason, reason_code, **generation_kwargs)
 
     def route_stream(
-        self, glyph_packet, prompt: str | None = None, context_payload=None, **generation_kwargs: Any
+        self,
+        glyph_packet,
+        prompt: str | None = None,
+        context_payload: ContextPayload | None = None,
+        upstream_context: str | ContextPacket | None = None,
+        **generation_kwargs: Any,
     ) -> tuple[dict[str, Any], Iterator[str]]:
         """Route streaming traffic with local-first policy."""
         if not self.llamacpp:
@@ -417,7 +556,12 @@ class AdaptiveRouter:
         reason, reason_code = self._local_routing_reason_stream(
             action=str(getattr(glyph_packet, "action", "")), psi=psi
         )
-        built_prompt = self._build_local_prompt(glyph_packet, prompt, context_payload=context_payload)
+        built_prompt = self._build_local_prompt(
+            glyph_packet,
+            prompt,
+            context_payload=context_payload,
+            upstream_context=upstream_context,
+        )
         return self._route_llamacpp_stream(built_prompt, reason, reason_code, **generation_kwargs)
 
     def _route_llamacpp_stream(
@@ -619,8 +763,16 @@ def build_router_from_env(config: RoutingConfig | None = None, glyph_packet: Any
 def route_with_configured_clients(
     glyph_packet,
     prompt: str | None = None,
+    context_payload: ContextPayload | None = None,
+    upstream_context: str | ContextPacket | None = None,
     config: RoutingConfig | None = None,
     **generation_kwargs: Any,
 ) -> RoutingResult:
     router = build_router_from_env(config=config, glyph_packet=glyph_packet)
-    return router.route(glyph_packet, prompt=prompt, **generation_kwargs)
+    return router.route(
+        glyph_packet,
+        prompt=prompt,
+        context_payload=context_payload,
+        upstream_context=upstream_context,
+        **generation_kwargs,
+    )

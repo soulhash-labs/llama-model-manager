@@ -1,19 +1,46 @@
 """
 Glyph Types
 ===========
-Python types matching the TypeScript glyph_types.ts
+Python types matching the TypeScript glyph_types.ts, plus explicit
+upstream-context support for harness-driven routing.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Optional, List
-from enum import Enum
+from typing import Any, Literal, TypedDict
+
+# === Public context contract ===
+
+Locality = Literal["orion-local", "lan", "cloud", "external"]
+PreferredBackend = Literal["llamacpp", "openai", "anthropic", "xai", "local", "external"]
+
+
+class RoutingHints(TypedDict, total=False):
+    preferred_backend: PreferredBackend
+    token_budget: int
+    preferred_lane: str
+    max_latency_ms: int
+
+
+class ContextPacket(TypedDict, total=False):
+    """Explicit upstream context contract for harness/orchestrator integration."""
+
+    content: str
+    locality: Locality
+    freshness: float | None
+    provenance: list[str]
+    routing_hints: RoutingHints
+    metadata: dict[str, Any]
+    source: str
 
 
 # === Glyph Constants ===
 
+
 class Glyphs:
     """Glyph constants matching TypeScript glyph_types.ts"""
-    
+
     # === ACTIONS (64) ===
     ACTION_BOOK = "⊕"
     ACTION_QUERY = "?"
@@ -80,7 +107,7 @@ class Glyphs:
     ACTION_TIMEOUT = "⊽"
     ACTION_REDIRECT = "⊾"
     ACTION_ROUTE = "⊿"
-    
+
     # === ENTITIES (64) ===
     DEST_MARS = "MRS"
     DEST_MOON = "MON"
@@ -129,7 +156,7 @@ class Glyphs:
     ENTITY_ALERT = "ALR"
     ENTITY_DASHBOARD = "DSH"
     ENTITY_REPORT = "RPT"
-    
+
     # === TIME ===
     HEADER = "H"
     SEPARATOR = "|"
@@ -210,14 +237,16 @@ PSI_LEVELS = ["Ψ0", "Ψ1", "Ψ2", "Ψ3", "Ψ4", "Ψ5", "Ψ6", "Ψ7", "Ψ8", "Ψ
 
 # === Data Classes ===
 
+
 @dataclass
 class Intent:
     """User intent to encode"""
+
     action: str
     destination: str
     time_slot: int = 0
-    modifiers: Optional[List[str]] = None
-    coherence: Optional[float] = None
+    modifiers: list[str] | None = None
+    coherence: float | None = None
 
 
 @dataclass
@@ -226,12 +255,13 @@ class ContextPayload:
 
     The router inspects this to decide whether to apply Ψ encoding.
     """
+
     raw_context: str = ""
     raw_context_chars: int = 0
-    encoding_status: str = "none"          # "none" | "encoded" | "skipped" | "disabled" | "error_raw_fallback"
+    encoding_status: str = "none"  # "none" | "encoded" | "skipped" | "disabled" | "error_raw_fallback"
     encoded_context: str = ""
-    encoding_format: str = ""              # "GE1-JSON" | "GE1-LINES"
-    encoding_ratio: float = 1.0            # encoded_chars / raw_chars (lower = better)
+    encoding_format: str = ""  # "GE1-JSON" | "GE1-LINES"
+    encoding_ratio: float = 1.0  # encoded_chars / raw_chars (lower = better)
     estimated_token_delta: int = 0
     error: str = ""
 
@@ -239,6 +269,7 @@ class ContextPayload:
 @dataclass
 class GlyphPacket:
     """Complete glyph packet"""
+
     instance_id: str
     psi_coherence: float
     action: str
@@ -246,35 +277,149 @@ class GlyphPacket:
     time_slot: str = "T00"
     destination: str = ""
     # Encoding metadata (filled by gateway, inspected by router)
-    encoding_status: str = "none"          # mirrors ContextPayload.encoding_status
-    encoding_format: str = ""              # "GE1-JSON" | "GE1-LINES"
+    encoding_status: str = "none"  # mirrors ContextPayload.encoding_status
+    encoding_format: str = ""  # "GE1-JSON" | "GE1-LINES"
     encoding_ratio: float = 1.0
+
+    @property
+    def instanceId(self) -> str:
+        return self.instance_id
+
+    @property
+    def psiCoherence(self) -> float:
+        return self.psi_coherence
+
+    @property
+    def timeSlot(self) -> str:
+        return self.time_slot
 
 
 # === Helper Functions ===
 
+
+def normalize_psi(psi: float | int | None) -> float:
+    try:
+        value = float(psi if psi is not None else 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(1.0, value))
+
+
 def psi_to_level(psi: float) -> str:
     """Convert psi value (0-1) to psi level string"""
-    level = min(max(int(psi * 10), 0), 9)
+    value = normalize_psi(psi)
+    if value >= 1.0:
+        return "Ψ9"
+    level = min(max(int(value * 10), 0), 9)
     return PSI_LEVELS[level]
 
 
 def level_to_psi(level: str) -> float:
     """Convert psi level string to psi value (0-1)"""
     try:
-        return PSI_LEVELS.index(level) / 10
+        return PSI_LEVELS.index(str(level).strip()) / 10
     except ValueError:
         return 0.0
 
 
 def time_to_slot(t: int) -> str:
     """Convert time value to slot string"""
-    return f"T{t:02d}"
+    try:
+        value = int(t)
+    except (TypeError, ValueError):
+        value = 0
+    value = max(0, value)
+    return f"T{value:02d}"
 
 
 def slot_to_time(slot: str) -> int:
     """Convert slot string to time value"""
     try:
-        return int(slot.replace("T", ""))
+        text = str(slot).strip().upper()
+        if text.startswith("T"):
+            return int(text[1:])
+        return int(text)
     except ValueError:
         return 0
+
+
+def normalize_time_slot(slot: str | int) -> str:
+    """Normalize any slot input to canonical Txx."""
+    if isinstance(slot, int):
+        return time_to_slot(slot)
+    return time_to_slot(slot_to_time(str(slot)))
+
+
+def validate_context_packet_shape(value: Any) -> ContextPacket:
+    """Validate and normalize explicit upstream harness context."""
+    if value is None:
+        return {}
+
+    if not isinstance(value, dict):
+        raise TypeError("ContextPacket must be mapping-like")
+
+    out: ContextPacket = {}
+
+    if "content" in value and value["content"] is not None:
+        out["content"] = str(value["content"])
+
+    if "locality" in value and value["locality"] is not None:
+        locality = str(value["locality"]).strip()
+        if locality not in {"orion-local", "lan", "cloud", "external"}:
+            raise ValueError("ContextPacket.locality must be one of 'orion-local', 'lan', 'cloud', 'external'")
+        out["locality"] = locality  # type: ignore[assignment]
+
+    if "freshness" in value:
+        freshness = value["freshness"]
+        if freshness is None:
+            out["freshness"] = None
+        else:
+            try:
+                out["freshness"] = float(freshness)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("ContextPacket.freshness must be float | None") from exc
+
+    if "provenance" in value and value["provenance"] is not None:
+        provenance = value["provenance"]
+        if not isinstance(provenance, list):
+            raise ValueError("ContextPacket.provenance must be a list[str]")
+        out["provenance"] = [str(item) for item in provenance]
+
+    if "routing_hints" in value and value["routing_hints"] is not None:
+        hints = value["routing_hints"]
+        if not isinstance(hints, dict):
+            raise ValueError("ContextPacket.routing_hints must be a mapping")
+        out["routing_hints"] = dict(hints)  # type: ignore[assignment]
+
+    if "metadata" in value and value["metadata"] is not None:
+        metadata = value["metadata"]
+        if not isinstance(metadata, dict):
+            raise ValueError("ContextPacket.metadata must be a mapping")
+        out["metadata"] = dict(metadata)
+
+    if "source" in value and value["source"] is not None:
+        out["source"] = str(value["source"])
+
+    return out
+
+
+__all__ = [
+    "Glyphs",
+    "ACTION_MAP",
+    "DEST_MAP",
+    "PSI_LEVELS",
+    "Intent",
+    "ContextPayload",
+    "ContextPacket",
+    "RoutingHints",
+    "Locality",
+    "PreferredBackend",
+    "GlyphPacket",
+    "normalize_psi",
+    "psi_to_level",
+    "level_to_psi",
+    "time_to_slot",
+    "slot_to_time",
+    "normalize_time_slot",
+    "validate_context_packet_shape",
+]
