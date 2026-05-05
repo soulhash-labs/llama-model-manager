@@ -1,3 +1,10 @@
+from .context_provider import (
+    build_upstream_context,
+    context_status,
+    prepare_gateway_context,
+    prepare_gateway_pipeline,
+    retrieve_context,
+)
 from .handlers_anthropic import handle_messages, handle_messages_count_tokens
 from .handlers_openai import handle_chat_completions
 from .health_runtime import (
@@ -14,6 +21,7 @@ from .protocol_normalizers import (
     message_summary,
     messages_to_prompt,
 )
+from .routing_service import create_router, route_prompt, route_prompt_stream
 from .sse import (
     anthropic_sse_event,
     sse_comment,
@@ -63,4 +71,12 @@ __all__ = [
     "handle_chat_completions",
     "handle_messages",
     "handle_messages_count_tokens",
+    "context_status",
+    "retrieve_context",
+    "build_upstream_context",
+    "prepare_gateway_context",
+    "prepare_gateway_pipeline",
+    "create_router",
+    "route_prompt",
+    "route_prompt_stream",
 ]
