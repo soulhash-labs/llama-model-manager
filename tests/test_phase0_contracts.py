@@ -3196,6 +3196,81 @@ while True:
         self.assertEqual(captured["max_tokens"], 42)
         self.assertEqual(captured["temperature"], 0.1)
 
+    def test_gateway_anthropic_messages_supports_sse_streaming(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_stream_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str], object]:
+            captured.update(
+                {
+                    "prompt": prompt,
+                    "model": model,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                }
+            )
+
+            def chunks() -> object:
+                yield "anthropic "
+                yield "stream"
+
+            return (
+                {
+                    "target": "llamacpp",
+                    "reason_code": "default_local",
+                    "reason": "default - use local llama.cpp",
+                },
+                {"X-LMM-Route-Mode": "routed"},
+                chunks(),
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gateway = self.load_gateway_module()
+            with mock.patch.dict(
+                os.environ, {"LMM_GATEWAY_STATE_FILE": str(Path(tmpdir) / "gateway-state.json")}, clear=False
+            ):
+                with mock.patch.object(gateway, "route_prompt_stream", side_effect=fake_stream_route):
+                    server = self.start_gateway_server(gateway_module=gateway)
+                    payload = {
+                        "model": "claude-harness-model",
+                        "messages": [{"role": "user", "content": "stream please"}],
+                        "stream": True,
+                        "max_tokens": 33,
+                        "temperature": 0.2,
+                    }
+                    req = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/v1/messages",
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+
+                    with urllib.request.urlopen(req, timeout=5) as response:
+                        content_type = response.headers.get("Content-Type", "")
+                        raw = response.read().decode("utf-8")
+
+        self.assertIn("text/event-stream", content_type)
+        self.assertIn("event: message_start", raw)
+        self.assertIn("event: content_block_delta", raw)
+        self.assertIn('"text":"anthropic "', raw)
+        self.assertIn('"text":"stream"', raw)
+        self.assertIn("event: message_stop", raw)
+        self.assertEqual(captured["model"], "claude-harness-model")
+        self.assertEqual(captured["max_tokens"], 33)
+        self.assertEqual(captured["temperature"], 0.2)
+
+    def test_gateway_anthropic_count_tokens_falls_back_to_word_count(self) -> None:
+        server = self.start_gateway_server()
+        payload = {
+            "model": "claude-harness-model",
+            "messages": [{"role": "user", "content": "one two three"}],
+        }
+
+        body = self.post_json(f"http://127.0.0.1:{server.server_port}/v1/messages/count_tokens", payload)
+
+        self.assertEqual(body["input_tokens"], 4)
+
     def test_gateway_streaming_sends_headers_before_first_content_chunk(self) -> None:
         gateway = self.load_gateway_module()
         events: list[str] = []

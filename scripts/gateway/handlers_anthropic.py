@@ -46,28 +46,27 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> Non
     prepare_gateway_pipeline = api["prepare_gateway_pipeline"]
     build_context_payload = api["_build_context_payload"]
     invoke_route_prompt = api["_invoke_route_prompt"]
+    invoke_route_prompt_stream = api["_invoke_route_prompt_stream"]
     route_prompt = api["route_prompt"]
+    route_prompt_stream = api["route_prompt_stream"]
     fallback_prompt_for_legacy_route = api["_fallback_prompt_for_legacy_route"]
     build_anthropic_response = api["build_anthropic_response"]
+    stream_anthropic_completion = api["stream_anthropic_completion"]
+    generate_handoff_summary = api["_generate_handoff_summary"]
+    safe_record_run_record = api["safe_record_run_record"]
+    run_record_from_dict = api["_run_record_from_dict"]
     safe_record_gateway_request = api["safe_record_gateway_request"]
 
     started = now()
     try:
         payload = read_json(handler)
-        if payload.get("stream") is True:
-            json_response(
-                handler,
-                400,
-                {"error": {"message": "streaming not yet supported", "type": "invalid_request_error"}},
-            )
-            return
         prompt = anthropic_messages_to_text(payload.get("messages", []), payload.get("system"))
         if not prompt.strip():
             raise InvalidRequestError("messages must contain text content")
         model = str(payload.get("model") or getattr(handler.server, "model_id", "") or "claude-3")
         max_tokens = request_int(payload, "max_tokens", int(os.environ.get("LMM_DEFAULT_MAX_TOKENS", "32768")))
         temperature = request_float(payload, "temperature", 0.7)
-        stream = False
+        stream = payload.get("stream") is True
 
         record: dict[str, Any] = {
             "time": started,
@@ -121,6 +120,57 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> Non
                 "request": pipeline.get("request", {}),
             }
         )
+
+        if stream:
+            routed, headers, chunks = invoke_route_prompt_stream(
+                route_fn=route_prompt_stream,
+                prompt=prompt,
+                fallback_prompt=fallback_prompt_for_legacy_route(prompt, pipeline, context_payload),
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                context_payload=context_payload,
+                upstream_context=pipeline.get("upstream_context"),
+            )
+            headers["X-LMM-Route-Mode"] = str(pipeline.get("mode", "routed-basic"))
+            headers["X-LMM-Context-Status"] = str(pipeline.get("context_status", "unknown"))
+            headers["X-LMM-Glyph-Encoding"] = str(pipeline.get("glyph_encoding_status", "skipped"))
+            headers["X-LMM-Search-Strategy"] = str(pipeline.get("search_strategy", ""))
+            headers["X-LMM-Search-Degraded"] = str(bool(pipeline.get("search_degraded", False)))
+            record.update(
+                {
+                    "route_target": routed["target"],
+                    "reason_code": routed["reason_code"],
+                    "encoding_status": context_payload.encoding_status,
+                    "encoding_format": context_payload.encoding_format,
+                    "encoding_ratio": context_payload.encoding_ratio,
+                    "encoding_aware_routing": True,
+                }
+            )
+            text, success, error_message, latency_ms = stream_anthropic_completion(
+                handler,
+                started=started,
+                model=model,
+                chunks=chunks,
+                headers=headers,
+            )
+            record.update(
+                {
+                    "success": success,
+                    "latency_ms": latency_ms,
+                    "completion_chars": len(text),
+                    "completed_at": current_iso_timestamp(),
+                    "provider": record["route_target"],
+                    "status": RunStatus.COMPLETED.value if success else RunStatus.CANCELLED.value,
+                    "exit_result": ExitResult.SUCCESS.value if success else ExitResult.USER_CANCELLED.value,
+                }
+            )
+            if error_message:
+                record["error"] = error_message
+            generate_handoff_summary(record, record.get("latency_ms", 0))
+            safe_record_run_record(run_record_from_dict(record))
+            safe_record_gateway_request(record)
+            return
 
         routed, _ = invoke_route_prompt(
             route_fn=route_prompt,
