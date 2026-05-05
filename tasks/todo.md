@@ -11,6 +11,13 @@ Pass order:
 - Pass 2: Replace gateway-owned context encoding with package `encode_context(...)`.
 - Pass 3: Thread explicit `upstream_context` into `route_prompt`, `route_prompt_stream`, and backward-compatible invocation helpers.
 - Pass 4: Run targeted gateway tests, package tests, compile checks, and pre-commit formatting hooks.
+- Pass 5: Extract OpenAI and Anthropic request handlers into `scripts/gateway/*` modules while preserving gateway-level patch points.
+
+Current checklist:
+- [x] Cut 3: Extract protocol normalizers and SSE helpers.
+- [x] Cut 4: Extract telemetry and runtime health/update services.
+- [x] Cut 5: Move OpenAI and Anthropic POST handlers out of `scripts/glyphos_openai_gateway.py`.
+- [x] Verify Cut 5 with compile, ruff, focused gateway tests, and integration package tests.
 
 Deferred:
 - Moving `integration_sync.py` and `context_mcp_bridge.py` under `scripts/integrations/` needs install-script and portability-test updates, so this pass will label boundaries but avoid path churn.

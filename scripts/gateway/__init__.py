@@ -1,3 +1,5 @@
+from .handlers_anthropic import handle_messages, handle_messages_count_tokens
+from .handlers_openai import handle_chat_completions
 from .health_runtime import (
     GatewayRuntime,
     cloud_routing_config,
@@ -58,4 +60,7 @@ __all__ = [
     "cloud_routing_config",
     "get_cloud_provider_status",
     "maybe_start_update_watcher",
+    "handle_chat_completions",
+    "handle_messages",
+    "handle_messages_count_tokens",
 ]

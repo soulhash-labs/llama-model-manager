@@ -26,6 +26,8 @@ if str(INTEGRATION_ROOT) not in sys.path:
     sys.path.insert(0, str(INTEGRATION_ROOT))
 
 from gateway.context_provider import build_upstream_context  # noqa: E402
+from gateway.handlers_anthropic import handle_messages, handle_messages_count_tokens  # noqa: E402
+from gateway.handlers_openai import handle_chat_completions  # noqa: E402
 from gateway.health_runtime import GatewayRuntime as _GatewayRuntime  # noqa: E402
 from gateway.health_runtime import cloud_routing_config as _cloud_routing_config_impl  # noqa: E402
 from gateway.health_runtime import coerce_bool as _coerce_bool_impl  # noqa: E402
@@ -42,11 +44,11 @@ from gateway.http_utils import request_float as gateway_request_float  # noqa: E
 from gateway.http_utils import request_int as gateway_request_int  # noqa: E402
 from gateway.protocol_normalizers import anthropic_messages_summary as gateway_anthropic_messages_summary  # noqa: E402
 from gateway.protocol_normalizers import (  # noqa: E402
-    anthropic_messages_to_text,  # noqa: E402
-    build_anthropic_response,  # noqa: E402
+    anthropic_messages_to_text,  # noqa: E402,F401 - compatibility export for extracted handlers
+    build_anthropic_response,  # noqa: E402,F401 - compatibility export for extracted handlers
     compact_json,  # noqa: E402
     message_summary,  # noqa: E402
-    messages_to_prompt,  # noqa: E402
+    messages_to_prompt,  # noqa: E402,F401 - compatibility export for extracted handlers
 )
 from gateway.sse import anthropic_sse_event as gateway_anthropic_sse_event  # noqa: E402
 from gateway.sse import sse_comment as gateway_sse_comment  # noqa: E402
@@ -64,9 +66,9 @@ from gateway.telemetry import safe_record_run_record as _safe_record_run_record 
 from gateway.telemetry import telemetry_store as _telemetry_store  # noqa: E402
 
 from lmm_config import load_lmm_config_from_env  # noqa: E402
-from lmm_errors import GatewayError, InvalidRequestError  # noqa: E402
+from lmm_errors import GatewayError  # noqa: E402
 from lmm_notifications import create_notification_manager  # noqa: E402
-from lmm_types import ExitResult, RunRecord, RunStatus  # noqa: E402
+from lmm_types import RunRecord  # noqa: E402
 
 anthropic_messages_summary = gateway_anthropic_messages_summary
 sse_event = gateway_sse_event
@@ -1189,357 +1191,18 @@ class GatewayHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
 
-        # Anthropic /v1/messages/count_tokens — token counting endpoint
         if path == "/v1/messages/count_tokens":
-            started = now()
-            try:
-                payload = read_json(self)
-                text = anthropic_messages_to_text(payload.get("messages", []), payload.get("system"))
-                # Try backend tokenization; fall back to word-count approximation
-                backend_base_url = getattr(self.server, "backend_base_url", "http://127.0.0.1:8081/v1")
-                try:
-                    status_code, token_data = http_json(
-                        "POST", f"{backend_base_url}/tokenize", {"content": text}, timeout=5
-                    )
-                    if isinstance(token_data.get("tokens"), list):
-                        token_count = len(token_data["tokens"])
-                    elif isinstance(token_data.get("count"), int):
-                        token_count = token_data["count"]
-                    else:
-                        token_count = max(1, len(text.split())) if text.strip() else 0
-                except Exception:
-                    token_count = max(1, len(text.split())) if text.strip() else 0
-                json_response(self, 200, {"input_tokens": token_count})
-            except InvalidRequestError as exc:
-                json_response(self, 400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
-            except Exception as exc:
-                json_response(self, 500, {"error": {"message": str(exc), "type": "internal_error"}})
+            handle_messages_count_tokens(self, globals())
             return
 
-        # Anthropic /v1/messages — non-streaming only (streaming in Plan 02)
         if path == "/v1/messages":
-            started = now()
-            try:
-                payload = read_json(self)
-                if payload.get("stream") is True:
-                    json_response(
-                        self,
-                        400,
-                        {"error": {"message": "streaming not yet supported", "type": "invalid_request_error"}},
-                    )
-                    return
-                prompt = anthropic_messages_to_text(payload.get("messages", []), payload.get("system"))
-                if not prompt.strip():
-                    raise InvalidRequestError("messages must contain text content")
-                model = str(payload.get("model") or self.server.model_id or "claude-3")
-                max_tokens = request_int(payload, "max_tokens", int(os.environ.get("LMM_DEFAULT_MAX_TOKENS", "32768")))
-                temperature = request_float(payload, "temperature", 0.7)
-                stream = False
-
-                # Build telemetry record with Anthropic format marker
-                record: dict[str, Any] = {
-                    "time": started,
-                    "started_at": _current_iso_timestamp(),
-                    "harness": self.headers.get("User-Agent", "unknown"),
-                    "mode": "routed-basic",
-                    "format": "anthropic",
-                    "context_status": "unknown",
-                    "context_used": False,
-                    "glyph_encoding_status": "skipped",
-                    "glyph_encoding_used": False,
-                    "route_target": "unknown",
-                    "reason_code": "unresolved",
-                    "success": False,
-                    "fallback_mode": "",
-                    "latency_ms": 0,
-                    "status": RunStatus.RUNNING.value,
-                    "exit_result": None,
-                    "provider": "unknown",
-                    "prompt": prompt,
-                    "model": model,
-                }
-
-                assembled_prompt, pipeline = prepare_gateway_pipeline(payload, prompt, model=model, stream=stream)
-
-                # Build ContextPayload for encoding-aware routing
-                context_payload = _build_context_payload(
-                    raw_context=pipeline.get("context_payload_raw", ""),
-                    raw_context_chars=pipeline.get("raw_context_chars", 0),
-                    encoding_status=pipeline.get("context_payload_encoding_status", "none"),
-                    encoded_context=pipeline.get("context_payload_encoded", ""),
-                    encoding_format=pipeline.get("context_payload_encoding_format", ""),
-                    encoding_ratio=pipeline.get("context_payload_encoding_ratio", 1.0),
-                )
-
-                record.update(
-                    {
-                        "mode": pipeline.get("mode", "routed-basic"),
-                        "context_status": pipeline.get("context_status", "unknown"),
-                        "context_used": bool(pipeline.get("context_used")),
-                        "context_source": pipeline.get("context_source", ""),
-                        "context_error": pipeline.get("context_error", ""),
-                        "context_latency_ms": pipeline.get("context_latency_ms", 0),
-                        "glyph_encoding_status": pipeline.get("glyph_encoding_status", "skipped"),
-                        "glyph_encoding_used": bool(pipeline.get("glyph_encoding_used")),
-                        "raw_context_chars": pipeline.get("raw_context_chars", 0),
-                        "encoded_context_chars": pipeline.get("encoded_context_chars", 0),
-                        "estimated_token_delta": pipeline.get("estimated_token_delta", 0),
-                        "encoding_ratio": pipeline.get("encoding_ratio", 1.0),
-                        "assembly_status": pipeline.get("assembly_status", "raw_prompt"),
-                        "assembled_prompt_chars": pipeline.get("assembled_prompt_chars", 0),
-                        "context_block_chars": pipeline.get("context_block_chars", 0),
-                        "request": pipeline.get("request", {}),
-                    }
-                )
-
-                routed, headers = _invoke_route_prompt(
-                    route_fn=route_prompt,
-                    prompt=prompt,
-                    fallback_prompt=_fallback_prompt_for_legacy_route(prompt, pipeline, context_payload),
-                    model=model,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    context_payload=context_payload,
-                    upstream_context=pipeline.get("upstream_context"),
-                )
-
-                record.update(
-                    {
-                        "route_target": routed["target"],
-                        "reason_code": routed["reason_code"],
-                        "success": True,
-                        "latency_ms": routed["latency_ms"],
-                        "provider": routed["target"],
-                        "status": RunStatus.COMPLETED.value,
-                        "exit_result": ExitResult.SUCCESS.value,
-                        "completed_at": _current_iso_timestamp(),
-                    }
-                )
-
-                response = build_anthropic_response(
-                    text=routed["text"],
-                    model=model,
-                    started=started,
-                    routed=routed,
-                    pipeline=pipeline,
-                )
-
-                safe_record_gateway_request(record)
-                json_response(self, 200, response)
-            except InvalidRequestError as exc:
-                json_response(self, 400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
-            except GatewayError as exc:
-                json_response(self, 502, {"error": {"message": str(exc), "type": "gateway_error"}})
-            except Exception as exc:
-                json_response(self, 500, {"error": {"message": str(exc), "type": "internal_error"}})
+            handle_messages(self, globals())
             return
 
-        # OpenAI /v1/chat/completions — existing handler (unchanged)
         if path != "/v1/chat/completions":
             json_response(self, 404, {"error": {"message": "unknown route", "type": "not_found"}})
             return
-        started = now()
-        context_state, context_used = context_status()
-        record: dict[str, Any] = {
-            "time": started,
-            "started_at": _current_iso_timestamp(),
-            "harness": self.headers.get("User-Agent", "unknown"),
-            "mode": "routed-basic",
-            "context_status": context_state,
-            "context_used": context_used,
-            "glyph_encoding_status": "skipped",
-            "glyph_encoding_used": False,
-            "route_target": "unknown",
-            "reason_code": "unresolved",
-            "success": False,
-            "fallback_mode": "",
-            "latency_ms": 0,
-            "status": RunStatus.RUNNING.value,
-            "exit_result": None,
-            "provider": "unknown",
-            "prompt": "",
-            "model": "",
-        }
-        try:
-            payload = read_json(self)
-            prompt = messages_to_prompt(payload.get("messages"))
-            model = str(payload.get("model") or self.server.model_id or "local-llama")  # type: ignore[attr-defined]
-            record["prompt"] = prompt
-            record["model"] = model
-            # Phase 06: Extract session metadata for handoff tracking
-            session_meta = _extract_session_metadata(payload)
-            if session_meta:
-                record.update(session_meta)
-            max_tokens = request_int(payload, "max_tokens", int(os.environ.get("LMM_DEFAULT_MAX_TOKENS", "32768")))
-            temperature = request_float(payload, "temperature", 0.7)
-            stream = payload.get("stream") is True
-            if not prompt.strip():
-                raise InvalidRequestError("messages must contain text content")
-            assembled_prompt, pipeline = prepare_gateway_pipeline(payload, prompt, model=model, stream=stream)
-            pipeline_request = pipeline.get("request")
-            if isinstance(pipeline_request, dict):
-                pipeline_request["harness_identity"] = record["harness"]
-
-            # Build ContextPayload for encoding-aware routing
-            context_payload = _build_context_payload(
-                raw_context=pipeline.get("context_payload_raw", ""),
-                raw_context_chars=pipeline.get("raw_context_chars", 0),
-                encoding_status=pipeline.get("context_payload_encoding_status", "none"),
-                encoded_context=pipeline.get("context_payload_encoded", ""),
-                encoding_format=pipeline.get("context_payload_encoding_format", ""),
-                encoding_ratio=pipeline.get("context_payload_encoding_ratio", 1.0),
-            )
-
-            record.update(
-                {
-                    "mode": pipeline.get("mode", "routed-basic"),
-                    "context_status": pipeline.get("context_status", context_state),
-                    "context_used": bool(pipeline.get("context_used")),
-                    "context_source": pipeline.get("context_source", ""),
-                    "context_error": pipeline.get("context_error", ""),
-                    "context_latency_ms": pipeline.get("context_latency_ms", 0),
-                    # FTS5 search metadata (loud failures)
-                    "search_strategy": pipeline.get("search_strategy", ""),
-                    "search_degraded": bool(pipeline.get("search_degraded", False)),
-                    # Encoding metadata (for telemetry — NOT applied to prompt yet)
-                    "glyph_encoding_status": pipeline.get("glyph_encoding_status", "skipped"),
-                    "glyph_encoding_used": bool(pipeline.get("glyph_encoding_used")),
-                    "raw_context_chars": pipeline.get("raw_context_chars", 0),
-                    "encoded_context_chars": pipeline.get("encoded_context_chars", 0),
-                    "estimated_token_delta": pipeline.get("estimated_token_delta", 0),
-                    "encoding_ratio": pipeline.get("encoding_ratio", 1.0),
-                    "glyph_encoding_error": pipeline.get("glyph_encoding_error", ""),
-                    "assembly_status": pipeline.get("assembly_status", "raw_prompt"),
-                    "assembled_prompt_chars": pipeline.get("assembled_prompt_chars", 0),
-                    "context_block_chars": pipeline.get("context_block_chars", 0),
-                    "request": pipeline_request if isinstance(pipeline_request, dict) else {},
-                }
-            )
-            if stream:
-                routed, headers, chunks = _invoke_route_prompt_stream(
-                    route_fn=route_prompt_stream,
-                    prompt=prompt,
-                    fallback_prompt=_fallback_prompt_for_legacy_route(prompt, pipeline, context_payload),
-                    model=model,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    context_payload=context_payload,
-                    upstream_context=pipeline.get("upstream_context"),
-                )
-                headers["X-LMM-Route-Mode"] = str(pipeline.get("mode", "routed-basic"))
-                headers["X-LMM-Context-Status"] = str(pipeline.get("context_status", "unknown"))
-                headers["X-LMM-Glyph-Encoding"] = str(pipeline.get("glyph_encoding_status", "skipped"))
-                headers["X-LMM-Search-Strategy"] = str(pipeline.get("search_strategy", ""))
-                headers["X-LMM-Search-Degraded"] = str(bool(pipeline.get("search_degraded", False)))
-                record.update(
-                    {
-                        "route_target": routed["target"],
-                        "reason_code": routed["reason_code"],
-                        "encoding_status": context_payload.encoding_status,
-                        "encoding_format": context_payload.encoding_format,
-                        "encoding_ratio": context_payload.encoding_ratio,
-                        "encoding_aware_routing": True,
-                    }
-                )
-                text, success, error_message, latency_ms = stream_completion(
-                    self,
-                    started=started,
-                    model=model,
-                    chunks=chunks,
-                    headers=headers,
-                )
-                record.update(
-                    {
-                        "success": success,
-                        "latency_ms": latency_ms,
-                        "completion_chars": len(text),
-                        "completed_at": _current_iso_timestamp(),
-                    }
-                )
-                if error_message:
-                    record["error"] = error_message
-                if not success:
-                    record["status"] = RunStatus.CANCELLED.value
-                    record["exit_result"] = ExitResult.USER_CANCELLED.value
-                    record["provider"] = record["route_target"]
-                else:
-                    record["status"] = RunStatus.COMPLETED.value
-                    record["exit_result"] = ExitResult.SUCCESS.value
-                    record["provider"] = record["route_target"]
-                # Phase 06: Generate handoff summary for long runs
-                _generate_handoff_summary(record, record.get("latency_ms", 0))
-                safe_record_run_record(_run_record_from_dict(record))
-                safe_record_gateway_request(record)
-                return
-            routed, headers = _invoke_route_prompt(
-                route_fn=route_prompt,
-                prompt=prompt,
-                fallback_prompt=_fallback_prompt_for_legacy_route(prompt, pipeline, context_payload),
-                model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                context_payload=context_payload,
-                upstream_context=pipeline.get("upstream_context"),
-            )
-            headers["X-LMM-Route-Mode"] = str(pipeline.get("mode", "routed-basic"))
-            headers["X-LMM-Context-Status"] = str(pipeline.get("context_status", "unknown"))
-            headers["X-LMM-Glyph-Encoding"] = str(pipeline.get("glyph_encoding_status", "skipped"))
-            headers["X-LMM-Search-Strategy"] = str(pipeline.get("search_strategy", ""))
-            headers["X-LMM-Search-Degraded"] = str(bool(pipeline.get("search_degraded", False)))
-            record.update(
-                {
-                    "route_target": routed["target"],
-                    "reason_code": routed["reason_code"],
-                    "success": True,
-                    "latency_ms": routed["latency_ms"],
-                    "provider": routed["target"],
-                    "status": RunStatus.COMPLETED.value,
-                    "exit_result": ExitResult.SUCCESS.value,
-                    "completed_at": _current_iso_timestamp(),
-                    "encoding_status": context_payload.encoding_status,
-                    "encoding_format": context_payload.encoding_format,
-                    "encoding_ratio": context_payload.encoding_ratio,
-                    "encoding_aware_routing": True,
-                }
-            )
-            response_payload = completion_payload(
-                started=started,
-                model=model,
-                routed=routed,
-                pipeline=pipeline,
-            )
-            # Phase 06: Generate handoff summary for long runs
-            _generate_handoff_summary(record, routed.get("latency_ms", 0))
-            safe_record_run_record(_run_record_from_dict(record))
-            safe_record_gateway_request(record)
-            json_response(self, 200, response_payload, headers=headers)
-        except InvalidRequestError as exc:
-            record["error"] = str(exc)
-            record["status"] = RunStatus.FAILED.value
-            record["exit_result"] = ExitResult.ERROR.value
-            record["latency_ms"] = round((now() - started) * 1000)
-            record["completed_at"] = _current_iso_timestamp()
-            _generate_handoff_summary(record, record["latency_ms"])
-            safe_record_gateway_request(record)
-            safe_record_run_record(_run_record_from_dict(record))
-            json_response(
-                self,
-                400,
-                {"error": {"message": str(exc), "type": "invalid_request_error"}, "lmm": record},
-            )
-        except Exception as exc:
-            record["error"] = str(exc)
-            record["status"] = RunStatus.FAILED.value
-            record["exit_result"] = ExitResult.PROVIDER_ERROR.value
-            record["latency_ms"] = round((now() - started) * 1000)
-            record["completed_at"] = _current_iso_timestamp()
-            _generate_handoff_summary(record, record["latency_ms"])
-            safe_record_gateway_request(record)
-            safe_record_run_record(_run_record_from_dict(record))
-            error_payload = (
-                exc.to_dict() if isinstance(exc, GatewayError) else {"message": str(exc), "type": "lmm_gateway_error"}
-            )
-            json_response(self, 503, {"error": error_payload, "lmm": record})
+        handle_chat_completions(self, globals())
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
         sys.stderr.write(f"{self.log_date_time_string()} - {format % args}\n")
