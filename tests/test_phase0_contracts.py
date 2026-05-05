@@ -2617,9 +2617,17 @@ class Phase0ContractTests(unittest.TestCase):
             captured: dict[str, object] = {}
 
             def fake_route(
-                prompt: str, model: str, max_tokens: int, temperature: float
+                prompt: str,
+                model: str,
+                max_tokens: int,
+                temperature: float,
+                *,
+                context_payload: object | None = None,
+                upstream_context: dict[str, object] | None = None,
             ) -> tuple[dict[str, object], dict[str, str]]:
                 captured["prompt"] = prompt
+                captured["context_payload"] = context_payload
+                captured["upstream_context"] = upstream_context
                 return {
                     "text": "encoded ok",
                     "target": "llamacpp",
@@ -2656,9 +2664,12 @@ class Phase0ContractTests(unittest.TestCase):
                     )
 
             routed_prompt = str(captured["prompt"])
-            self.assertIn("[Glyph Encoding v1]", routed_prompt)
-            self.assertIn("[Conversation and latest user request]", routed_prompt)
             self.assertIn("answer using the latest instruction", routed_prompt)
+            self.assertNotIn("[Glyph Encoding v1]", routed_prompt)
+            context_payload = captured["context_payload"]
+            self.assertEqual(getattr(context_payload, "encoding_status", ""), "encoded")
+            self.assertIn("GE1-JSON", getattr(context_payload, "encoded_context", ""))
+            self.assertIsInstance(captured["upstream_context"], dict)
             self.assertTrue(body["lmm"]["context_used"])
             self.assertTrue(body["lmm"]["glyph_encoding_used"])
             self.assertLess(body["lmm"]["encoding_ratio"], 1)
@@ -2668,6 +2679,63 @@ class Phase0ContractTests(unittest.TestCase):
             self.assertTrue(recent["context_used"])
             self.assertTrue(recent["glyph_encoding_used"])
             self.assertGreater(recent["estimated_token_delta"], 0)
+
+    def test_gateway_context_is_threaded_as_explicit_upstream_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "gateway-state.json"
+            captured: dict[str, object] = {}
+
+            def fake_route(
+                prompt: str,
+                model: str,
+                max_tokens: int,
+                temperature: float,
+                *,
+                context_payload: object | None = None,
+                upstream_context: dict[str, object] | None = None,
+            ) -> tuple[dict[str, object], dict[str, str]]:
+                captured["prompt"] = prompt
+                captured["context_payload"] = context_payload
+                captured["upstream_context"] = upstream_context
+                return {
+                    "text": "upstream context ok",
+                    "target": "llamacpp",
+                    "reason_code": "default_local",
+                    "reason": "default - use local llama.cpp",
+                    "latency_ms": 9,
+                }, {"X-LMM-Route-Mode": "routed"}
+
+            context = {
+                "items": [
+                    {"path": "/repo/context.md", "content": "explicit harness context"},
+                ]
+            }
+            gateway = self.load_gateway_module()
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LMM_GATEWAY_STATE_FILE": str(state_path),
+                    "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+                    server = self.start_gateway_server(gateway_module=gateway)
+                    body = self.post_json(
+                        f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                        {
+                            "model": "context-model",
+                            "messages": [{"role": "user", "content": "answer from context"}],
+                            "lmm_context": context,
+                        },
+                    )
+
+            upstream_context = captured["upstream_context"]
+            self.assertIsInstance(upstream_context, dict)
+            self.assertIn("explicit harness context", str(upstream_context.get("content")))
+            self.assertEqual(upstream_context.get("source"), "payload")
+            self.assertIsNotNone(captured["context_payload"])
+            self.assertTrue(body["lmm"]["context_used"])
 
     def test_gateway_context_timeout_degrades_without_blocking_route(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3219,9 +3287,17 @@ while True:
         captured: dict[str, object] = {}
 
         def fake_stream_route(
-            prompt: str, model: str, max_tokens: int, temperature: float
+            prompt: str,
+            model: str,
+            max_tokens: int,
+            temperature: float,
+            *,
+            context_payload: object | None = None,
+            upstream_context: dict[str, object] | None = None,
         ) -> tuple[dict[str, object], dict[str, str], object]:
             captured["prompt"] = prompt
+            captured["context_payload"] = context_payload
+            captured["upstream_context"] = upstream_context
 
             def chunks() -> object:
                 yield "context stream"
@@ -3272,7 +3348,10 @@ while True:
             telemetry = json.loads((Path(tmpdir) / "gateway-state.json").read_text(encoding="utf-8"))
 
         self.assertIn("data: [DONE]", raw)
-        self.assertIn("[Glyph Encoding v1]", str(captured["prompt"]))
+        self.assertIn("stream with context", str(captured["prompt"]))
+        self.assertNotIn("[Glyph Encoding v1]", str(captured["prompt"]))
+        self.assertEqual(getattr(captured["context_payload"], "encoding_status", ""), "encoded")
+        self.assertIsInstance(captured["upstream_context"], dict)
         self.assertEqual(telemetry["recent_requests"][0]["mode"], "routed-full")
         self.assertTrue(telemetry["recent_requests"][0]["context_used"])
 

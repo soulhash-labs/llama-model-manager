@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
-import math
 import os
 import queue
 import shlex
@@ -18,8 +18,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from urllib import request as urlrequest
-from urllib.error import HTTPError, URLError
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_ROOT = Path(__file__).resolve().parent
@@ -29,6 +27,13 @@ INTEGRATION_ROOT = APP_ROOT / "integrations" / "public-glyphos-ai-compute"
 if str(INTEGRATION_ROOT) not in sys.path:
     sys.path.insert(0, str(INTEGRATION_ROOT))
 
+from gateway.context_provider import build_upstream_context  # noqa: E402
+from gateway.http_utils import http_json as gateway_http_json  # noqa: E402
+from gateway.http_utils import json_response as gateway_json_response  # noqa: E402
+from gateway.http_utils import read_json as gateway_read_json  # noqa: E402
+from gateway.http_utils import request_float as gateway_request_float  # noqa: E402
+from gateway.http_utils import request_int as gateway_request_int  # noqa: E402
+from gateway.protocol_normalizers import messages_to_prompt as normalize_messages_to_prompt  # noqa: E402
 from lmm_updates import UpdateChecker  # noqa: E402
 
 from lmm_config import load_lmm_config_from_env  # noqa: E402
@@ -71,79 +76,25 @@ def now() -> float:
 def json_response(
     handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any], headers: dict[str, str] | None = None
 ) -> None:
-    raw = json.dumps(payload).encode("utf-8")
-    handler.send_response(status)
-    handler.send_header("Content-Type", "application/json")
-    handler.send_header("Content-Length", str(len(raw)))
-    for key, value in (headers or {}).items():
-        handler.send_header(key, value)
-    handler.end_headers()
-    handler.wfile.write(raw)
+    gateway_json_response(handler, status, payload, headers)
 
 
 def read_json(handler: BaseHTTPRequestHandler, *, max_bytes: int = 2_000_000) -> dict[str, Any]:
-    length_text = handler.headers.get("Content-Length", "0")
-    try:
-        length = int(length_text)
-    except ValueError as exc:
-        raise InvalidRequestError("invalid Content-Length") from exc
-    if length < 0 or length > max_bytes:
-        raise InvalidRequestError("request body too large")
-    raw = handler.rfile.read(length)
-    try:
-        payload = json.loads(raw.decode("utf-8")) if raw else {}
-    except json.JSONDecodeError as exc:
-        raise InvalidRequestError(f"invalid JSON: {exc.msg}") from exc
-    if not isinstance(payload, dict):
-        raise InvalidRequestError("request JSON must be an object")
-    return payload
+    return gateway_read_json(handler, max_bytes=max_bytes)
 
 
 def request_int(payload: dict[str, Any], key: str, default: int, *, minimum: int = 1) -> int:
-    raw = payload.get(key, default)
-    if isinstance(raw, bool):
-        raise InvalidRequestError(f"{key} must be an integer")
-    if isinstance(raw, int):
-        value = raw
-    elif isinstance(raw, str) and raw.strip().isdigit():
-        value = int(raw.strip())
-    else:
-        raise InvalidRequestError(f"{key} must be an integer")
-    if value < minimum:
-        raise InvalidRequestError(f"{key} must be at least {minimum}")
-    return value
+    return gateway_request_int(payload, key, default, minimum=minimum)
 
 
 def request_float(payload: dict[str, Any], key: str, default: float) -> float:
-    raw = payload.get(key, default)
-    try:
-        value = float(raw)
-    except (TypeError, ValueError) as exc:
-        raise InvalidRequestError(f"{key} must be a number") from exc
-    if not math.isfinite(value):
-        raise InvalidRequestError(f"{key} must be finite")
-    return value
+    return gateway_request_float(payload, key, default)
 
 
 def http_json(
     method: str, url: str, *, payload: dict[str, Any] | None = None, timeout: int = 5
 ) -> tuple[int, dict[str, Any]]:
-    data = json.dumps(payload).encode("utf-8") if payload is not None else None
-    req = urlrequest.Request(url, data=data, headers={"Content-Type": "application/json"}, method=method)
-    try:
-        with urlrequest.urlopen(req, timeout=timeout) as response:
-            raw = response.read().decode("utf-8")
-            parsed = json.loads(raw) if raw else {}
-            return int(response.status), parsed if isinstance(parsed, dict) else {}
-    except HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
-        try:
-            parsed = json.loads(raw) if raw else {}
-        except Exception:
-            parsed = {"error": raw}
-        return int(exc.code), parsed if isinstance(parsed, dict) else {"error": raw}
-    except URLError as exc:
-        raise RuntimeError(str(exc)) from exc
+    return gateway_http_json(method, url, payload=payload, timeout=timeout)
 
 
 def run_context_command(
@@ -299,27 +250,7 @@ def _run_record_from_dict(record: dict[str, Any]) -> RunRecord:
 
 
 def messages_to_prompt(messages: Any) -> str:
-    if not isinstance(messages, list):
-        return ""
-    lines: list[str] = []
-    for item in messages:
-        if not isinstance(item, dict):
-            continue
-        role = str(item.get("role", "user")).strip() or "user"
-        content = item.get("content", "")
-        if isinstance(content, list):
-            parts: list[str] = []
-            for part in content:
-                if isinstance(part, dict) and part.get("type") in {"text", "input_text"}:
-                    parts.append(str(part.get("text", "")))
-                elif isinstance(part, str):
-                    parts.append(part)
-            content_text = "\n".join(piece for piece in parts if piece)
-        else:
-            content_text = str(content)
-        if content_text.strip():
-            lines.append(f"{role}: {content_text.strip()}")
-    return "\n\n".join(lines)
+    return normalize_messages_to_prompt(messages)
 
 
 def anthropic_messages_to_text(messages: Any, system: Any = None) -> str:
@@ -861,15 +792,15 @@ def repeated_line_payload(text: str) -> str:
 
 def glyph_encode_context(context: str) -> dict[str, Any]:
     raw = context.strip()
-    raw_chars = len(raw)
     result: dict[str, Any] = {
         "status": "skipped",
         "used": False,
-        "raw_context_chars": raw_chars,
+        "raw_context_chars": len(raw),
         "encoded_context_chars": 0,
         "estimated_token_delta": 0,
         "encoding_ratio": 1.0,
         "encoded_context": "",
+        "encoding_format": "",
         "error": "",
         "latency_ms": 0,
     }
@@ -878,38 +809,29 @@ def glyph_encode_context(context: str) -> dict[str, Any]:
         if not raw:
             return result
         encoding_config = load_lmm_config_from_env().glyph_encoding
-        if encoding_config.disabled:
-            result["status"] = "disabled"
-            return result
-        if encoding_config.force_error:
-            raise RuntimeError("forced glyph encoding failure")
-        encoded = ""
-        try:
-            parsed = json.loads(raw)
-            encoded = "GE1-JSON " + compact_json(alias_context_keys(parsed))
-        except json.JSONDecodeError:
-            encoded = repeated_line_payload(raw)
-        if not encoded:
-            result["status"] = "raw_unstructured"
-            return result
+        if str(INTEGRATION_ROOT) not in sys.path:
+            sys.path.insert(0, str(INTEGRATION_ROOT))
+        from glyphos_ai.glyph.context_encoding import encode_context  # type: ignore
+
+        payload = encode_context(
+            raw,
+            disabled=bool(encoding_config.disabled),
+            force_error=bool(encoding_config.force_error),
+        )
+        encoded = str(getattr(payload, "encoded_context", ""))
         encoded_chars = len(encoded)
-        if encoded_chars >= raw_chars:
-            result.update(
-                {
-                    "status": "raw_not_smaller",
-                    "encoded_context_chars": encoded_chars,
-                    "encoding_ratio": round(encoded_chars / raw_chars, 4) if raw_chars else 1.0,
-                }
-            )
-            return result
+        status = str(getattr(payload, "encoding_status", "skipped"))
         result.update(
             {
-                "status": "encoded",
-                "used": True,
+                "status": status,
+                "used": status == "encoded" and bool(encoded),
+                "raw_context_chars": int(getattr(payload, "raw_context_chars", len(raw))),
                 "encoded_context_chars": encoded_chars,
-                "estimated_token_delta": round((raw_chars - encoded_chars) / 4),
-                "encoding_ratio": round(encoded_chars / raw_chars, 4),
+                "estimated_token_delta": int(getattr(payload, "estimated_token_delta", 0)),
+                "encoding_ratio": float(getattr(payload, "encoding_ratio", 1.0)),
                 "encoded_context": encoded,
+                "encoding_format": str(getattr(payload, "encoding_format", "")),
+                "error": str(getattr(payload, "error", "")),
             }
         )
         return result
@@ -1050,8 +972,9 @@ def prepare_gateway_pipeline(
         "context_payload_raw": raw_ctx,
         "context_payload_encoded": encoding_result.get("encoded_context", ""),
         "context_payload_encoding_status": encoding_result.get("status", "none"),
-        "context_payload_encoding_format": "",
+        "context_payload_encoding_format": encoding_result.get("encoding_format", ""),
         "context_payload_encoding_ratio": encoding_result.get("encoding_ratio", 1.0),
+        "upstream_context": build_upstream_context(context_result),
         **assembly,
     }
     return assembled_prompt, pipeline
@@ -1207,7 +1130,12 @@ def create_router():
 
 
 def route_prompt(
-    prompt: str, model: str, max_tokens: int, temperature: float, context_payload=None
+    prompt: str,
+    model: str,
+    max_tokens: int,
+    temperature: float,
+    context_payload=None,
+    upstream_context: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     from glyphos_ai.glyph.types import GlyphPacket  # type: ignore
 
@@ -1228,6 +1156,7 @@ def route_prompt(
         packet,
         prompt=prompt,
         context_payload=context_payload,
+        upstream_context=upstream_context,
         model=model,
         max_tokens=max_tokens,
         temperature=temperature,
@@ -1253,7 +1182,12 @@ def route_prompt(
 
 
 def route_prompt_stream(
-    prompt: str, model: str, max_tokens: int, temperature: float, context_payload=None
+    prompt: str,
+    model: str,
+    max_tokens: int,
+    temperature: float,
+    context_payload=None,
+    upstream_context: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str], Iterator[str]]:
     from glyphos_ai.glyph.types import GlyphPacket  # type: ignore
 
@@ -1273,6 +1207,7 @@ def route_prompt_stream(
         packet,
         prompt=prompt,
         context_payload=context_payload,
+        upstream_context=upstream_context,
         model=model,
         max_tokens=max_tokens,
         temperature=temperature,
@@ -1297,6 +1232,7 @@ def _invoke_route_prompt(
     max_tokens: int,
     temperature: float,
     context_payload: Any,
+    upstream_context: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Invoke a route prompt callable with backward-compatible args.
 
@@ -1304,12 +1240,39 @@ def _invoke_route_prompt(
     Keep new context-aware behavior when supported and gracefully fallback.
     """
 
+    effective_route_fn = getattr(route_fn, "side_effect", None) or route_fn
     try:
+        parameters = inspect.signature(effective_route_fn).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values())
+    accepts_context_payload = accepts_kwargs or "context_payload" in parameters
+    accepts_upstream_context = accepts_kwargs or "upstream_context" in parameters
+
+    if not accepts_context_payload:
+        return route_fn(fallback_prompt or prompt, model, max_tokens, temperature)
+    if not accepts_upstream_context:
         return route_fn(prompt, model, max_tokens, temperature, context_payload=context_payload)
+
+    try:
+        return route_fn(
+            prompt,
+            model,
+            max_tokens,
+            temperature,
+            context_payload=context_payload,
+            upstream_context=upstream_context,
+        )
     except TypeError as exc:
         message = str(exc)
-        if "context_payload" in message:
-            return route_fn(fallback_prompt or prompt, model, max_tokens, temperature)
+        if "context_payload" in message or "upstream_context" in message:
+            try:
+                return route_fn(prompt, model, max_tokens, temperature, context_payload=context_payload)
+            except TypeError as retry_exc:
+                retry_message = str(retry_exc)
+                if "context_payload" in retry_message:
+                    return route_fn(fallback_prompt or prompt, model, max_tokens, temperature)
+                raise
         raise
 
 
@@ -1322,15 +1285,43 @@ def _invoke_route_prompt_stream(
     max_tokens: int,
     temperature: float,
     context_payload: Any,
+    upstream_context: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str], Iterator[str]]:
     """Invoke a streaming route callable with backward-compatible args."""
 
+    effective_route_fn = getattr(route_fn, "side_effect", None) or route_fn
     try:
+        parameters = inspect.signature(effective_route_fn).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values())
+    accepts_context_payload = accepts_kwargs or "context_payload" in parameters
+    accepts_upstream_context = accepts_kwargs or "upstream_context" in parameters
+
+    if not accepts_context_payload:
+        return route_fn(fallback_prompt or prompt, model, max_tokens, temperature)
+    if not accepts_upstream_context:
         return route_fn(prompt, model, max_tokens, temperature, context_payload=context_payload)
+
+    try:
+        return route_fn(
+            prompt,
+            model,
+            max_tokens,
+            temperature,
+            context_payload=context_payload,
+            upstream_context=upstream_context,
+        )
     except TypeError as exc:
         message = str(exc)
-        if "context_payload" in message:
-            return route_fn(fallback_prompt or prompt, model, max_tokens, temperature)
+        if "context_payload" in message or "upstream_context" in message:
+            try:
+                return route_fn(prompt, model, max_tokens, temperature, context_payload=context_payload)
+            except TypeError as retry_exc:
+                retry_message = str(retry_exc)
+                if "context_payload" in retry_message:
+                    return route_fn(fallback_prompt or prompt, model, max_tokens, temperature)
+                raise
         raise
 
 
@@ -1346,6 +1337,10 @@ def _fallback_prompt_for_legacy_route(prompt: str, pipeline: dict[str, Any], con
 
     encoding_status = str(getattr(context_payload, "encoding_status", pipeline.get("glyph_encoding_status", "")))
     encoded_context = str(getattr(context_payload, "encoded_context", ""))
+    if encoding_status.lower() != "encoded" or not encoded_context:
+        encoding_result = glyph_encode_context(context_text)
+        encoding_status = str(encoding_result.get("status", encoding_status))
+        encoded_context = str(encoding_result.get("encoded_context", encoded_context))
     encoding = {
         "used": encoding_status.lower() == "encoded" and bool(encoded_context),
         "encoded_context": encoded_context,
@@ -1402,6 +1397,13 @@ def sse_event(payload: dict[str, Any] | str) -> bytes:
 def sse_comment(comment: str) -> bytes:
     safe = comment.replace("\n", " ").replace("\r", " ").strip() or "keepalive"
     return f": {safe}\n\n".encode()
+
+
+def anthropic_sse_event(event_type: str, payload: dict[str, Any]) -> bytes:
+    """Return Anthropic-format SSE event: ``event: {type}\ndata: {json}\n\n``."""
+    safe_type = str(event_type).replace("\n", " ").replace("\r", " ").strip()
+    data = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    return f"event: {safe_type}\ndata: {data}\n\n".encode()
 
 
 def stream_completion(
@@ -1515,6 +1517,174 @@ def stream_completion(
         try:
             handler.wfile.write(sse_event({"error": {"message": error_message, "type": "lmm_gateway_error"}}))
             handler.wfile.write(sse_event("[DONE]"))
+            handler.wfile.flush()
+        except Exception:
+            pass
+        return "".join(collected), False, error_message, latency_ms
+
+
+def stream_anthropic_completion(
+    handler: BaseHTTPRequestHandler,
+    *,
+    started: float,
+    model: str,
+    chunks: Iterator[str],
+    headers: dict[str, str],
+    heartbeat_seconds: float | None = None,
+) -> tuple[str, bool, str, int]:
+    """Stream Anthropic-format SSE events for ``/v1/messages``.
+
+    Returns ``(collected_text, success, error_message, latency_ms)`` — same
+    signature as :func:`stream_completion`.
+    """
+    collected: list[str] = []
+    iterator = iter(chunks)
+    events: queue.Queue[tuple[str, Any]] = queue.Queue()
+    stop_event = threading.Event()
+    model_short = model.split("/")[-1] if "/" in model else model
+
+    # Build base message envelope for message_start
+    message_id = f"msg_{int(started * 1000)}"
+    message_start_payload = {
+        "type": "message_start",
+        "message": {
+            "id": message_id,
+            "type": "message",
+            "role": "assistant",
+            "model": model,
+            "content": [],
+            "stop_reason": None,
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+        },
+    }
+
+    if heartbeat_seconds is None:
+        heartbeat_seconds = load_lmm_config_from_env().gateway.sse_heartbeat_seconds
+    heartbeat_seconds = max(0.01, heartbeat_seconds)
+
+    def pump_chunks() -> None:
+        try:
+            for item in iterator:
+                if stop_event.is_set():
+                    break
+                events.put(("chunk", item))
+            events.put(("done", None))
+        except Exception as exc:
+            events.put(("error", exc))
+
+    try:
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("Connection", "close")
+        for key, value in headers.items():
+            handler.send_header(key, value)
+        handler.end_headers()
+
+        # Anthropic SSE: send message_start
+        handler.wfile.write(anthropic_sse_event("message_start", message_start_payload))
+        handler.wfile.flush()
+
+        # Anthropic SSE: send content_block_start
+        handler.wfile.write(
+            anthropic_sse_event(
+                "content_block_start",
+                {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+            )
+        )
+        handler.wfile.flush()
+
+        worker = threading.Thread(target=pump_chunks, name="lmm-anthropic-stream-pump", daemon=True)
+        worker.start()
+
+        output_tokens = 0
+        while True:
+            try:
+                event_type, value = events.get(timeout=heartbeat_seconds)
+            except queue.Empty:
+                handler.wfile.write(sse_comment("lmm-keepalive"))
+                handler.wfile.flush()
+                continue
+
+            if event_type == "done":
+                break
+            if event_type == "error":
+                raise RuntimeError(str(value))
+
+            chunk = value
+            if not chunk:
+                continue
+            collected.append(str(chunk))
+            output_tokens += max(1, len(str(chunk).split()))
+
+            # Anthropic SSE: content_block_delta with text_delta
+            handler.wfile.write(
+                anthropic_sse_event(
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "text_delta", "text": str(chunk)},
+                    },
+                )
+            )
+            handler.wfile.flush()
+
+        # Anthropic SSE: content_block_stop
+        handler.wfile.write(anthropic_sse_event("content_block_stop", {"type": "content_block_stop", "index": 0}))
+        handler.wfile.flush()
+
+        # Anthropic SSE: message_delta with stop_reason and usage
+        handler.wfile.write(
+            anthropic_sse_event(
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn"},
+                    "usage": {"input_tokens": 0, "output_tokens": output_tokens},
+                },
+            )
+        )
+        handler.wfile.flush()
+
+        # Anthropic SSE: message_stop
+        handler.wfile.write(anthropic_sse_event("message_stop", {"type": "message_stop"}))
+        handler.wfile.flush()
+
+        latency_ms = round((now() - started) * 1000)
+        if latency_ms > 30000:
+            mgr = notification_manager()
+            if mgr:
+                mgr.notify(
+                    f"LMM: {model_short} completed",
+                    f"Run finished in {latency_ms // 1000}s",
+                    NotificationType.RUN_COMPLETED,
+                )
+        return "".join(collected), True, "", latency_ms
+    except (BrokenPipeError, ConnectionResetError) as exc:
+        stop_event.set()
+        latency_ms = round((now() - started) * 1000)
+        mgr = notification_manager()
+        if mgr:
+            mgr.notify(
+                "LMM: Client disconnected",
+                "Run cancelled by client",
+                NotificationType.CLIENT_DISCONNECTED,
+            )
+        return "".join(collected), False, f"client disconnected: {exc}", latency_ms
+    except Exception as exc:
+        stop_event.set()
+        error_message = str(exc)
+        latency_ms = round((now() - started) * 1000)
+        mgr = notification_manager()
+        if mgr:
+            mgr.notify(
+                f"LMM: {model_short} failed",
+                f"Error: {error_message[:100]}",
+                NotificationType.RUN_FAILED,
+            )
+        try:
+            handler.wfile.write(anthropic_sse_event("message_stop", {"type": "message_stop"}))
             handler.wfile.flush()
         except Exception:
             pass
@@ -1742,12 +1912,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
                 routed, headers = _invoke_route_prompt(
                     route_fn=route_prompt,
-                    prompt=assembled_prompt,
+                    prompt=prompt,
                     fallback_prompt=_fallback_prompt_for_legacy_route(prompt, pipeline, context_payload),
                     model=model,
                     max_tokens=max_tokens,
                     temperature=temperature,
                     context_payload=context_payload,
+                    upstream_context=pipeline.get("upstream_context"),
                 )
 
                 record.update(
@@ -1865,12 +2036,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
             if stream:
                 routed, headers, chunks = _invoke_route_prompt_stream(
                     route_fn=route_prompt_stream,
-                    prompt=assembled_prompt,
+                    prompt=prompt,
                     fallback_prompt=_fallback_prompt_for_legacy_route(prompt, pipeline, context_payload),
                     model=model,
                     max_tokens=max_tokens,
                     temperature=temperature,
                     context_payload=context_payload,
+                    upstream_context=pipeline.get("upstream_context"),
                 )
                 headers["X-LMM-Route-Mode"] = str(pipeline.get("mode", "routed-basic"))
                 headers["X-LMM-Context-Status"] = str(pipeline.get("context_status", "unknown"))
@@ -1919,12 +2091,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 return
             routed, headers = _invoke_route_prompt(
                 route_fn=route_prompt,
-                prompt=assembled_prompt,
+                prompt=prompt,
                 fallback_prompt=_fallback_prompt_for_legacy_route(prompt, pipeline, context_payload),
                 model=model,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 context_payload=context_payload,
+                upstream_context=pipeline.get("upstream_context"),
             )
             headers["X-LMM-Route-Mode"] = str(pipeline.get("mode", "routed-basic"))
             headers["X-LMM-Context-Status"] = str(pipeline.get("context_status", "unknown"))
