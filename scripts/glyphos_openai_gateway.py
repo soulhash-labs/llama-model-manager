@@ -5,7 +5,6 @@ import argparse
 import inspect
 import json
 import os
-import queue
 import shlex
 import shutil
 import signal
@@ -33,7 +32,19 @@ from gateway.http_utils import json_response as gateway_json_response  # noqa: E
 from gateway.http_utils import read_json as gateway_read_json  # noqa: E402
 from gateway.http_utils import request_float as gateway_request_float  # noqa: E402
 from gateway.http_utils import request_int as gateway_request_int  # noqa: E402
-from gateway.protocol_normalizers import messages_to_prompt as normalize_messages_to_prompt  # noqa: E402
+from gateway.protocol_normalizers import anthropic_messages_summary as gateway_anthropic_messages_summary  # noqa: E402
+from gateway.protocol_normalizers import (  # noqa: E402
+    anthropic_messages_to_text,  # noqa: E402
+    build_anthropic_response,  # noqa: E402
+    compact_json,  # noqa: E402
+    message_summary,  # noqa: E402
+    messages_to_prompt,  # noqa: E402
+)
+from gateway.sse import anthropic_sse_event as gateway_anthropic_sse_event  # noqa: E402
+from gateway.sse import sse_comment as gateway_sse_comment  # noqa: E402
+from gateway.sse import sse_event as gateway_sse_event  # noqa: E402
+from gateway.sse import stream_anthropic_completion as gateway_stream_anthropic_completion  # noqa: E402
+from gateway.sse import stream_completion as gateway_stream_completion  # noqa: E402
 from lmm_updates import UpdateChecker  # noqa: E402
 
 from lmm_config import load_lmm_config_from_env  # noqa: E402
@@ -42,6 +53,11 @@ from lmm_health import ComponentHealth, HealthChecker  # noqa: E402
 from lmm_notifications import NotificationType, create_notification_manager  # noqa: E402
 from lmm_storage import JsonGatewayTelemetryStore, JsonRunRecordStore  # noqa: E402
 from lmm_types import ExitResult, RunRecord, RunStatus  # noqa: E402
+
+anthropic_messages_summary = gateway_anthropic_messages_summary
+sse_event = gateway_sse_event
+sse_comment = gateway_sse_comment
+anthropic_sse_event = gateway_anthropic_sse_event
 
 # Phase 06: Handoff module (optional import for backward compat)
 try:
@@ -249,159 +265,6 @@ def _run_record_from_dict(record: dict[str, Any]) -> RunRecord:
     )
 
 
-def messages_to_prompt(messages: Any) -> str:
-    return normalize_messages_to_prompt(messages)
-
-
-def anthropic_messages_to_text(messages: Any, system: Any = None) -> str:
-    """Convert Anthropic-format messages to prompt text for the LMM pipeline.
-
-    Handles system prompt from top-level ``system`` parameter (string or
-    ``[{"type": "text", "text": "..."}]`` array) and per-message content
-    that may be a string or an array of content blocks.
-    """
-    lines: list[str] = []
-
-    # Extract system prompt
-    if system is not None:
-        if isinstance(system, str):
-            system_text = system.strip()
-        elif isinstance(system, list):
-            parts: list[str] = []
-            for item in system:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    parts.append(str(item.get("text", "")))
-            system_text = "\n".join(part for part in parts if part).strip()
-        else:
-            system_text = str(system).strip()
-        if system_text:
-            lines.append(f"system: {system_text}")
-
-    if not isinstance(messages, list):
-        return "\n\n".join(lines)
-
-    for item in messages:
-        if not isinstance(item, dict):
-            continue
-        role = str(item.get("role", "user")).strip() or "user"
-        content = item.get("content", "")
-        if isinstance(content, list):
-            parts = []
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    text = str(part.get("text", ""))
-                    if text:
-                        parts.append(text)
-                elif isinstance(part, str):
-                    parts.append(part)
-            content_text = "\n".join(parts)
-        else:
-            content_text = str(content)
-        if content_text.strip():
-            lines.append(f"{role}: {content_text.strip()}")
-    return "\n\n".join(lines)
-
-
-def anthropic_messages_summary(messages: Any) -> dict[str, Any]:
-    """Return a summary of Anthropic-format messages (analog of :func:`message_summary`).
-
-    Counts messages by role, total characters, and handles content as both
-    string and array formats.
-    """
-    summary: dict[str, Any] = {
-        "count": 0,
-        "roles": {},
-        "chars": 0,
-    }
-    if not isinstance(messages, list):
-        return summary
-    roles: dict[str, int] = {}
-    chars = 0
-    canonical: list[dict[str, Any]] = []
-    for item in messages:
-        if not isinstance(item, dict):
-            continue
-        role = str(item.get("role", "user")).strip() or "user"
-        content = item.get("content", "")
-        if isinstance(content, list):
-            content_chars = sum(
-                len(str(part.get("text", "")))
-                for part in content
-                if isinstance(part, dict) and part.get("type") == "text"
-            )
-        else:
-            content_chars = len(str(content))
-        roles[role] = roles.get(role, 0) + 1
-        chars += content_chars
-        canonical.append({"role": role, "chars": content_chars})
-    summary.update(
-        {
-            "count": len(canonical),
-            "roles": roles,
-            "chars": chars,
-        }
-    )
-    return summary
-    roles: dict[str, int] = {}
-    chars = 0
-    for item in messages:
-        if not isinstance(item, dict):
-            continue
-        role = str(item.get("role", "user")).strip() or "user"
-        content = item.get("content", "")
-        if isinstance(content, list):
-            content_chars = sum(
-                len(str(part.get("text", "")))
-                for part in content
-                if isinstance(part, dict) and part.get("type") == "text"
-            )
-        else:
-            content_chars = len(str(content))
-        roles[role] = roles.get(role, 0) + 1
-        chars += content_chars
-    summary.update(
-        {
-            "count": len(messages),
-            "roles": roles,
-            "chars": chars,
-        }
-    )
-    return summary
-
-
-def build_anthropic_response(
-    text: str,
-    model: str,
-    started: float,
-    routed: dict[str, Any],
-    pipeline: dict[str, Any],
-) -> dict[str, Any]:
-    """Build an Anthropic-format response dict for non-streaming ``/v1/messages``.
-
-    Includes LMM routing metadata under the ``lmm`` key.
-    """
-    return {
-        "id": f"msg_{int(started * 1000)}",
-        "type": "message",
-        "role": "assistant",
-        "content": [{"type": "text", "text": text}],
-        "model": model,
-        "stop_reason": "end_turn",
-        "usage": {
-            "input_tokens": 0,  # Approximate from text length if no upstream count
-            "output_tokens": max(1, len(text.split())),
-        },
-        "lmm": {
-            "route_target": routed.get("target", "unknown"),
-            "route_reason_code": routed.get("reason_code", "unknown"),
-            "context_status": pipeline.get("context_status", "unknown"),
-            "context_used": bool(pipeline.get("context_used")),
-            "glyph_encoding_status": pipeline.get("glyph_encoding_status", "skipped"),
-            "latency_ms": routed.get("latency_ms", 0),
-        },
-    }
-
-
 def context_pipeline_enabled() -> bool:
     return load_lmm_config_from_env().context.enabled
 
@@ -510,10 +373,6 @@ def context_status() -> tuple[str, bool]:
     return "bridge_ready", False
 
 
-def compact_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
-
-
 def extract_payload_context(payload: dict[str, Any]) -> Any:
     metadata = payload.get("metadata")
     candidates = [
@@ -551,34 +410,46 @@ def notification_manager():
     return create_notification_manager(enabled=enabled)
 
 
-def message_summary(messages: Any) -> dict[str, Any]:
-    summary: dict[str, Any] = {
-        "count": 0,
-        "roles": {},
-        "chars": 0,
-    }
-    if not isinstance(messages, list):
-        return summary
-    roles: dict[str, int] = {}
-    chars = 0
-    canonical: list[dict[str, Any]] = []
-    for item in messages:
-        if not isinstance(item, dict):
-            continue
-        role = str(item.get("role", "user")).strip() or "user"
-        content = item.get("content", "")
-        content_chars = len(compact_json(content) if not isinstance(content, str) else content)
-        roles[role] = roles.get(role, 0) + 1
-        chars += content_chars
-        canonical.append({"role": role, "chars": content_chars})
-    summary.update(
-        {
-            "count": len(canonical),
-            "roles": roles,
-            "chars": chars,
-        }
+def stream_completion(
+    handler: BaseHTTPRequestHandler,
+    *,
+    started: float,
+    model: str,
+    chunks: Iterator[str],
+    headers: dict[str, str],
+    heartbeat_seconds: float | None = None,
+) -> tuple[str, bool, str, int]:
+    return gateway_stream_completion(
+        handler,
+        started=started,
+        model=model,
+        chunks=chunks,
+        headers=headers,
+        heartbeat_seconds=heartbeat_seconds,
+        notification_manager_factory=notification_manager,
+        time_fn=now,
     )
-    return summary
+
+
+def stream_anthropic_completion(
+    handler: BaseHTTPRequestHandler,
+    *,
+    started: float,
+    model: str,
+    chunks: Iterator[str],
+    headers: dict[str, str],
+    heartbeat_seconds: float | None = None,
+) -> tuple[str, bool, str, int]:
+    return gateway_stream_anthropic_completion(
+        handler,
+        started=started,
+        model=model,
+        chunks=chunks,
+        headers=headers,
+        heartbeat_seconds=heartbeat_seconds,
+        notification_manager_factory=notification_manager,
+        time_fn=now,
+    )
 
 
 def command_context_from_output(raw: str) -> dict[str, Any]:
@@ -1387,308 +1258,6 @@ def completion_payload(
             "encoding_aware_routing": True,
         },
     }
-
-
-def sse_event(payload: dict[str, Any] | str) -> bytes:
-    data = payload if isinstance(payload, str) else json.dumps(payload)
-    return f"data: {data}\n\n".encode()
-
-
-def sse_comment(comment: str) -> bytes:
-    safe = comment.replace("\n", " ").replace("\r", " ").strip() or "keepalive"
-    return f": {safe}\n\n".encode()
-
-
-def anthropic_sse_event(event_type: str, payload: dict[str, Any]) -> bytes:
-    """Return Anthropic-format SSE event: ``event: {type}\ndata: {json}\n\n``."""
-    safe_type = str(event_type).replace("\n", " ").replace("\r", " ").strip()
-    data = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
-    return f"event: {safe_type}\ndata: {data}\n\n".encode()
-
-
-def stream_completion(
-    handler: BaseHTTPRequestHandler,
-    *,
-    started: float,
-    model: str,
-    chunks: Iterator[str],
-    headers: dict[str, str],
-    heartbeat_seconds: float | None = None,
-) -> tuple[str, bool, str, int]:
-    collected: list[str] = []
-    iterator = iter(chunks)
-    events: queue.Queue[tuple[str, Any]] = queue.Queue()
-    stop_event = threading.Event()
-    model_short = model.split("/")[-1] if "/" in model else model
-    base = {
-        "id": f"chatcmpl-lmm-{int(started * 1000)}",
-        "object": "chat.completion.chunk",
-        "created": int(started),
-        "model": model,
-    }
-
-    if heartbeat_seconds is None:
-        heartbeat_seconds = load_lmm_config_from_env().gateway.sse_heartbeat_seconds
-    heartbeat_seconds = max(0.01, heartbeat_seconds)
-
-    def pump_chunks() -> None:
-        try:
-            for item in iterator:
-                if stop_event.is_set():
-                    break
-                events.put(("chunk", item))
-            events.put(("done", None))
-        except Exception as exc:
-            events.put(("error", exc))
-
-    try:
-        handler.send_response(200)
-        handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        handler.send_header("Cache-Control", "no-cache")
-        handler.send_header("Connection", "close")
-        for key, value in headers.items():
-            handler.send_header(key, value)
-        handler.end_headers()
-        handler.wfile.write(
-            sse_event({**base, "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]})
-        )
-        handler.wfile.flush()
-
-        worker = threading.Thread(target=pump_chunks, name="lmm-gateway-stream-pump", daemon=True)
-        worker.start()
-
-        while True:
-            try:
-                event_type, value = events.get(timeout=heartbeat_seconds)
-            except queue.Empty:
-                handler.wfile.write(sse_comment("lmm-keepalive"))
-                handler.wfile.flush()
-                continue
-
-            if event_type == "done":
-                break
-            if event_type == "error":
-                raise RuntimeError(str(value))
-
-            chunk = value
-            if not chunk:
-                continue
-            collected.append(str(chunk))
-            handler.wfile.write(
-                sse_event({**base, "choices": [{"index": 0, "delta": {"content": str(chunk)}, "finish_reason": None}]})
-            )
-            handler.wfile.flush()
-
-        handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}))
-        handler.wfile.write(sse_event("[DONE]"))
-        handler.wfile.flush()
-        latency_ms = round((now() - started) * 1000)
-        if latency_ms > 30000:
-            mgr = notification_manager()
-            if mgr:
-                mgr.notify(
-                    f"LMM: {model_short} completed",
-                    f"Run finished in {latency_ms // 1000}s",
-                    NotificationType.RUN_COMPLETED,
-                )
-        return "".join(collected), True, "", latency_ms
-    except (BrokenPipeError, ConnectionResetError) as exc:
-        stop_event.set()
-        latency_ms = round((now() - started) * 1000)
-        mgr = notification_manager()
-        if mgr:
-            mgr.notify(
-                "LMM: Client disconnected",
-                "Run cancelled by client",
-                NotificationType.CLIENT_DISCONNECTED,
-            )
-        return "".join(collected), False, f"client disconnected: {exc}", latency_ms
-    except Exception as exc:
-        stop_event.set()
-        error_message = str(exc)
-        latency_ms = round((now() - started) * 1000)
-        mgr = notification_manager()
-        if mgr:
-            mgr.notify(
-                f"LMM: {model_short} failed",
-                f"Error: {error_message[:100]}",
-                NotificationType.RUN_FAILED,
-            )
-        try:
-            handler.wfile.write(sse_event({"error": {"message": error_message, "type": "lmm_gateway_error"}}))
-            handler.wfile.write(sse_event("[DONE]"))
-            handler.wfile.flush()
-        except Exception:
-            pass
-        return "".join(collected), False, error_message, latency_ms
-
-
-def stream_anthropic_completion(
-    handler: BaseHTTPRequestHandler,
-    *,
-    started: float,
-    model: str,
-    chunks: Iterator[str],
-    headers: dict[str, str],
-    heartbeat_seconds: float | None = None,
-) -> tuple[str, bool, str, int]:
-    """Stream Anthropic-format SSE events for ``/v1/messages``.
-
-    Returns ``(collected_text, success, error_message, latency_ms)`` — same
-    signature as :func:`stream_completion`.
-    """
-    collected: list[str] = []
-    iterator = iter(chunks)
-    events: queue.Queue[tuple[str, Any]] = queue.Queue()
-    stop_event = threading.Event()
-    model_short = model.split("/")[-1] if "/" in model else model
-
-    # Build base message envelope for message_start
-    message_id = f"msg_{int(started * 1000)}"
-    message_start_payload = {
-        "type": "message_start",
-        "message": {
-            "id": message_id,
-            "type": "message",
-            "role": "assistant",
-            "model": model,
-            "content": [],
-            "stop_reason": None,
-            "usage": {"input_tokens": 0, "output_tokens": 0},
-        },
-    }
-
-    if heartbeat_seconds is None:
-        heartbeat_seconds = load_lmm_config_from_env().gateway.sse_heartbeat_seconds
-    heartbeat_seconds = max(0.01, heartbeat_seconds)
-
-    def pump_chunks() -> None:
-        try:
-            for item in iterator:
-                if stop_event.is_set():
-                    break
-                events.put(("chunk", item))
-            events.put(("done", None))
-        except Exception as exc:
-            events.put(("error", exc))
-
-    try:
-        handler.send_response(200)
-        handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        handler.send_header("Cache-Control", "no-cache")
-        handler.send_header("Connection", "close")
-        for key, value in headers.items():
-            handler.send_header(key, value)
-        handler.end_headers()
-
-        # Anthropic SSE: send message_start
-        handler.wfile.write(anthropic_sse_event("message_start", message_start_payload))
-        handler.wfile.flush()
-
-        # Anthropic SSE: send content_block_start
-        handler.wfile.write(
-            anthropic_sse_event(
-                "content_block_start",
-                {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
-            )
-        )
-        handler.wfile.flush()
-
-        worker = threading.Thread(target=pump_chunks, name="lmm-anthropic-stream-pump", daemon=True)
-        worker.start()
-
-        output_tokens = 0
-        while True:
-            try:
-                event_type, value = events.get(timeout=heartbeat_seconds)
-            except queue.Empty:
-                handler.wfile.write(sse_comment("lmm-keepalive"))
-                handler.wfile.flush()
-                continue
-
-            if event_type == "done":
-                break
-            if event_type == "error":
-                raise RuntimeError(str(value))
-
-            chunk = value
-            if not chunk:
-                continue
-            collected.append(str(chunk))
-            output_tokens += max(1, len(str(chunk).split()))
-
-            # Anthropic SSE: content_block_delta with text_delta
-            handler.wfile.write(
-                anthropic_sse_event(
-                    "content_block_delta",
-                    {
-                        "type": "content_block_delta",
-                        "index": 0,
-                        "delta": {"type": "text_delta", "text": str(chunk)},
-                    },
-                )
-            )
-            handler.wfile.flush()
-
-        # Anthropic SSE: content_block_stop
-        handler.wfile.write(anthropic_sse_event("content_block_stop", {"type": "content_block_stop", "index": 0}))
-        handler.wfile.flush()
-
-        # Anthropic SSE: message_delta with stop_reason and usage
-        handler.wfile.write(
-            anthropic_sse_event(
-                "message_delta",
-                {
-                    "type": "message_delta",
-                    "delta": {"stop_reason": "end_turn"},
-                    "usage": {"input_tokens": 0, "output_tokens": output_tokens},
-                },
-            )
-        )
-        handler.wfile.flush()
-
-        # Anthropic SSE: message_stop
-        handler.wfile.write(anthropic_sse_event("message_stop", {"type": "message_stop"}))
-        handler.wfile.flush()
-
-        latency_ms = round((now() - started) * 1000)
-        if latency_ms > 30000:
-            mgr = notification_manager()
-            if mgr:
-                mgr.notify(
-                    f"LMM: {model_short} completed",
-                    f"Run finished in {latency_ms // 1000}s",
-                    NotificationType.RUN_COMPLETED,
-                )
-        return "".join(collected), True, "", latency_ms
-    except (BrokenPipeError, ConnectionResetError) as exc:
-        stop_event.set()
-        latency_ms = round((now() - started) * 1000)
-        mgr = notification_manager()
-        if mgr:
-            mgr.notify(
-                "LMM: Client disconnected",
-                "Run cancelled by client",
-                NotificationType.CLIENT_DISCONNECTED,
-            )
-        return "".join(collected), False, f"client disconnected: {exc}", latency_ms
-    except Exception as exc:
-        stop_event.set()
-        error_message = str(exc)
-        latency_ms = round((now() - started) * 1000)
-        mgr = notification_manager()
-        if mgr:
-            mgr.notify(
-                f"LMM: {model_short} failed",
-                f"Error: {error_message[:100]}",
-                NotificationType.RUN_FAILED,
-            )
-        try:
-            handler.wfile.write(anthropic_sse_event("message_stop", {"type": "message_stop"}))
-            handler.wfile.flush()
-        except Exception:
-            pass
-        return "".join(collected), False, error_message, latency_ms
 
 
 class LMMOpenAIGateway:
