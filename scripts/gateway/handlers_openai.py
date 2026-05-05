@@ -43,6 +43,8 @@ def handle_chat_completions(handler: BaseHTTPRequestHandler, api: dict[str, Any]
     current_iso_timestamp = api["_current_iso_timestamp"]
     read_json = api["read_json"]
     messages_to_prompt = api["messages_to_prompt"]
+    append_tool_contract_to_prompt = api["append_tool_contract_to_prompt"]
+    apply_openai_tool_call_response = api["apply_openai_tool_call_response"]
     extract_session_metadata = api["_extract_session_metadata"]
     request_int = api["request_int"]
     request_float = api["request_float"]
@@ -74,6 +76,7 @@ def handle_chat_completions(handler: BaseHTTPRequestHandler, api: dict[str, Any]
     try:
         payload = read_json(handler)
         prompt = messages_to_prompt(payload.get("messages"))
+        prompt = append_tool_contract_to_prompt(prompt, payload, protocol="openai-chat-completions")
         model = str(payload.get("model") or getattr(handler.server, "model_id", "") or "local-llama")
         record["prompt"] = prompt
         record["model"] = model
@@ -217,6 +220,7 @@ def handle_chat_completions(handler: BaseHTTPRequestHandler, api: dict[str, Any]
             routed=routed,
             pipeline=pipeline,
         )
+        response_payload = apply_openai_tool_call_response(response_payload, routed["text"], payload)
         generate_handoff_summary(record, routed.get("latency_ms", 0))
         safe_record_run_record(run_record_from_dict(record))
         safe_record_gateway_request(record)

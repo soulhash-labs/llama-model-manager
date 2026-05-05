@@ -11,12 +11,14 @@ from lmm_types import ExitResult, RunStatus
 def handle_messages_count_tokens(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> None:
     read_json = api["read_json"]
     anthropic_messages_to_text = api["anthropic_messages_to_text"]
+    append_tool_contract_to_prompt = api["append_tool_contract_to_prompt"]
     http_json = api["http_json"]
     json_response = api["json_response"]
 
     try:
         payload = read_json(handler)
         text = anthropic_messages_to_text(payload.get("messages", []), payload.get("system"))
+        text = append_tool_contract_to_prompt(text, payload, protocol="anthropic-messages")
         backend_base_url = getattr(handler.server, "backend_base_url", "http://127.0.0.1:8081/v1")
         try:
             _, token_data = http_json("POST", f"{backend_base_url}/tokenize", {"content": text}, timeout=5)
@@ -39,6 +41,7 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> Non
     now = api["now"]
     read_json = api["read_json"]
     anthropic_messages_to_text = api["anthropic_messages_to_text"]
+    append_tool_contract_to_prompt = api["append_tool_contract_to_prompt"]
     json_response = api["json_response"]
     request_int = api["request_int"]
     request_float = api["request_float"]
@@ -51,6 +54,7 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> Non
     route_prompt_stream = api["route_prompt_stream"]
     fallback_prompt_for_legacy_route = api["_fallback_prompt_for_legacy_route"]
     build_anthropic_response = api["build_anthropic_response"]
+    apply_anthropic_tool_use_response = api["apply_anthropic_tool_use_response"]
     stream_anthropic_completion = api["stream_anthropic_completion"]
     generate_handoff_summary = api["_generate_handoff_summary"]
     safe_record_run_record = api["safe_record_run_record"]
@@ -61,6 +65,7 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> Non
     try:
         payload = read_json(handler)
         prompt = anthropic_messages_to_text(payload.get("messages", []), payload.get("system"))
+        prompt = append_tool_contract_to_prompt(prompt, payload, protocol="anthropic-messages")
         if not prompt.strip():
             raise InvalidRequestError("messages must contain text content")
         model = str(payload.get("model") or getattr(handler.server, "model_id", "") or "claude-3")
@@ -203,6 +208,7 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> Non
             routed=routed,
             pipeline=pipeline,
         )
+        response = apply_anthropic_tool_use_response(response, routed["text"], payload)
 
         safe_record_gateway_request(record)
         json_response(handler, 200, response)

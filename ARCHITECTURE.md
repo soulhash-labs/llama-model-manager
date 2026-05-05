@@ -239,6 +239,17 @@ Anthropic-compatible harnesses use:
 
 `POST /v1/messages` supports both non-streaming JSON responses and Anthropic-style SSE when the request includes `"stream": true`. The stream emits Anthropic event names such as `message_start`, `content_block_delta`, `message_delta`, and `message_stop`.
 
+Tool/function declarations are preserved into the routed prompt for both protocol surfaces:
+
+- OpenAI-style `tools`, `tool_choice`, legacy `functions`, and `function_call`
+- Anthropic-style `tools` and `tool_choice`
+
+The gateway does not execute tools. It exposes the declared contract to the model and keeps routing/local context semantics unchanged.
+If the routed model returns a declared tool call as structured JSON, the gateway shapes it back into the matching provider response:
+
+- OpenAI: `message.tool_calls` with `finish_reason: "tool_calls"`
+- Anthropic: `content[].type == "tool_use"` with `stop_reason: "tool_use"`
+
 ## Compatibility Surface
 
 Several names remain exported from `scripts/glyphos_openai_gateway.py` for legacy tests and operator code:

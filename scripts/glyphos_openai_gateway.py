@@ -57,8 +57,12 @@ from gateway.http_utils import request_int as gateway_request_int  # noqa: E402
 from gateway.protocol_normalizers import anthropic_messages_summary as gateway_anthropic_messages_summary  # noqa: E402
 from gateway.protocol_normalizers import (  # noqa: E402
     anthropic_messages_to_text,  # noqa: E402,F401 - compatibility export for extracted handlers
+    append_tool_contract_to_prompt,  # noqa: E402,F401 - compatibility export for extracted handlers
+    apply_anthropic_tool_use_response,  # noqa: E402,F401 - compatibility export for extracted handlers
+    apply_openai_tool_call_response,  # noqa: E402,F401 - compatibility export for extracted handlers
     build_anthropic_response,  # noqa: E402,F401 - compatibility export for extracted handlers
     compact_json,  # noqa: E402,F401 - compatibility export
+    format_tool_contract,  # noqa: E402,F401 - compatibility export
     messages_to_prompt,  # noqa: E402,F401 - compatibility export for extracted handlers
 )
 from gateway.routing_service import create_router as _routing_create_router  # noqa: E402

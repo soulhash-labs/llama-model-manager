@@ -2611,6 +2611,93 @@ class Phase0ContractTests(unittest.TestCase):
             self.assertEqual(telemetry["counters"]["success:True"], 1)
             self.assertEqual(telemetry["recent_requests"][0]["route_target"], "llamacpp")
 
+    def test_gateway_chat_completion_threads_tool_contract_into_prompt(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str]]:
+            captured["prompt"] = prompt
+            return {
+                "text": "tool contract ok",
+                "target": "llamacpp",
+                "reason_code": "default_local",
+                "reason": "default - use local llama.cpp",
+                "latency_ms": 7,
+            }, {"X-LMM-Route-Mode": "routed"}
+
+        gateway = self.load_gateway_module()
+        with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+            server = self.start_gateway_server(gateway_module=gateway)
+            body = self.post_json(
+                f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                {
+                    "model": "tool-model",
+                    "messages": [{"role": "user", "content": "what is the weather?"}],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "description": "Fetch weather for a city",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"city": {"type": "string"}},
+                                    "required": ["city"],
+                                },
+                            },
+                        }
+                    ],
+                    "tool_choice": "auto",
+                },
+            )
+
+        routed_prompt = str(captured["prompt"])
+        self.assertIn("[TOOL_CONTRACT]", routed_prompt)
+        self.assertIn("openai-chat-completions", routed_prompt)
+        self.assertIn("get_weather", routed_prompt)
+        self.assertIn("tool_choice", routed_prompt)
+        self.assertEqual(body["choices"][0]["message"]["content"], "tool contract ok")
+
+    def test_gateway_chat_completion_shapes_declared_tool_call_response(self) -> None:
+        def fake_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str]]:
+            return {
+                "text": json.dumps({"tool_call": {"name": "get_weather", "arguments": {"city": "Paris"}}}),
+                "target": "llamacpp",
+                "reason_code": "default_local",
+                "reason": "default - use local llama.cpp",
+                "latency_ms": 7,
+            }, {"X-LMM-Route-Mode": "routed"}
+
+        gateway = self.load_gateway_module()
+        with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+            server = self.start_gateway_server(gateway_module=gateway)
+            body = self.post_json(
+                f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                {
+                    "model": "tool-model",
+                    "messages": [{"role": "user", "content": "weather"}],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "parameters": {"type": "object"},
+                            },
+                        }
+                    ],
+                },
+            )
+
+        choice = body["choices"][0]
+        message = choice["message"]
+        self.assertIsNone(message["content"])
+        self.assertEqual(choice["finish_reason"], "tool_calls")
+        self.assertEqual(message["tool_calls"][0]["function"]["name"], "get_weather")
+        self.assertEqual(json.loads(message["tool_calls"][0]["function"]["arguments"]), {"city": "Paris"})
+
     def test_gateway_context_payload_is_glyph_encoded_before_routing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = Path(tmpdir) / "gateway-state.json"
@@ -3259,6 +3346,85 @@ while True:
         self.assertEqual(captured["model"], "claude-harness-model")
         self.assertEqual(captured["max_tokens"], 33)
         self.assertEqual(captured["temperature"], 0.2)
+
+    def test_gateway_anthropic_messages_threads_tool_contract_into_prompt(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str]]:
+            captured["prompt"] = prompt
+            return {
+                "text": "anthropic tool contract ok",
+                "target": "llamacpp",
+                "reason_code": "default_local",
+                "reason": "default - use local llama.cpp",
+                "latency_ms": 7,
+            }, {"X-LMM-Route-Mode": "routed"}
+
+        gateway = self.load_gateway_module()
+        with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+            server = self.start_gateway_server(gateway_module=gateway)
+            body = self.post_json(
+                f"http://127.0.0.1:{server.server_port}/v1/messages",
+                {
+                    "model": "claude-tool-model",
+                    "messages": [{"role": "user", "content": "look up the ticket"}],
+                    "tools": [
+                        {
+                            "name": "lookup_ticket",
+                            "description": "Find a ticket by id",
+                            "input_schema": {
+                                "type": "object",
+                                "properties": {"ticket_id": {"type": "string"}},
+                                "required": ["ticket_id"],
+                            },
+                        }
+                    ],
+                    "tool_choice": {"type": "auto"},
+                },
+            )
+
+        routed_prompt = str(captured["prompt"])
+        self.assertIn("[TOOL_CONTRACT]", routed_prompt)
+        self.assertIn("anthropic-messages", routed_prompt)
+        self.assertIn("lookup_ticket", routed_prompt)
+        self.assertIn("tool_choice", routed_prompt)
+        self.assertEqual(body["content"][0]["text"], "anthropic tool contract ok")
+
+    def test_gateway_anthropic_messages_shapes_declared_tool_use_response(self) -> None:
+        def fake_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str]]:
+            return {
+                "text": json.dumps({"tool_call": {"name": "lookup_ticket", "arguments": {"ticket_id": "OPS-7"}}}),
+                "target": "llamacpp",
+                "reason_code": "default_local",
+                "reason": "default - use local llama.cpp",
+                "latency_ms": 7,
+            }, {"X-LMM-Route-Mode": "routed"}
+
+        gateway = self.load_gateway_module()
+        with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+            server = self.start_gateway_server(gateway_module=gateway)
+            body = self.post_json(
+                f"http://127.0.0.1:{server.server_port}/v1/messages",
+                {
+                    "model": "claude-tool-model",
+                    "messages": [{"role": "user", "content": "ticket"}],
+                    "tools": [
+                        {
+                            "name": "lookup_ticket",
+                            "input_schema": {"type": "object"},
+                        }
+                    ],
+                },
+            )
+
+        self.assertEqual(body["stop_reason"], "tool_use")
+        self.assertEqual(body["content"][0]["type"], "tool_use")
+        self.assertEqual(body["content"][0]["name"], "lookup_ticket")
+        self.assertEqual(body["content"][0]["input"], {"ticket_id": "OPS-7"})
 
     def test_gateway_anthropic_count_tokens_falls_back_to_word_count(self) -> None:
         server = self.start_gateway_server()

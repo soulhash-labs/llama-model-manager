@@ -20,6 +20,8 @@ Current checklist:
 - [x] Verify Cut 5 with compile, ruff, focused gateway tests, and integration package tests.
 - [x] Cut 6: Move retrieval/context provider and routing service bodies out of `scripts/glyphos_openai_gateway.py`.
 - [x] Verify Cut 6 with context-provider tests, gateway regressions, and integration package tests.
+- [x] Complete harness contract: preserve OpenAI/Anthropic tool declarations into routed prompts.
+- [x] Verify harness contract with compile, ruff, focused gateway tests, and integration package tests.
 
 Deferred:
 - Moving `integration_sync.py` and `context_mcp_bridge.py` under `scripts/integrations/` needs install-script and portability-test updates, so this pass will label boundaries but avoid path churn.

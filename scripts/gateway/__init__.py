@@ -16,8 +16,12 @@ from .health_runtime import (
 from .protocol_normalizers import (
     anthropic_messages_summary,
     anthropic_messages_to_text,
+    append_tool_contract_to_prompt,
+    apply_anthropic_tool_use_response,
+    apply_openai_tool_call_response,
     build_anthropic_response,
     compact_json,
+    format_tool_contract,
     message_summary,
     messages_to_prompt,
 )
@@ -46,6 +50,10 @@ __all__ = [
     "compact_json",
     "messages_to_prompt",
     "anthropic_messages_to_text",
+    "format_tool_contract",
+    "append_tool_contract_to_prompt",
+    "apply_openai_tool_call_response",
+    "apply_anthropic_tool_use_response",
     "message_summary",
     "anthropic_messages_summary",
     "build_anthropic_response",
