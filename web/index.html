@@ -548,6 +548,10 @@
               Auto Sync OpenCode
               <input name="LLAMA_MODEL_SYNC_OPENCODE" id="default-sync-opencode" placeholder="1">
             </label>
+            <label title="When oh-my-openagent config exists, sync-opencode can point known agents at the fast GlyphOS lane with full GlyphOS fallback.">
+              Sync oh-my-openagent
+              <input name="LLAMA_MODEL_SYNC_OH_MY_OPENAGENT" id="default-sync-oh-my-openagent" placeholder="1">
+            </label>
             <label title="Opt-in. Set to 1 to update Claude Code settings after each successful model switch.">
               Auto Sync Claude
               <input name="LLAMA_MODEL_SYNC_CLAUDE" id="default-sync-claude" placeholder="0">
@@ -559,6 +563,14 @@
             <label title="Opt-in. Set to 1 to update ~/.glyphos/config.yaml after each successful model switch.">
               Auto Sync GlyphOS
               <input name="LLAMA_MODEL_SYNC_GLYPHOS" id="default-sync-glyphos" placeholder="0">
+            </label>
+            <label class="span-2" title="Canonical GlyphOS runtime policy file used by the gateway and public AI compute package.">
+              GlyphOS Policy File
+              <input name="GLYPHOS_CONFIG_FILE" id="default-glyphos-config-file" placeholder="$HOME/.glyphos/config.yaml">
+            </label>
+            <label class="span-2" title="Optional oh-my-openagent config file updated by sync-opencode when agent sync is enabled.">
+              oh-my-openagent Config
+              <input name="OH_MY_OPENAGENT_CONFIG_FILE" id="default-oh-my-openagent-config-file" placeholder="$HOME/.config/opencode/oh-my-openagent.json">
             </label>
             <label title="Default harness sync path. Routed uses the LMM gateway; direct bypasses Context + GlyphOS and points clients at llama.cpp.">
               Harness Mode

@@ -820,9 +820,13 @@ function renderStatus(data) {
     policy.max_tokens ? `max ${Number(policy.max_tokens).toLocaleString()} tokens` : "",
     policy.stream_timeout_seconds ? `stream ${policy.stream_timeout_seconds}s` : "",
     policy.sse_heartbeat_seconds ? `SSE ${policy.sse_heartbeat_seconds}s` : "",
+    policy.source_status ? `policy ${policy.source_status}` : "",
   ]) || "-");
   setText("#gateway-policy-route", policy.precedence || "-");
-  setText("#gateway-policy-cloud", policy.cloud_policy || "-");
+  setText("#gateway-policy-cloud", joinNotes([
+    policy.cloud_policy || "",
+    policy.source_of_truth ? `source ${displayPath(policy.source_of_truth)}` : "",
+  ]) || "-");
   setText("#opencode-model", data.opencode_model || "-");
   setText("#opencode-path", joinNotes([
     data.opencode_config_exists ? "config present" : "config missing",
@@ -2013,9 +2017,12 @@ function renderDefaults(defaults) {
   $("#default-log").value = defaults.LLAMA_SERVER_LOG || "";
   $("#default-extra").value = defaults.LLAMA_SERVER_EXTRA_ARGS || "";
   $("#default-sync-opencode").value = defaults.LLAMA_MODEL_SYNC_OPENCODE || "1";
+  $("#default-sync-oh-my-openagent").value = defaults.LLAMA_MODEL_SYNC_OH_MY_OPENAGENT || "1";
   $("#default-sync-claude").value = defaults.LLAMA_MODEL_SYNC_CLAUDE || "0";
   $("#default-sync-openclaw").value = defaults.LLAMA_MODEL_SYNC_OPENCLAW || "0";
   $("#default-sync-glyphos").value = defaults.LLAMA_MODEL_SYNC_GLYPHOS || "0";
+  $("#default-glyphos-config-file").value = defaults.GLYPHOS_CONFIG_FILE || "$HOME/.glyphos/config.yaml";
+  $("#default-oh-my-openagent-config-file").value = defaults.OH_MY_OPENAGENT_CONFIG_FILE || "$HOME/.config/opencode/oh-my-openagent.json";
   $("#default-harness-mode").value = defaults.LLAMA_MODEL_HARNESS_MODE || "routed";
   $("#default-gateway-host").value = defaults.LLAMA_MODEL_GATEWAY_HOST || "127.0.0.1";
   $("#default-gateway-port").value = defaults.LLAMA_MODEL_GATEWAY_PORT || "4010";
@@ -2178,9 +2185,12 @@ function collectDefaultsPayload() {
     LLAMA_SERVER_LOG: $("#default-log").value.trim(),
     LLAMA_SERVER_EXTRA_ARGS: $("#default-extra").value.trim(),
     LLAMA_MODEL_SYNC_OPENCODE: $("#default-sync-opencode").value.trim(),
+    LLAMA_MODEL_SYNC_OH_MY_OPENAGENT: $("#default-sync-oh-my-openagent").value.trim(),
     LLAMA_MODEL_SYNC_CLAUDE: $("#default-sync-claude").value.trim(),
     LLAMA_MODEL_SYNC_OPENCLAW: $("#default-sync-openclaw").value.trim(),
     LLAMA_MODEL_SYNC_GLYPHOS: $("#default-sync-glyphos").value.trim(),
+    GLYPHOS_CONFIG_FILE: $("#default-glyphos-config-file").value.trim(),
+    OH_MY_OPENAGENT_CONFIG_FILE: $("#default-oh-my-openagent-config-file").value.trim(),
     LLAMA_MODEL_HARNESS_MODE: $("#default-harness-mode").value.trim(),
     LLAMA_MODEL_GATEWAY_HOST: $("#default-gateway-host").value.trim(),
     LLAMA_MODEL_GATEWAY_PORT: $("#default-gateway-port").value.trim(),

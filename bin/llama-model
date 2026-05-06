@@ -46,6 +46,7 @@ DASHBOARD_SERVICE_PORT="${LLAMA_MODEL_WEB_PORT:-8765}"
 DASHBOARD_SERVICE_URL="http://${DASHBOARD_SERVICE_HOST}:${DASHBOARD_SERVICE_PORT}/"
 OPENCODE_CONFIG_FILE="${OPENCODE_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json}"
 OPENCODE_MODEL_STATE_FILE="${OPENCODE_MODEL_STATE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/opencode/model.json}"
+OH_MY_OPENAGENT_CONFIG_FILE="${OH_MY_OPENAGENT_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/oh-my-openagent.json}"
 OPENCLAW_PROFILE="${OPENCLAW_PROFILE:-}"
 OPENCLAW_API_KEY="${OPENCLAW_API_KEY:-llama-local}"
 CLAUDE_SETTINGS_FILE="${CLAUDE_SETTINGS_FILE:-$HOME/.claude/settings.json}"
@@ -73,6 +74,7 @@ LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS="${LMM_GATEWAY_FAST_CONTEXT_STREAM_TI
 LLAMA_MODEL_HARNESS_MODE="${LLAMA_MODEL_HARNESS_MODE:-routed}"
 LLAMA_MODEL_AUTOSTART_GATEWAY_ON_SYNC="${LLAMA_MODEL_AUTOSTART_GATEWAY_ON_SYNC:-1}"
 LLAMA_MODEL_SYNC_OPENCODE="${LLAMA_MODEL_SYNC_OPENCODE:-1}"
+LLAMA_MODEL_SYNC_OH_MY_OPENAGENT="${LLAMA_MODEL_SYNC_OH_MY_OPENAGENT:-1}"
 LLAMA_MODEL_SYNC_CLAUDE="${LLAMA_MODEL_SYNC_CLAUDE:-0}"
 LLAMA_MODEL_SYNC_OPENCLAW="${LLAMA_MODEL_SYNC_OPENCLAW:-0}"
 LLAMA_MODEL_SYNC_GLYPHOS="${LLAMA_MODEL_SYNC_GLYPHOS:-0}"
@@ -127,6 +129,7 @@ CLAUDE_SETTINGS_FILE="$(expand_user_path_literal "$CLAUDE_SETTINGS_FILE")"
 GLYPHOS_CONFIG_FILE="$(expand_user_path_literal "$GLYPHOS_CONFIG_FILE")"
 OPENCODE_CONFIG_FILE="$(expand_user_path_literal "$OPENCODE_CONFIG_FILE")"
 OPENCODE_MODEL_STATE_FILE="$(expand_user_path_literal "$OPENCODE_MODEL_STATE_FILE")"
+OH_MY_OPENAGENT_CONFIG_FILE="$(expand_user_path_literal "$OH_MY_OPENAGENT_CONFIG_FILE")"
 LLAMA_MODEL_GATEWAY_LOG="$(expand_user_path_literal "$LLAMA_MODEL_GATEWAY_LOG")"
 LLAMA_MODEL_GATEWAY_PID_FILE="$(expand_user_path_literal "$LLAMA_MODEL_GATEWAY_PID_FILE")"
 
@@ -4618,6 +4621,45 @@ raise SystemExit(1)
 '
 }
 
+opencode_available_models() {
+    command_available opencode || return 0
+    {
+        opencode models --json 2>/dev/null || opencode models 2>/dev/null || true
+    } | python3 -c '
+import json
+import re
+import sys
+
+raw = sys.stdin.read()
+found = set()
+
+def walk(value):
+    if isinstance(value, dict):
+        for key in ("id", "model", "name"):
+            item = value.get(key)
+            if isinstance(item, str) and "/" in item:
+                found.add(item.strip())
+        for item in value.values():
+            walk(item)
+    elif isinstance(value, list):
+        for item in value:
+            walk(item)
+
+try:
+    parsed = json.loads(raw)
+except Exception:
+    parsed = None
+
+if parsed is not None:
+    walk(parsed)
+else:
+    for match in re.findall(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.:+-]+)", raw):
+        found.add(match.strip())
+
+print(",".join(sorted(found)))
+'
+}
+
 resolve_sync_target() {
     local spec="${1:-}"
     local resolved=""
@@ -4788,6 +4830,9 @@ sync_opencode() {
     local context_window
     local runtime_note=""
     local HARNESS_GATEWAY_STATUS="not-required"
+    local available_models=""
+    local openagent_available_models=""
+    local openagent_status="not-configured"
 
     while (($#)); do
         case "$1" in
@@ -4819,6 +4864,13 @@ sync_opencode() {
     [[ "$context_window" =~ ^[0-9]+$ ]] || context_window="$LLAMA_SERVER_CONTEXT"
     [[ "$context_window" =~ ^[0-9]+$ ]] || context_window=0
     compaction_reserved="$(opencode_compaction_reserved "$preset" "$context_window")"
+    available_models="$(opencode_available_models || true)"
+    openagent_available_models="$available_models"
+    if [[ -n "$openagent_available_models" ]]; then
+        openagent_available_models+=",glyphos/$SYNC_TARGET_MODEL_NAME,glyphos-fast/$SYNC_TARGET_MODEL_NAME"
+    else
+        openagent_available_models="glyphos/$SYNC_TARGET_MODEL_NAME,glyphos-fast/$SYNC_TARGET_MODEL_NAME"
+    fi
     [[ -f "$OPENCODE_CONFIG_FILE" ]] && config_exists_before="yes"
     [[ -f "$OPENCODE_MODEL_STATE_FILE" ]] && state_exists_before="yes"
     if [[ "$preset" == "long-run" && "$(configured_mode_name)" != "single-client" ]]; then
@@ -4838,7 +4890,22 @@ sync_opencode() {
         --preset "$preset" \
         --route-mode "$mode" \
         --gateway-api-base "$(lmm_gateway_api_base)" \
-        --fast-api-base "$(lmm_gateway_fast_api_base)" || return $?
+        --fast-api-base "$(lmm_gateway_fast_api_base)" \
+        --available-models "$available_models" || return $?
+
+    if [[ -f "$OH_MY_OPENAGENT_CONFIG_FILE" ]]; then
+        if toggle_enabled "$LLAMA_MODEL_SYNC_OH_MY_OPENAGENT"; then
+            python3 "$APP_ROOT/scripts/integration_sync.py" oh-my-openagent \
+                --config-file "$OH_MY_OPENAGENT_CONFIG_FILE" \
+                --model-name "$SYNC_TARGET_MODEL_NAME" \
+                --full-provider-name glyphos \
+                --fast-provider-name glyphos-fast \
+                --available-models "$openagent_available_models" || return $?
+            openagent_status="synced"
+        else
+            openagent_status="disabled"
+        fi
+    fi
 
     printf 'status: synced\n'
     printf 'preset: %s\n' "$preset"
@@ -4853,6 +4920,8 @@ sync_opencode() {
     printf 'gateway_api_base: %s\n' "$(lmm_gateway_api_base)"
     printf 'gateway_fast_api_base: %s\n' "$(lmm_gateway_fast_api_base)"
     printf 'gateway_status: %s\n' "$HARNESS_GATEWAY_STATUS"
+    printf 'opencode_model_catalog: %s\n' "$([[ -n "$available_models" ]] && printf validated || printf unavailable)"
+    printf 'oh_my_openagent_status: %s\n' "$openagent_status"
     printf 'timeout_ms: %s\n' "$timeout_ms"
     printf 'chunk_timeout_ms: %s\n' "$chunk_timeout_ms"
     printf 'compaction_reserved: %s\n' "$compaction_reserved"

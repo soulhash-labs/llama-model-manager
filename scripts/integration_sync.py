@@ -106,6 +106,18 @@ def _validate_opencode_model_catalog(
     return missing
 
 
+def _csv_items(value: str) -> list[str]:
+    return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+
+def _merge_fallback(value: Any, fallback_model: str) -> Any:
+    if isinstance(value, list):
+        merged = [fallback_model]
+        merged.extend(str(item) for item in value if str(item) != fallback_model)
+        return merged
+    return fallback_model
+
+
 def sync_opencode(args: argparse.Namespace) -> None:
     config_path = Path(args.config_file).expanduser()
     state_path = Path(args.state_file).expanduser()
@@ -119,15 +131,15 @@ def sync_opencode(args: argparse.Namespace) -> None:
     compaction_reserved = int(args.compaction_reserved)
     if compaction_reserved < 1024:
         raise SystemExit("opencode compaction reserve must be at least 1024")
-    intended_model_ids = [provider_model]
+    generated_provider_model_ids: list[str] = []
     if gateway_api_base:
-        intended_model_ids.append(f"{full_provider_name}/{model_name}")
+        generated_provider_model_ids.append(f"{full_provider_name}/{model_name}")
     if fast_api_base:
-        intended_model_ids.append(f"{fast_provider_name}/{model_name}")
+        generated_provider_model_ids.append(f"{fast_provider_name}/{model_name}")
     available_models = _parse_model_catalog(str(args.available_models or ""))
     missing_models = _validate_opencode_model_catalog(
         model_name=model_name,
-        provider_model_ids=intended_model_ids,
+        provider_model_ids=[provider_model],
         available_models=available_models,
     )
     if missing_models:
@@ -235,7 +247,9 @@ def sync_opencode(args: argparse.Namespace) -> None:
             "fullBaseURL": gateway_api_base,
             "fastBaseURL": fast_api_base,
         },
+        "generatedProviderModelIds": generated_provider_model_ids,
         "modelCatalogValidated": bool(available_models),
+        "modelCatalogMissing": missing_models,
         "sessionTimeoutObservedMs": 1800000,
         "timeoutSource": (
             "Observed opencode message/session timeout around 1800s is distinct from provider timeout; "
@@ -252,6 +266,63 @@ def sync_opencode(args: argparse.Namespace) -> None:
     variant[provider_model] = "default"
     state["variant"] = variant
     write_json(state_path, state)
+
+
+def sync_oh_my_openagent(args: argparse.Namespace) -> None:
+    config_path = Path(args.config_file).expanduser()
+    model_name = str(args.model_name).strip()
+    full_provider_name = str(args.full_provider_name or "glyphos").strip() or "glyphos"
+    fast_provider_name = str(args.fast_provider_name or "glyphos-fast").strip() or "glyphos-fast"
+    full_model = f"{full_provider_name}/{model_name}"
+    fast_model = f"{fast_provider_name}/{model_name}"
+    available_models = _parse_model_catalog(str(args.available_models or ""))
+    missing_models = _validate_opencode_model_catalog(
+        model_name=model_name,
+        provider_model_ids=[fast_model, full_model],
+        available_models=available_models,
+    )
+
+    config = load_json(config_path)
+    agents = config.get("agents")
+    if not isinstance(agents, dict):
+        agents = {}
+    requested_agents = _csv_items(args.agents)
+    updated_agents: list[str] = []
+    for name in requested_agents:
+        agent = agents.get(name)
+        if not isinstance(agent, dict):
+            continue
+        agent["model"] = fast_model
+        agent["fallback"] = _merge_fallback(agent.get("fallback"), full_model)
+        updated_agents.append(name)
+
+    categories = config.get("categories")
+    updated_categories: list[str] = []
+    if isinstance(categories, dict):
+        for name in _csv_items(args.categories):
+            value = categories.get(name)
+            if isinstance(value, dict):
+                value["model"] = fast_model
+                value["fallback"] = _merge_fallback(value.get("fallback"), full_model)
+                updated_categories.append(name)
+            elif isinstance(value, str):
+                categories[name] = fast_model
+                updated_categories.append(name)
+
+    diagnostics = config.get("llamaModelManager")
+    if not isinstance(diagnostics, dict):
+        diagnostics = {}
+    diagnostics["openagentSync"] = {
+        "fastModel": fast_model,
+        "fullFallbackModel": full_model,
+        "updatedAgents": updated_agents,
+        "requestedAgents": requested_agents,
+        "updatedCategories": updated_categories,
+        "modelCatalogValidated": bool(available_models),
+        "modelCatalogMissing": missing_models,
+    }
+    config["llamaModelManager"] = diagnostics
+    write_json(config_path, config)
 
 
 def sync_openclaw(args: argparse.Namespace) -> None:
@@ -364,6 +435,19 @@ def main() -> int:
     op.add_argument("--fast-provider-name", default="glyphos-fast")
     op.add_argument("--available-models", default="")
     op.set_defaults(func=sync_opencode)
+
+    oma = sub.add_parser("oh-my-openagent")
+    oma.add_argument("--config-file", required=True)
+    oma.add_argument("--model-name", required=True)
+    oma.add_argument("--full-provider-name", default="glyphos")
+    oma.add_argument("--fast-provider-name", default="glyphos-fast")
+    oma.add_argument(
+        "--agents",
+        default="sisyphus,prometheus,metis,atlas,sisyphus-junior",
+    )
+    oma.add_argument("--categories", default="")
+    oma.add_argument("--available-models", default="")
+    oma.set_defaults(func=sync_oh_my_openagent)
 
     oc = sub.add_parser("openclaw")
     oc.add_argument("--config-file", required=True)

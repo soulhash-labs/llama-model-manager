@@ -943,6 +943,9 @@ class Phase0ContractTests(unittest.TestCase):
         self.assertIn('id="fast-api-base"', html)
         self.assertIn('id="gateway-fast-status"', html)
         self.assertIn('id="gateway-policy-status"', html)
+        self.assertIn('id="default-sync-oh-my-openagent"', html)
+        self.assertIn('id="default-glyphos-config-file"', html)
+        self.assertIn('id="default-oh-my-openagent-config-file"', html)
         self.assertIn("Control-plane actions only", html)
 
     def test_unknown_post_field_is_rejected_with_error_code(self) -> None:
@@ -4275,6 +4278,9 @@ while True:
                         "LLAMA_MODEL_GATEWAY_FAST_PORT=4511",
                         "LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS=400",
                         "LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS=200",
+                        "LLAMA_MODEL_SYNC_OH_MY_OPENAGENT=0",
+                        "GLYPHOS_CONFIG_FILE=$HOME/custom-glyphos.yaml",
+                        "OH_MY_OPENAGENT_CONFIG_FILE=$HOME/custom-openagent.json",
                         "LLAMA_MODEL_GATEWAY_LOG=$HOME/models/custom-gateway.log",
                         "LLAMA_MODEL_GATEWAY_FAST_LOG=$HOME/models/custom-fast-gateway.log",
                     ]
@@ -4295,6 +4301,9 @@ while True:
             self.assertEqual(defaults["LLAMA_MODEL_GATEWAY_FAST_PORT"], "4511")
             self.assertEqual(defaults["LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS"], "400")
             self.assertEqual(defaults["LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS"], "200")
+            self.assertEqual(defaults["LLAMA_MODEL_SYNC_OH_MY_OPENAGENT"], "0")
+            self.assertEqual(defaults["GLYPHOS_CONFIG_FILE"], "$HOME/custom-glyphos.yaml")
+            self.assertEqual(defaults["OH_MY_OPENAGENT_CONFIG_FILE"], "$HOME/custom-openagent.json")
             self.assertEqual(defaults["LLAMA_MODEL_GATEWAY_LOG"], "$HOME/models/custom-gateway.log")
             self.assertEqual(defaults["LLAMA_MODEL_GATEWAY_FAST_LOG"], "$HOME/models/custom-fast-gateway.log")
             self.assertEqual(defaults["LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE"], "")
@@ -4314,6 +4323,7 @@ while True:
                         "LMM_DEFAULT_MAX_TOKENS=16384",
                         "LLAMA_CPP_STREAM_TIMEOUT=7200",
                         "LMM_GATEWAY_SSE_HEARTBEAT_SECONDS=3",
+                        "GLYPHOS_CONFIG_FILE=$HOME/custom-glyphos.yaml",
                     ]
                 )
                 + "\n",
@@ -4341,6 +4351,11 @@ while True:
             self.assertEqual(integration["gateway_backend_api_base"], "http://127.0.0.1:19081/v1")
             self.assertEqual(integration["gateway_fast"]["gateway_mode"], "fast")
             self.assertEqual(integration["gateway_effective_policy"]["max_tokens"], "16384")
+            self.assertEqual(integration["gateway_effective_policy"]["source_status"], "pending_sync")
+            self.assertEqual(
+                integration["gateway_effective_policy"]["source_of_truth"],
+                str(Path(tmpdir) / "home/custom-glyphos.yaml"),
+            )
             self.assertIn("manual", integration["gateway_effective_policy"]["cloud_policy"])
 
     def test_opencode_model_catalog_validation_detects_missing_generated_ids(self) -> None:
@@ -4394,6 +4409,55 @@ while True:
         self.assertEqual(
             state["llamaModelManager"]["opencodeSync"]["glyphosProviders"]["fast"], "glyphos-fast/Qwen.gguf"
         )
+
+    def test_oh_my_openagent_sync_prefers_fast_glyphos_with_full_fallback(self) -> None:
+        integration_sync = self.load_integration_sync_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "oh-my-openagent.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "agents": {
+                            "sisyphus": {"model": "old/model"},
+                            "prometheus": {"model": "old/model", "fallback": ["legacy/model"]},
+                            "oracle": {"model": "keep/model"},
+                        },
+                        "categories": {
+                            "coding": {"model": "old/category"},
+                            "review": "old/category",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            args = types.SimpleNamespace(
+                config_file=str(config_path),
+                model_name="Qwen.gguf",
+                full_provider_name="glyphos",
+                fast_provider_name="glyphos-fast",
+                agents="sisyphus,prometheus,missing",
+                categories="coding,review,missing",
+                available_models="glyphos-fast/Qwen.gguf,glyphos/Qwen.gguf",
+            )
+
+            integration_sync.sync_oh_my_openagent(args)
+
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(config["agents"]["sisyphus"]["model"], "glyphos-fast/Qwen.gguf")
+        self.assertEqual(config["agents"]["sisyphus"]["fallback"], "glyphos/Qwen.gguf")
+        self.assertEqual(config["agents"]["prometheus"]["model"], "glyphos-fast/Qwen.gguf")
+        self.assertEqual(config["agents"]["prometheus"]["fallback"], ["glyphos/Qwen.gguf", "legacy/model"])
+        self.assertEqual(config["agents"]["oracle"]["model"], "keep/model")
+        self.assertEqual(config["categories"]["coding"]["model"], "glyphos-fast/Qwen.gguf")
+        self.assertEqual(config["categories"]["coding"]["fallback"], "glyphos/Qwen.gguf")
+        self.assertEqual(config["categories"]["review"], "glyphos-fast/Qwen.gguf")
+        diagnostics = config["llamaModelManager"]["openagentSync"]
+        self.assertEqual(diagnostics["updatedAgents"], ["sisyphus", "prometheus"])
+        self.assertEqual(diagnostics["updatedCategories"], ["coding", "review"])
+        self.assertTrue(diagnostics["modelCatalogValidated"])
+        self.assertEqual(diagnostics["modelCatalogMissing"], [])
 
     def test_context_glyphos_pipeline_reports_toggle_and_readiness(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

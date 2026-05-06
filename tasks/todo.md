@@ -47,3 +47,12 @@ Current checklist:
 
 Review notes:
 - Full `bash tests/test_portability.sh` was intentionally stopped because it entered a real temporary llama.cpp CPU runtime build path. Use targeted portability functions for this cut unless installer/build-runtime behavior is the explicit verification target.
+
+## Phase 14 Review Follow-Up
+
+Current checklist:
+- [x] Wire `sync-opencode` to read the live OpenCode model catalog when available and validate the selected local model before writing config.
+- [x] Add oh-my-openagent sync for existing agent entries so they prefer `glyphos-fast/<model>` with `glyphos/<model>` fallback.
+- [x] Decide `~/.glyphos/config.yaml` / `GLYPHOS_CONFIG_FILE` is the canonical runtime policy source and expose that source in dashboard policy state.
+- [ ] Run machine-local TTFB comparison for `4010`, `4011`, and `8081` after reinstall/update.
+- [ ] Run machine-local dashboard screenshot / visual verification after reinstall/update.

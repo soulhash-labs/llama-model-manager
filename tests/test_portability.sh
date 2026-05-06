@@ -1408,6 +1408,7 @@ test_sync_opencode_updates_config_and_state() {
     local tmp
     local output
     local config
+    local openagent_config
     local state_json
 
     tmp="$(mktemp -d)"
@@ -1427,6 +1428,24 @@ EOF
   },
   "permissions": {
     "fs": "read-only"
+  }
+}
+EOF
+    cat >"$tmp/config/opencode/oh-my-openagent.json" <<'EOF'
+{
+  "agents": {
+    "sisyphus": {
+      "model": "old/model"
+    },
+    "prometheus": {
+      "model": "old/model",
+      "fallback": [
+        "legacy/model"
+      ]
+    },
+    "oracle": {
+      "model": "keep/model"
+    }
   }
 }
 EOF
@@ -1455,6 +1474,8 @@ EOF
     assert_contains "$output" "backend_api_base: http://127.0.0.1:19081/v1"
     assert_contains "$output" "gateway_fast_api_base: http://127.0.0.1:4011/v1"
     assert_contains "$output" "gateway_status: autostart-disabled"
+    assert_contains "$output" "opencode_model_catalog: unavailable"
+    assert_contains "$output" "oh_my_openagent_status: synced"
     assert_contains "$output" "timeout_ms: 1800000"
     assert_contains "$output" "chunk_timeout_ms: 60000"
     assert_contains "$output" "compaction_reserved: 16384"
@@ -1462,6 +1483,7 @@ EOF
     assert_contains "$output" "timeout_source_note: provider timeout is configured here"
 
     config="$(cat "$tmp/config/opencode/opencode.json")"
+    openagent_config="$(cat "$tmp/config/opencode/oh-my-openagent.json")"
     state_json="$(cat "$tmp/state/opencode/model.json")"
     assert_contains "$config" '"model": "llamacpp/Qwen3.5-9B-Q8_0.gguf"'
     assert_contains "$config" '"glyphos"'
@@ -1485,6 +1507,11 @@ EOF
     assert_contains "$state_json" '"sessionTimeoutObservedMs": 1800000'
     assert_contains "$state_json" '"pendingToolAbortGuidance"'
     assert_contains "$state_json" '"favorite"'
+    assert_contains "$openagent_config" '"model": "glyphos-fast/Qwen3.5-9B-Q8_0.gguf"'
+    assert_contains "$openagent_config" '"fallback": "glyphos/Qwen3.5-9B-Q8_0.gguf"'
+    assert_contains "$openagent_config" '"legacy/model"'
+    assert_contains "$openagent_config" '"model": "keep/model"'
+    assert_contains "$openagent_config" '"openagentSync"'
 }
 
 test_sync_opencode_removes_stale_local_provider_blocks() {

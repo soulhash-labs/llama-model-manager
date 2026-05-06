@@ -53,9 +53,13 @@ KNOWN_DEFAULT_KEYS = [
     "LLAMA_SERVER_WAIT_SECONDS",
     "LLAMA_SERVER_EXTRA_ARGS",
     "LLAMA_MODEL_SYNC_OPENCODE",
+    "LLAMA_MODEL_SYNC_OH_MY_OPENAGENT",
     "LLAMA_MODEL_SYNC_CLAUDE",
     "LLAMA_MODEL_SYNC_OPENCLAW",
     "LLAMA_MODEL_SYNC_GLYPHOS",
+    "OH_MY_OPENAGENT_CONFIG_FILE",
+    "GLYPHOS_CONFIG_FILE",
+    "GLYPHOS_LLAMACPP_TIMEOUT_SECONDS",
     "LLAMA_MODEL_HARNESS_MODE",
     "LLAMA_MODEL_GATEWAY_HOST",
     "LLAMA_MODEL_GATEWAY_PORT",
@@ -910,9 +914,15 @@ class Manager:
             "LLAMA_SERVER_WAIT_SECONDS": values.get("LLAMA_SERVER_WAIT_SECONDS", "300"),
             "LLAMA_SERVER_EXTRA_ARGS": values.get("LLAMA_SERVER_EXTRA_ARGS", ""),
             "LLAMA_MODEL_SYNC_OPENCODE": values.get("LLAMA_MODEL_SYNC_OPENCODE", "1"),
+            "LLAMA_MODEL_SYNC_OH_MY_OPENAGENT": values.get("LLAMA_MODEL_SYNC_OH_MY_OPENAGENT", "1"),
             "LLAMA_MODEL_SYNC_CLAUDE": values.get("LLAMA_MODEL_SYNC_CLAUDE", "0"),
             "LLAMA_MODEL_SYNC_OPENCLAW": values.get("LLAMA_MODEL_SYNC_OPENCLAW", "0"),
             "LLAMA_MODEL_SYNC_GLYPHOS": values.get("LLAMA_MODEL_SYNC_GLYPHOS", "0"),
+            "OH_MY_OPENAGENT_CONFIG_FILE": values.get(
+                "OH_MY_OPENAGENT_CONFIG_FILE", str(self.home / ".config" / "opencode" / "oh-my-openagent.json")
+            ),
+            "GLYPHOS_CONFIG_FILE": values.get("GLYPHOS_CONFIG_FILE", str(self.home / ".glyphos" / "config.yaml")),
+            "GLYPHOS_LLAMACPP_TIMEOUT_SECONDS": values.get("GLYPHOS_LLAMACPP_TIMEOUT_SECONDS", "3600"),
             "LLAMA_MODEL_HARNESS_MODE": values.get("LLAMA_MODEL_HARNESS_MODE", "routed"),
             "LLAMA_MODEL_GATEWAY_HOST": values.get("LLAMA_MODEL_GATEWAY_HOST", "127.0.0.1"),
             "LLAMA_MODEL_GATEWAY_PORT": values.get("LLAMA_MODEL_GATEWAY_PORT", "4010"),
@@ -2608,6 +2618,12 @@ class Manager:
         gateway_api_base = f"http://{gateway_host}:{gateway_port}/v1"
         gateway_fast_api_base = f"http://{gateway_host}:{gateway_fast_port}/v1"
         harness_mode_default = defaults.get("LLAMA_MODEL_HARNESS_MODE", "routed").strip() or "routed"
+        glyphos_policy_raw = defaults.get("GLYPHOS_CONFIG_FILE", "").strip()
+        glyphos_policy_file = (
+            Path(glyphos_policy_raw.replace("$HOME", str(self.home))).expanduser()
+            if glyphos_policy_raw
+            else self.glyphos_config_file
+        )
         gateway_status: dict[str, str] = {}
         gateway_fast_status: dict[str, str] = {}
         if not self.demo:
@@ -2763,6 +2779,9 @@ class Manager:
             "gateway_fast_enabled": str(defaults.get("LLAMA_MODEL_GATEWAY_FAST_ENABLED", "0")).strip(),
             "gateway_latest_request": latest_gateway_request,
             "gateway_effective_policy": {
+                "source_of_truth": str(glyphos_policy_file),
+                "source_status": "present" if glyphos_policy_file.exists() else "pending_sync",
+                "operator_defaults_source": str(self.defaults_file),
                 "precedence": "request override > model/lane policy > operator default > safe fallback",
                 "max_tokens": defaults.get("LMM_DEFAULT_MAX_TOKENS", "32768"),
                 "max_tokens_source": "operator_default"
@@ -2776,8 +2795,8 @@ class Manager:
                 "cloud_policy": "manual routing_hints preferred_backend only; local remains default when available",
             },
             "gateway_requests": gateway_requests if isinstance(gateway_requests, dict) else {},
-            "glyphos_config_file": str(self.glyphos_config_file),
-            "glyphos_config_exists": self.glyphos_config_file.exists(),
+            "glyphos_config_file": str(glyphos_policy_file),
+            "glyphos_config_exists": glyphos_policy_file.exists(),
             "glyphos_model": current_model_name,
             "glyphos_routing_preference": "llamacpp",
             "glyphos_telemetry": glyphos_telemetry,
