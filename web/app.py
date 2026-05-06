@@ -59,7 +59,12 @@ KNOWN_DEFAULT_KEYS = [
     "LLAMA_MODEL_HARNESS_MODE",
     "LLAMA_MODEL_GATEWAY_HOST",
     "LLAMA_MODEL_GATEWAY_PORT",
+    "LLAMA_MODEL_GATEWAY_FAST_ENABLED",
+    "LLAMA_MODEL_GATEWAY_FAST_PORT",
+    "LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS",
+    "LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS",
     "LLAMA_MODEL_GATEWAY_LOG",
+    "LLAMA_MODEL_GATEWAY_FAST_LOG",
     "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE",
     "LMM_UPDATE_WATCHER_ENABLED",
     "LMM_UPDATE_CHECK_INTERVAL_HOURS",
@@ -202,7 +207,7 @@ API_POST_PAYLOAD_SCHEMAS: dict[str, dict[str, Any]] = {
         "allowed": {"action"},
     },
     "/api/gateway": {
-        "allowed": {"action"},
+        "allowed": {"action", "lane"},
     },
     # Phase 06: Handoff summary endpoint
     "/api/handoff/summary": {
@@ -888,6 +893,10 @@ class Manager:
         values = self.parse_env_file(self.defaults_file)
         return {
             "LLAMA_SERVER_BIN": values.get("LLAMA_SERVER_BIN", ""),
+            "LMM_DEFAULT_MAX_TOKENS": values.get("LMM_DEFAULT_MAX_TOKENS", "32768"),
+            "LLAMA_CPP_STREAM_TIMEOUT": values.get("LLAMA_CPP_STREAM_TIMEOUT", "3600"),
+            "LMM_GATEWAY_SSE_HEARTBEAT_SECONDS": values.get("LMM_GATEWAY_SSE_HEARTBEAT_SECONDS", "5"),
+            "LMM_GATEWAY_TIMEOUT_SECONDS": values.get("LMM_GATEWAY_TIMEOUT_SECONDS", "3600"),
             "LLAMA_SERVER_HOST": values.get("LLAMA_SERVER_HOST", "127.0.0.1"),
             "LLAMA_SERVER_PORT": values.get("LLAMA_SERVER_PORT", "8081"),
             "LLAMA_SERVER_DEVICE": values.get("LLAMA_SERVER_DEVICE", ""),
@@ -907,8 +916,17 @@ class Manager:
             "LLAMA_MODEL_HARNESS_MODE": values.get("LLAMA_MODEL_HARNESS_MODE", "routed"),
             "LLAMA_MODEL_GATEWAY_HOST": values.get("LLAMA_MODEL_GATEWAY_HOST", "127.0.0.1"),
             "LLAMA_MODEL_GATEWAY_PORT": values.get("LLAMA_MODEL_GATEWAY_PORT", "4010"),
+            "LLAMA_MODEL_GATEWAY_FAST_ENABLED": values.get("LLAMA_MODEL_GATEWAY_FAST_ENABLED", "0"),
+            "LLAMA_MODEL_GATEWAY_FAST_PORT": values.get("LLAMA_MODEL_GATEWAY_FAST_PORT", "4011"),
+            "LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS": values.get("LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS", "500"),
+            "LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS": values.get(
+                "LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS", "250"
+            ),
             "LLAMA_MODEL_GATEWAY_LOG": values.get(
                 "LLAMA_MODEL_GATEWAY_LOG", str(self.home / "models" / "lmm-gateway.log")
+            ),
+            "LLAMA_MODEL_GATEWAY_FAST_LOG": values.get(
+                "LLAMA_MODEL_GATEWAY_FAST_LOG", str(self.home / "models" / "lmm-gateway-fast.log")
             ),
             "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": values.get("LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE", ""),
             "OPENCLAW_PROFILE": values.get("OPENCLAW_PROFILE", ""),
@@ -2586,15 +2604,28 @@ class Manager:
         )
         gateway_host = defaults.get("LLAMA_MODEL_GATEWAY_HOST", "127.0.0.1").strip() or "127.0.0.1"
         gateway_port = defaults.get("LLAMA_MODEL_GATEWAY_PORT", "4010").strip() or "4010"
+        gateway_fast_port = defaults.get("LLAMA_MODEL_GATEWAY_FAST_PORT", "4011").strip() or "4011"
         gateway_api_base = f"http://{gateway_host}:{gateway_port}/v1"
+        gateway_fast_api_base = f"http://{gateway_host}:{gateway_fast_port}/v1"
         harness_mode_default = defaults.get("LLAMA_MODEL_HARNESS_MODE", "routed").strip() or "routed"
         gateway_status: dict[str, str] = {}
+        gateway_fast_status: dict[str, str] = {}
         if not self.demo:
             try:
                 gateway_status = self.parse_key_values(self.run_cli("gateway", "status"))
             except Exception:
                 gateway_status = {}
+            try:
+                gateway_fast_status = self.parse_key_values(self.run_cli("gateway", "fast", "status"))
+            except Exception:
+                gateway_fast_status = {}
         gateway_requests = self.load_json_file(self.gateway_requests_file)
+        recent_gateway = gateway_requests.get("recent_requests") if isinstance(gateway_requests, dict) else []
+        latest_gateway_request = (
+            recent_gateway[0]
+            if isinstance(recent_gateway, list) and recent_gateway and isinstance(recent_gateway[0], dict)
+            else {}
+        )
         opencode_config = self.load_json_file(self.opencode_config_file)
         opencode_provider = (
             opencode_config.get("provider", {}).get("llamacpp", {})
@@ -2720,11 +2751,30 @@ class Manager:
             "claude_base_url": claude_base_url,
             "claude_gateway": claude_gateway_status,
             "gateway": gateway_status,
+            "gateway_fast": gateway_fast_status,
             "gateway_api_base": gateway_api_base,
+            "gateway_full_api_base": gateway_api_base,
+            "gateway_fast_api_base": gateway_fast_api_base,
             "gateway_anthropic_api_base": gateway_api_base,  # Same base URL; Anthropic clients use /v1/messages
+            "gateway_fast_anthropic_api_base": gateway_fast_api_base,
             "gateway_formats": ["openai", "anthropic"],
             "gateway_backend_api_base": backend_api_base,
             "gateway_harness_mode_default": harness_mode_default,
+            "gateway_fast_enabled": str(defaults.get("LLAMA_MODEL_GATEWAY_FAST_ENABLED", "0")).strip(),
+            "gateway_latest_request": latest_gateway_request,
+            "gateway_effective_policy": {
+                "precedence": "request override > model/lane policy > operator default > safe fallback",
+                "max_tokens": defaults.get("LMM_DEFAULT_MAX_TOKENS", "32768"),
+                "max_tokens_source": "operator_default"
+                if defaults.get("LMM_DEFAULT_MAX_TOKENS")
+                else "local_safe_fallback",
+                "stream_timeout_seconds": defaults.get("LLAMA_CPP_STREAM_TIMEOUT", "3600"),
+                "gateway_timeout_seconds": defaults.get("LMM_GATEWAY_TIMEOUT_SECONDS", "3600"),
+                "sse_heartbeat_seconds": defaults.get("LMM_GATEWAY_SSE_HEARTBEAT_SECONDS", "5"),
+                "fast_context_timeout_ms": defaults.get("LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS", "500"),
+                "fast_context_stream_timeout_ms": defaults.get("LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS", "250"),
+                "cloud_policy": "manual routing_hints preferred_backend only; local remains default when available",
+            },
             "gateway_requests": gateway_requests if isinstance(gateway_requests, dict) else {},
             "glyphos_config_file": str(self.glyphos_config_file),
             "glyphos_config_exists": self.glyphos_config_file.exists(),
@@ -3623,7 +3673,11 @@ class AppHandler(BaseHTTPRequestHandler):
             return {"ok": True, "result": result}
         if route == "/api/gateway":
             action = str(payload.get("action", "status")).strip()
-            result = self.manager.parse_key_values(self.manager.run_cli("gateway", action))
+            lane = str(payload.get("lane", "full")).strip().lower()
+            if lane == "fast":
+                result = self.manager.parse_key_values(self.manager.run_cli("gateway", "fast", action))
+            else:
+                result = self.manager.parse_key_values(self.manager.run_cli("gateway", action))
             return {"ok": True, "result": result}
         # Phase 06: Handoff summary endpoint
         if route == "/api/handoff/summary":
@@ -3681,7 +3735,11 @@ class AppHandler(BaseHTTPRequestHandler):
                 if parsed.path == "/api/gateway/logs":
                     query = urllib.parse.parse_qs(parsed.query)
                     lines = self._parse_lines_query(query.get("lines", [None])[0], default=100)
-                    logs = self.manager.run_cli("gateway", "logs", str(lines))
+                    lane = str(query.get("lane", ["full"])[0] or "full").strip().lower()
+                    if lane == "fast":
+                        logs = self.manager.run_cli("gateway", "fast", "logs", str(lines))
+                    else:
+                        logs = self.manager.run_cli("gateway", "logs", str(lines))
                     self.send_json({"lines": lines, "content": logs})
                     return
                 raise ValidationError("unknown_route", f"Unknown API route: {parsed.path}")

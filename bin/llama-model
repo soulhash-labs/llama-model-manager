@@ -64,6 +64,12 @@ LLAMA_MODEL_GATEWAY_HOST="${LLAMA_MODEL_GATEWAY_HOST:-127.0.0.1}"
 LLAMA_MODEL_GATEWAY_PORT="${LLAMA_MODEL_GATEWAY_PORT:-4010}"
 LLAMA_MODEL_GATEWAY_LOG="${LLAMA_MODEL_GATEWAY_LOG:-$HOME/models/lmm-gateway.log}"
 LLAMA_MODEL_GATEWAY_PID_FILE="${LLAMA_MODEL_GATEWAY_PID_FILE:-$STATE_DIR/lmm-gateway.pid}"
+LLAMA_MODEL_GATEWAY_FAST_ENABLED="${LLAMA_MODEL_GATEWAY_FAST_ENABLED:-0}"
+LLAMA_MODEL_GATEWAY_FAST_PORT="${LLAMA_MODEL_GATEWAY_FAST_PORT:-4011}"
+LLAMA_MODEL_GATEWAY_FAST_LOG="${LLAMA_MODEL_GATEWAY_FAST_LOG:-$HOME/models/lmm-gateway-fast.log}"
+LLAMA_MODEL_GATEWAY_FAST_PID_FILE="${LLAMA_MODEL_GATEWAY_FAST_PID_FILE:-$STATE_DIR/lmm-gateway-fast.pid}"
+LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS="${LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS:-500}"
+LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS="${LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS:-250}"
 LLAMA_MODEL_HARNESS_MODE="${LLAMA_MODEL_HARNESS_MODE:-routed}"
 LLAMA_MODEL_AUTOSTART_GATEWAY_ON_SYNC="${LLAMA_MODEL_AUTOSTART_GATEWAY_ON_SYNC:-1}"
 LLAMA_MODEL_SYNC_OPENCODE="${LLAMA_MODEL_SYNC_OPENCODE:-1}"
@@ -771,6 +777,36 @@ active_auto_fit_override_reason() {
 
     if [[ -n "$pid" ]] && read_state_file && [[ "${CURRENT_PID:-}" == "$pid" ]]; then
         printf '%s\n' "${CURRENT_AUTO_FIT_OVERRIDE_REASON:-}"
+    fi
+}
+
+active_requested_ngl_value() {
+    local pid="${1:-}"
+
+    if [[ -n "$pid" ]] && read_state_file && [[ "${CURRENT_PID:-}" == "$pid" ]]; then
+        printf '%s\n' "${CURRENT_REQUESTED_NGL:-${CURRENT_NGL:-}}"
+        return 0
+    fi
+    printf '%s\n' "${LLAMA_SERVER_NGL:-}"
+}
+
+gpu_layer_posture() {
+    local backend="$1"
+    local requested="$2"
+    local effective="$3"
+
+    if [[ "$backend" == "cpu" ]]; then
+        if [[ "$requested" =~ ^[0-9]+$ && "$requested" -gt 0 && "$effective" == "0" ]]; then
+            printf 'cpu-forced-zero\n'
+        else
+            printf 'cpu\n'
+        fi
+        return 0
+    fi
+    if [[ "$requested" != "$effective" ]]; then
+        printf 'adjusted\n'
+    else
+        printf 'as-configured\n'
     fi
 }
 
@@ -1727,8 +1763,13 @@ validate_runtime_profile() {
     fi
     VALIDATE_RUNTIME_VERSION_TEXT="$version_output"
 
-    # 4. Detect backend
-    detected_backend="$(detect_external_binary_backend "$binary")"
+    # 4. Detect backend. Scripted bundle wrappers cannot be classified by ldd/otool,
+    # so trust the already-selected bundle manifest backend after --version succeeds.
+    if [[ -n "$expected_backend" && ( "$info" == *"script"* || "$info" == *"text executable"* ) ]]; then
+        detected_backend="$expected_backend"
+    else
+        detected_backend="$(detect_external_binary_backend "$binary")"
+    fi
     VALIDATE_RUNTIME_BACKEND_DETECTED="$detected_backend"
 
     # 5. Check backend match
@@ -1770,7 +1811,7 @@ preflight_runtime_check() {
     esac
 
     # Also check VALIDATE_RUNTIME_STATUS for invalid-* statuses from validate_runtime_profile()
-    case "$VALIDATE_RUNTIME_STATUS" in
+    case "${VALIDATE_RUNTIME_STATUS:-}" in
         invalid-missing-libs)
             STARTUP_FAILURE_CATEGORY="runtime-missing-libs"
             STARTUP_FAILURE_SUMMARY="Runtime profile has missing libraries: $VALIDATE_RUNTIME_MISSING_LIBS"
@@ -1945,8 +1986,14 @@ select_compatible_bundled_binary() {
                 profile_dir="$(dirname "$candidate")"
                 validate_runtime_profile "$profile_dir" "$BUNDLE_VALIDATE_BACKEND"
                 if [[ "$VALIDATE_RUNTIME_OK" == "yes" ]]; then
-                    SELECTED_LLAMA_SERVER_STATUS="compatible"
-                    SELECTED_LLAMA_SERVER_MESSAGE="validated bundled ${BUNDLE_VALIDATE_LABEL} binary (runtime profile validated)"
+                    if [[ "$BUNDLE_VALIDATE_BACKEND" == "cpu" && -n "$BUNDLED_SELECTION_FAILURE_REASON" ]]; then
+                        SELECTED_LLAMA_SERVER_SOURCE="bundled-cpu-fallback"
+                        SELECTED_LLAMA_SERVER_STATUS="fallback"
+                        SELECTED_LLAMA_SERVER_MESSAGE="${BUNDLED_SELECTION_FAILURE_REASON}; using validated bundled CPU fallback instead"
+                    else
+                        SELECTED_LLAMA_SERVER_STATUS="compatible"
+                        SELECTED_LLAMA_SERVER_MESSAGE="validated bundled ${BUNDLE_VALIDATE_LABEL} binary (runtime profile validated)"
+                    fi
                 else
                     SELECTED_LLAMA_SERVER_STATUS="$VALIDATE_RUNTIME_STATUS"
                     SELECTED_LLAMA_SERVER_MESSAGE="bundled ${BUNDLE_VALIDATE_LABEL} binary failed validation: $VALIDATE_RUNTIME_MESSAGE"
@@ -2046,6 +2093,7 @@ probe_server_binary() {
         SELECTED_LLAMA_SERVER_CUDA_OK="$([[ "$SELECTED_LLAMA_SERVER_BACKEND" == "cuda" ]] && printf 'yes' || printf 'no')"
         return 0
     fi
+    fallback_note="${BUNDLED_SELECTION_FAILURE_REASON:-}"
 
     # === PRIORITY 3: Validated bundled CPU runtime ===
     if [[ "$preferred_backend" != "cpu" ]] && select_compatible_bundled_binary_with_validation "cpu"; then
@@ -2106,15 +2154,27 @@ select_compatible_bundled_binary_with_validation() {
                 profile_dir="$(dirname "$candidate")"
                 validate_runtime_profile "$profile_dir" "$BUNDLE_VALIDATE_BACKEND"
                 if [[ "$VALIDATE_RUNTIME_OK" == "yes" ]]; then
-                    select_binary_record \
-                        "$candidate" \
-                        "bundled" \
-                        "$BUNDLE_VALIDATE_BACKEND" \
-                        "compatible" \
-                        "validated bundled ${BUNDLE_VALIDATE_LABEL} binary (runtime profile validated)" \
-                        "" \
-                        "$BUNDLE_VALIDATE_LABEL" \
-                        "$BUNDLE_VALIDATE_MANIFEST"
+                    if [[ "$BUNDLE_VALIDATE_BACKEND" == "cpu" && -n "$BUNDLED_SELECTION_FAILURE_REASON" ]]; then
+                        select_binary_record \
+                            "$candidate" \
+                            "bundled-cpu-fallback" \
+                            "$BUNDLE_VALIDATE_BACKEND" \
+                            "fallback" \
+                            "${BUNDLED_SELECTION_FAILURE_REASON}; using validated bundled CPU fallback instead" \
+                            "" \
+                            "$BUNDLE_VALIDATE_LABEL" \
+                            "$BUNDLE_VALIDATE_MANIFEST"
+                    else
+                        select_binary_record \
+                            "$candidate" \
+                            "bundled" \
+                            "$BUNDLE_VALIDATE_BACKEND" \
+                            "compatible" \
+                            "validated bundled ${BUNDLE_VALIDATE_LABEL} binary (runtime profile validated)" \
+                            "" \
+                            "$BUNDLE_VALIDATE_LABEL" \
+                            "$BUNDLE_VALIDATE_MANIFEST"
+                    fi
                     persist_selected_runtime "$candidate"
                     return 0
                 else
@@ -3067,6 +3127,8 @@ write_state() {
     local device="$9"
     local cuda_unified_memory="${10:-$(cuda_unified_memory_mode)}"
     local auto_fit_override_reason="${11:-}"
+    local requested_ngl="${12:-$ngl}"
+    local effective_ngl="${13:-$ngl}"
 
     {
         printf 'CURRENT_ALIAS=%q\n' "$alias"
@@ -3076,6 +3138,8 @@ write_state() {
         printf 'CURRENT_LOG=%q\n' "$LLAMA_SERVER_LOG"
         printf 'CURRENT_CONTEXT=%q\n' "$context"
         printf 'CURRENT_NGL=%q\n' "$ngl"
+        printf 'CURRENT_REQUESTED_NGL=%q\n' "$requested_ngl"
+        printf 'CURRENT_EFFECTIVE_NGL=%q\n' "$effective_ngl"
         printf 'CURRENT_BATCH=%q\n' "$batch"
         printf 'CURRENT_THREADS=%q\n' "$threads"
         printf 'CURRENT_PARALLEL=%q\n' "$parallel"
@@ -3104,6 +3168,7 @@ start_server() {
     local pid
     local context="${model_context:-$LLAMA_SERVER_CONTEXT}"
     local ngl="${model_ngl:-$LLAMA_SERVER_NGL}"
+    local requested_ngl="${model_ngl:-$LLAMA_SERVER_NGL}"
     local batch="${model_batch:-$LLAMA_SERVER_BATCH}"
     local threads="${model_threads:-$LLAMA_SERVER_THREADS}"
     local device="${model_device:-$LLAMA_SERVER_DEVICE}"
@@ -3187,6 +3252,11 @@ ${STARTUP_FAILURE_ACTION}"
         elif [[ ",$SELECTED_LLAMA_SERVER_HOST_BACKENDS," == *",vulkan,"* ]]; then
             printf 'warning: host has Vulkan capability but selected llama-server binary is CPU-only; GPU offload will not be used\n' >&2
             printf 'note: run "llama-model build-runtime --backend vulkan" or point LLAMA_SERVER_BIN at a Vulkan-enabled llama-server\n' >&2
+        fi
+        if [[ "$requested_ngl" =~ ^[0-9]+$ && "$requested_ngl" -gt 0 ]]; then
+            printf 'gpu_layers_requested: %s\n' "$requested_ngl"
+            printf 'gpu_layers_effective: 0\n'
+            printf 'gpu_layer_posture: cpu-forced-zero\n'
         fi
         ngl="0"
         device=""
@@ -3304,11 +3374,16 @@ ${STARTUP_FAILURE_ACTION}"
         disown "$pid" 2>/dev/null || true
 
         if wait_for_health "$pid" "$context"; then
-            write_state "$alias" "$model_path" "$pid" "$context" "$ngl" "$batch" "$threads" "${parallel:-auto}" "$device" "$cuda_unified_memory" "$auto_fit_override_reason"
+            write_state "$alias" "$model_path" "$pid" "$context" "$ngl" "$batch" "$threads" "${parallel:-auto}" "$device" "$cuda_unified_memory" "$auto_fit_override_reason" "$requested_ngl" "$ngl"
             post_switch_client_sync "$alias" "$model_path" "$context"
 
             if [[ -n "$SELECTED_LLAMA_SERVER_MESSAGE" ]]; then
                 printf 'note: %s\n' "$SELECTED_LLAMA_SERVER_MESSAGE"
+            fi
+            if [[ "$requested_ngl" != "$ngl" ]]; then
+                printf 'gpu_layers_requested: %s\n' "$requested_ngl"
+                printf 'gpu_layers_effective: %s\n' "$ngl"
+                printf 'gpu_layer_posture: %s\n' "$(gpu_layer_posture "$SELECTED_LLAMA_SERVER_BACKEND" "$requested_ngl" "$ngl")"
             fi
             printf 'started %s on port %s with pid %s\n' "$alias" "$LLAMA_SERVER_PORT" "$pid"
             return 0
@@ -3477,6 +3552,8 @@ show_current() {
     local active_mode
     local cuda_unified_memory
     local auto_fit_override_reason
+    local requested_ngl
+    local active_ngl
 
     pid="$(find_pid)"
     if [[ -z "$pid" ]]; then
@@ -3498,6 +3575,8 @@ show_current() {
     active_mode="$(active_mode_name "$active_parallel")"
     cuda_unified_memory="$(active_cuda_unified_memory_value "$pid")"
     auto_fit_override_reason="$(active_auto_fit_override_reason "$pid")"
+    requested_ngl="$(active_requested_ngl_value "$pid")"
+    active_ngl="$(cmd_arg_from_pid "$pid" -ngl || printf unknown)"
 
     printf 'pid: %s\n' "$pid"
     printf 'alias: %s\n' "$alias"
@@ -3512,7 +3591,10 @@ show_current() {
     printf 'active_mode: %s\n' "$active_mode"
     printf 'active_parallel: %s\n' "$active_parallel"
     printf 'active_context: %s\n' "$(cmd_arg_from_pid "$pid" -c || printf unknown)"
-    printf 'active_ngl: %s\n' "$(cmd_arg_from_pid "$pid" -ngl || printf unknown)"
+    printf 'active_ngl: %s\n' "$active_ngl"
+    printf 'requested_ngl: %s\n' "$requested_ngl"
+    printf 'effective_gpu_layers: %s\n' "$active_ngl"
+    printf 'gpu_layer_posture: %s\n' "$(gpu_layer_posture "${SELECTED_LLAMA_SERVER_BACKEND:-unknown}" "$requested_ngl" "$active_ngl")"
     printf 'active_batch: %s\n' "$(cmd_arg_from_pid "$pid" -b || printf unknown)"
     printf 'active_threads: %s\n' "$(cmd_arg_from_pid "$pid" --threads || printf unknown)"
     printf 'active_device: %s\n' "$(cmd_arg_from_pid "$pid" --device || printf unknown)"
@@ -3585,6 +3667,9 @@ show_doctor() {
     local route_state="routed"
     local route_guidance=""
     local stale_opencode_providers=""
+    local requested_ngl="${LLAMA_SERVER_NGL:-}"
+    local effective_ngl=""
+    local gpu_layers_posture=""
 
     pid="$(find_pid)"
     if [[ -n "$pid" ]]; then
@@ -3593,6 +3678,8 @@ show_doctor() {
         [[ -n "$alias" ]] || alias="custom"
         cuda_unified_memory="$(active_cuda_unified_memory_value "$pid")"
         auto_fit_override_reason="$(active_auto_fit_override_reason "$pid")"
+        requested_ngl="$(active_requested_ngl_value "$pid")"
+        effective_ngl="$(cmd_arg_from_pid "$pid" -ngl || true)"
         if curl -fsS "$url" >/dev/null 2>&1; then
             health="ok"
         fi
@@ -3642,6 +3729,14 @@ show_doctor() {
     if probe_server_binary; then
         binary_ok="yes"
     fi
+    if [[ -z "$effective_ngl" ]]; then
+        if [[ "$SELECTED_LLAMA_SERVER_BACKEND" == "cpu" && "$requested_ngl" =~ ^[0-9]+$ && "$requested_ngl" -gt 0 ]]; then
+            effective_ngl="0"
+        else
+            effective_ngl="$requested_ngl"
+        fi
+    fi
+    gpu_layers_posture="$(gpu_layer_posture "${SELECTED_LLAMA_SERVER_BACKEND:-unknown}" "$requested_ngl" "$effective_ngl")"
 
     [[ -x "$HOME/.local/bin/llama-model-web" ]] && installed_web_launcher="yes"
     [[ -f "$INSTALLED_APP_ROOT/web/app.py" ]] && installed_web_app="yes"
@@ -3816,6 +3911,10 @@ print("glyphos_config=" + ("yes" if data.get("glyphos_config_exists") else "no")
     printf 'binary_message: %s\n' "${SELECTED_LLAMA_SERVER_MESSAGE:-}"
     printf 'binary_guidance: %s\n' "${SELECTED_LLAMA_SERVER_GUIDANCE:-}"
     printf 'binary_label: %s\n' "${SELECTED_LLAMA_SERVER_LABEL:-}"
+    printf 'configured_gpu_layers: %s\n' "${LLAMA_SERVER_NGL:-}"
+    printf 'requested_gpu_layers: %s\n' "$requested_ngl"
+    printf 'effective_gpu_layers: %s\n' "$effective_ngl"
+    printf 'gpu_layer_posture: %s\n' "$gpu_layers_posture"
     printf 'runtime_validation_ok: %s\n' "${VALIDATE_RUNTIME_OK:-}"
     printf 'runtime_status: %s\n' "${VALIDATE_RUNTIME_STATUS:-}"
     printf 'runtime_missing_libs: %s\n' "${VALIDATE_RUNTIME_MISSING_LIBS:-}"
@@ -4260,6 +4359,10 @@ upstream_api_base() {
 
 lmm_gateway_api_base() {
     printf 'http://%s:%s/v1\n' "$LLAMA_MODEL_GATEWAY_HOST" "$LLAMA_MODEL_GATEWAY_PORT"
+}
+
+lmm_gateway_fast_api_base() {
+    printf 'http://%s:%s/v1\n' "$LLAMA_MODEL_GATEWAY_HOST" "$LLAMA_MODEL_GATEWAY_FAST_PORT"
 }
 
 normalize_harness_mode() {
@@ -4733,7 +4836,9 @@ sync_opencode() {
         --compaction-reserved "$compaction_reserved" \
         --context-window "$context_window" \
         --preset "$preset" \
-        --route-mode "$mode" || return $?
+        --route-mode "$mode" \
+        --gateway-api-base "$(lmm_gateway_api_base)" \
+        --fast-api-base "$(lmm_gateway_fast_api_base)" || return $?
 
     printf 'status: synced\n'
     printf 'preset: %s\n' "$preset"
@@ -4746,6 +4851,7 @@ sync_opencode() {
     printf 'api_base: %s\n' "$api_base"
     printf 'backend_api_base: %s\n' "$(upstream_api_base)"
     printf 'gateway_api_base: %s\n' "$(lmm_gateway_api_base)"
+    printf 'gateway_fast_api_base: %s\n' "$(lmm_gateway_fast_api_base)"
     printf 'gateway_status: %s\n' "$HARNESS_GATEWAY_STATUS"
     printf 'timeout_ms: %s\n' "$timeout_ms"
     printf 'chunk_timeout_ms: %s\n' "$chunk_timeout_ms"
@@ -5007,6 +5113,7 @@ lmm_gateway_wait_for_health() {
 }
 
 lmm_gateway_start() {
+    local gateway_mode="${1:-full}"
     local script
     local model_id
     local pid
@@ -5026,6 +5133,7 @@ lmm_gateway_start() {
     GLYPHOS_LLAMACPP_URL="$(upstream_api_base)" \
     GLYPHOS_LLAMACPP_MODEL="$model_id" \
     GLYPHOS_LLAMACPP_TIMEOUT="$GLYPHOS_LLAMACPP_TIMEOUT_SECONDS" \
+    LMM_GATEWAY_MODE="$gateway_mode" \
     LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE="${LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE:-}" \
     LLAMA_MODEL_GLYPHOS_TELEMETRY_FILE="${LLAMA_MODEL_GLYPHOS_TELEMETRY_FILE:-$STATE_DIR/glyphos-routing.json}" \
     LMM_GATEWAY_STATE_FILE="${LMM_GATEWAY_STATE_FILE:-$STATE_DIR/lmm-gateway-requests.json}" \
@@ -5034,6 +5142,7 @@ lmm_gateway_start() {
         --port "$LLAMA_MODEL_GATEWAY_PORT" \
         --backend-base-url "$(upstream_api_base)" \
         --model-id "$model_id" \
+        --mode "$gateway_mode" \
         >>"$LLAMA_MODEL_GATEWAY_LOG" 2>&1 &
     pid="$!"
     printf '%s\n' "$pid" >"$LLAMA_MODEL_GATEWAY_PID_FILE"
@@ -5041,6 +5150,7 @@ lmm_gateway_start() {
         printf 'running: yes\n'
         printf 'pid: %s\n' "$(lmm_gateway_pid)"
         printf 'url: %s\n' "$(lmm_gateway_api_base)"
+        printf 'gateway_mode: %s\n' "$gateway_mode"
         printf 'backend_api_base: %s\n' "$(upstream_api_base)"
         printf 'model_id: %s\n' "$model_id"
         printf 'log: %s\n' "$LLAMA_MODEL_GATEWAY_LOG"
@@ -5059,16 +5169,18 @@ lmm_gateway_start() {
 }
 
 lmm_gateway_stop() {
+    local gateway_mode="${1:-full}"
     local pid
     pid="$(lmm_gateway_pid 2>/dev/null || true)"
     if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" >/dev/null 2>&1; then
         kill "$pid" >/dev/null 2>&1 || true
     fi
     rm -f "$LLAMA_MODEL_GATEWAY_PID_FILE"
-    printf 'stopped LMM gateway on port %s\n' "$LLAMA_MODEL_GATEWAY_PORT"
+    printf 'stopped LMM %s gateway on port %s\n' "$gateway_mode" "$LLAMA_MODEL_GATEWAY_PORT"
 }
 
 lmm_gateway_status() {
+    local gateway_mode="${1:-full}"
     local running="no"
     local health="no"
     if lmm_gateway_running; then
@@ -5081,6 +5193,7 @@ lmm_gateway_status() {
     printf 'health: %s\n' "$health"
     printf 'pid: %s\n' "$(lmm_gateway_pid 2>/dev/null || true)"
     printf 'url: %s\n' "$(lmm_gateway_api_base)"
+    printf 'gateway_mode: %s\n' "$gateway_mode"
     printf 'backend_api_base: %s\n' "$(upstream_api_base)"
     printf 'mode_default: %s\n' "$(normalize_harness_mode "$LLAMA_MODEL_HARNESS_MODE")"
     printf 'log: %s\n' "$LLAMA_MODEL_GATEWAY_LOG"
@@ -5095,16 +5208,45 @@ lmm_gateway_logs() {
 lmm_gateway_command() {
     local action="${1:-status}"
     shift || true
+    if [[ "$action" == "fast" ]]; then
+        action="${1:-status}"
+        shift || true
+        LLAMA_MODEL_GATEWAY_PORT="$LLAMA_MODEL_GATEWAY_FAST_PORT" \
+        LLAMA_MODEL_GATEWAY_LOG="$LLAMA_MODEL_GATEWAY_FAST_LOG" \
+        LLAMA_MODEL_GATEWAY_PID_FILE="$LLAMA_MODEL_GATEWAY_FAST_PID_FILE" \
+        LMM_GATEWAY_MODE="fast" \
+            lmm_gateway_command_fast "$action" "$@"
+        return $?
+    fi
     case "$action" in
-        start) lmm_gateway_start ;;
-        stop) lmm_gateway_stop ;;
-        restart) lmm_gateway_stop; lmm_gateway_start ;;
-        status) lmm_gateway_status ;;
+        start) lmm_gateway_start full ;;
+        stop) lmm_gateway_stop full ;;
+        restart) lmm_gateway_stop full; lmm_gateway_start full ;;
+        status) lmm_gateway_status full ;;
         logs) lmm_gateway_logs "$@" ;;
         help|-h|--help)
-            printf '%s\n' 'Usage: llama-model gateway start|stop|restart|status|logs'
+            printf '%s\n' 'Usage: llama-model gateway [fast] start|stop|restart|status|logs'
             ;;
         *) die "unknown gateway action: $action" ;;
+    esac
+}
+
+lmm_gateway_command_fast() {
+    local action="${1:-status}"
+    shift || true
+    case "$action" in
+        start)
+            [[ "$LLAMA_MODEL_GATEWAY_FAST_ENABLED" == "1" ]] || printf 'warning: fast gateway lane is disabled by default; starting on explicit operator request\n' >&2
+            lmm_gateway_start fast
+            ;;
+        stop) lmm_gateway_stop fast ;;
+        restart) lmm_gateway_stop fast; lmm_gateway_start fast ;;
+        status) lmm_gateway_status fast ;;
+        logs) lmm_gateway_logs "$@" ;;
+        help|-h|--help)
+            printf '%s\n' 'Usage: llama-model gateway fast start|stop|restart|status|logs'
+            ;;
+        *) die "unknown fast gateway action: $action" ;;
     esac
 }
 

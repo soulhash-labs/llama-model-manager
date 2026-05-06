@@ -66,6 +66,7 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> Non
         payload = read_json(handler)
         prompt = anthropic_messages_to_text(payload.get("messages", []), payload.get("system"))
         prompt = append_tool_contract_to_prompt(prompt, payload, protocol="anthropic-messages")
+        prompt_normalized_ms = round((now() - started) * 1000)
         if not prompt.strip():
             raise InvalidRequestError("messages must contain text content")
         model = str(payload.get("model") or getattr(handler.server, "model_id", "") or "claude-3")
@@ -93,9 +94,12 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> Non
             "provider": "unknown",
             "prompt": prompt,
             "model": model,
+            "timing": {"request_received_ms": 0, "prompt_normalized_ms": prompt_normalized_ms},
         }
 
-        _, pipeline = prepare_gateway_pipeline(payload, prompt, model=model, stream=stream)
+        gateway_mode = str(getattr(handler.server, "gateway_mode", "full"))
+        _, pipeline = prepare_gateway_pipeline(payload, prompt, model=model, stream=stream, gateway_mode=gateway_mode)
+        record["timing"].update(pipeline.get("timing", {}))
         context_payload = build_context_payload(
             raw_context=pipeline.get("context_payload_raw", ""),
             raw_context_chars=pipeline.get("raw_context_chars", 0),
@@ -108,6 +112,7 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> Non
         record.update(
             {
                 "mode": pipeline.get("mode", "routed-basic"),
+                "gateway_mode": pipeline.get("gateway_mode", gateway_mode),
                 "context_status": pipeline.get("context_status", "unknown"),
                 "context_used": bool(pipeline.get("context_used")),
                 "context_source": pipeline.get("context_source", ""),
@@ -146,6 +151,7 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> Non
                 {
                     "route_target": routed["target"],
                     "reason_code": routed["reason_code"],
+                    "route_latency_ms": routed.get("route_duration_ms", 0),
                     "encoding_status": context_payload.encoding_status,
                     "encoding_format": context_payload.encoding_format,
                     "encoding_ratio": context_payload.encoding_ratio,
@@ -163,6 +169,7 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> Non
                 {
                     "success": success,
                     "latency_ms": latency_ms,
+                    "effective_ttfb_ms": latency_ms if text else record["timing"].get("pipeline_total_ms", 0),
                     "completion_chars": len(text),
                     "completed_at": current_iso_timestamp(),
                     "provider": record["route_target"],
@@ -194,6 +201,7 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> Non
                 "reason_code": routed["reason_code"],
                 "success": True,
                 "latency_ms": routed["latency_ms"],
+                "route_latency_ms": routed.get("route_duration_ms", routed.get("latency_ms", 0)),
                 "provider": routed["target"],
                 "status": RunStatus.COMPLETED.value,
                 "exit_result": ExitResult.SUCCESS.value,

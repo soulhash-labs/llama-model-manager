@@ -572,9 +572,29 @@
               Gateway Port
               <input name="LLAMA_MODEL_GATEWAY_PORT" id="default-gateway-port" placeholder="4010">
             </label>
+            <label title="Opt-in fast GlyphOS lane for latency-sensitive harnesses. Explicit starts still work when this is 0.">
+              Fast Gateway Enabled
+              <input name="LLAMA_MODEL_GATEWAY_FAST_ENABLED" id="default-gateway-fast-enabled" placeholder="0">
+            </label>
+            <label title="Port for the bounded fast GlyphOS gateway lane.">
+              Fast Gateway Port
+              <input name="LLAMA_MODEL_GATEWAY_FAST_PORT" id="default-gateway-fast-port" placeholder="4011">
+            </label>
+            <label title="Non-stream context preflight budget for the fast lane.">
+              Fast Context Budget (ms)
+              <input name="LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS" id="default-gateway-fast-context-timeout" placeholder="500">
+            </label>
+            <label title="Streaming context preflight budget for the fast lane.">
+              Fast Stream Context Budget (ms)
+              <input name="LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS" id="default-gateway-fast-stream-context-timeout" placeholder="250">
+            </label>
             <label class="span-2" title="Log path for the OpenAI-compatible LMM gateway.">
               Gateway Log
               <input name="LLAMA_MODEL_GATEWAY_LOG" id="default-gateway-log" placeholder="$HOME/models/lmm-gateway.log">
+            </label>
+            <label class="span-2" title="Log path for the fast GlyphOS gateway lane.">
+              Fast Gateway Log
+              <input name="LLAMA_MODEL_GATEWAY_FAST_LOG" id="default-gateway-fast-log" placeholder="$HOME/models/lmm-gateway-fast.log">
             </label>
             <label title="Operator-facing toggle for the combined Context Mode MCP + GlyphOS workflow. It does not change security boundaries; it makes the intended combined pipeline visible in the dashboard.">
               Context + GlyphOS
@@ -663,12 +683,20 @@
                 <span id="lmm-gateway-formats" class="integration-badge">-</span>
               </div>
               <div>
-                <span class="metric-label" style="font-size: 0.75rem; opacity: 0.7;">OpenAI</span>
+                <span class="metric-label" style="font-size: 0.75rem; opacity: 0.7;">Full lane OpenAI</span>
                 <code id="api-base">-</code>
               </div>
               <div>
-                <span class="metric-label" style="font-size: 0.75rem; opacity: 0.7;">Anthropic</span>
+                <span class="metric-label" style="font-size: 0.75rem; opacity: 0.7;">Full lane Anthropic</span>
                 <code id="anthropic-api-base">-</code>
+              </div>
+              <div>
+                <span class="metric-label" style="font-size: 0.75rem; opacity: 0.7;">Fast lane OpenAI</span>
+                <code id="fast-api-base">-</code>
+              </div>
+              <div>
+                <span class="metric-label" style="font-size: 0.75rem; opacity: 0.7;">Fast lane Anthropic</span>
+                <code id="fast-anthropic-api-base">-</code>
               </div>
               <span id="integration-endpoint-note" class="metric-note">-</span>
             </article>
@@ -715,7 +743,7 @@
           </div>
           <div class="integration-grid">
             <article class="integration-card">
-              <span class="metric-label">LMM Gateway</span>
+              <span class="metric-label">Full Harness Gateway</span>
               <div class="integration-chip-row">
                 <span id="lmm-gateway-badge" class="integration-badge integration-badge-muted">-</span>
                 <span class="integration-badge">OpenAI</span>
@@ -731,6 +759,22 @@
               </div>
             </article>
             <article class="integration-card">
+              <span class="metric-label">Fast Harness Gateway</span>
+              <div class="integration-chip-row">
+                <span id="lmm-gateway-fast-badge" class="integration-badge integration-badge-muted">-</span>
+                <span class="integration-badge">OpenAI</span>
+                <span class="integration-badge">Anthropic</span>
+              </div>
+              <code id="gateway-fast-status">-</code>
+              <span id="gateway-fast-route" class="metric-note">-</span>
+              <div class="inline-actions integration-actions">
+                <button id="gateway-fast-start" class="button button-small button-primary" title="Start the bounded fast GlyphOS gateway.">Start Fast</button>
+                <button id="gateway-fast-restart" class="button button-small" title="Restart the fast GlyphOS gateway.">Restart</button>
+                <button id="gateway-fast-stop" class="button button-small button-danger" title="Stop the fast GlyphOS gateway.">Stop</button>
+                <button id="gateway-fast-logs" class="button button-small" title="Show recent fast gateway logs.">Logs</button>
+              </div>
+            </article>
+            <article class="integration-card">
               <span class="metric-label">Claude Gateway</span>
               <code id="claude-gateway-status">-</code>
               <span id="claude-gateway-url" class="metric-note">-</span>
@@ -741,9 +785,16 @@
                 <button id="claude-gateway-logs" class="button button-small" title="Show recent Claude gateway logs.">Logs</button>
               </div>
             </article>
+            <article class="integration-card">
+              <span class="metric-label">Effective Gateway Policy</span>
+              <code id="gateway-policy-status">-</code>
+              <span id="gateway-policy-route" class="metric-note">-</span>
+              <span id="gateway-policy-cloud" class="metric-note">-</span>
+            </article>
           </div>
 
           <pre id="gateway-logs-output" class="log-box hidden"></pre>
+          <pre id="gateway-fast-logs-output" class="log-box hidden"></pre>
           <pre id="claude-gateway-logs-output" class="log-box hidden"></pre>
         </section>
 

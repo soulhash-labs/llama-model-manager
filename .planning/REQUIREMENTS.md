@@ -22,7 +22,7 @@
 
 - [x] **ANTH-01**: POST `/v1/messages` accepts Anthropic-format request and returns Anthropic-format response
 - [x] **ANTH-02**: Non-streaming response includes all required fields: `id`, `type`, `role`, `model`, `content`, `stop_reason`, `usage`
-- [ ] **ANTH-03**: Streaming response uses Anthropic SSE event types: `message_start`, `content_block_start`, `content_block_delta`, `content_block_stop`, `message_delta`, `message_stop`
+- [x] **ANTH-03**: Streaming response uses Anthropic SSE event types: `message_start`, `content_block_start`, `content_block_delta`, `content_block_stop`, `message_delta`, `message_stop`
 - [x] **ANTH-04**: Context pipeline runs for Anthropic requests (same retrieval, encoding, routing as OpenAI)
 - [x] **ANTH-05**: System prompt extracted from top-level `system` field and included in prompt assembly
 - [x] **ANTH-06**: Content array format in messages properly parsed (string and `[{type: "text", text: "..."}]` formats)
@@ -55,7 +55,7 @@
 |-------------|-------|--------|
 | ANTH-01 | Phase 13 Plan 01 | Complete |
 | ANTH-02 | Phase 13 Plan 01 | Complete |
-| ANTH-03 | Phase 13 Plan 02 | Pending |
+| ANTH-03 | Phase 13 Plan 02 | Complete |
 | ANTH-04 | Phase 13 Plan 01 | Complete |
 | ANTH-05 | Phase 13 Plan 01 | Complete |
 | ANTH-06 | Phase 13 Plan 01 | Complete |

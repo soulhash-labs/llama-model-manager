@@ -113,7 +113,7 @@ build_runtime_during_install() {
     if [[ -t 0 && -t 1 ]]; then
         # Interactive: show what we're doing and ask
         printf 'post-install: host %s backend detected\n' "$primary_backend"
-        printf 'Would you like to compile a local llama.cpp runtime now? [Y/n] '
+        printf 'Would you like to check/install build dependencies and compile a local llama.cpp runtime now? [Y/n] '
         local reply
         read -r reply || reply=""
         reply="${reply,,}"
@@ -344,7 +344,7 @@ migrate_routed_gateway_defaults() {
     if grep -Eq '^[[:space:]]*(export[[:space:]]+)?LLAMA_MODEL_OPENCODE_GATEWAY_BASE_URL=' "$file"; then
         changed="yes"
     fi
-    for key in LLAMA_MODEL_HARNESS_MODE LLAMA_MODEL_GATEWAY_HOST LLAMA_MODEL_GATEWAY_PORT LLAMA_MODEL_GATEWAY_LOG; do
+    for key in LLAMA_MODEL_HARNESS_MODE LLAMA_MODEL_GATEWAY_HOST LLAMA_MODEL_GATEWAY_PORT LLAMA_MODEL_GATEWAY_LOG LLAMA_MODEL_GATEWAY_FAST_ENABLED LLAMA_MODEL_GATEWAY_FAST_PORT LLAMA_MODEL_GATEWAY_FAST_LOG LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS; do
         if ! defaults_has_key "$key" "$file"; then
             changed="yes"
         fi
@@ -367,6 +367,21 @@ migrate_routed_gateway_defaults() {
     fi
     if ! defaults_has_key LLAMA_MODEL_GATEWAY_LOG "$tmp"; then
         printf 'LLAMA_MODEL_GATEWAY_LOG=$HOME/models/lmm-gateway.log\n' >>"$tmp"
+    fi
+    if ! defaults_has_key LLAMA_MODEL_GATEWAY_FAST_ENABLED "$tmp"; then
+        printf 'LLAMA_MODEL_GATEWAY_FAST_ENABLED=0\n' >>"$tmp"
+    fi
+    if ! defaults_has_key LLAMA_MODEL_GATEWAY_FAST_PORT "$tmp"; then
+        printf 'LLAMA_MODEL_GATEWAY_FAST_PORT=4011\n' >>"$tmp"
+    fi
+    if ! defaults_has_key LLAMA_MODEL_GATEWAY_FAST_LOG "$tmp"; then
+        printf 'LLAMA_MODEL_GATEWAY_FAST_LOG=$HOME/models/lmm-gateway-fast.log\n' >>"$tmp"
+    fi
+    if ! defaults_has_key LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS "$tmp"; then
+        printf 'LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS=500\n' >>"$tmp"
+    fi
+    if ! defaults_has_key LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS "$tmp"; then
+        printf 'LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS=250\n' >>"$tmp"
     fi
     mv "$tmp" "$file"
     printf 'migrated routed gateway defaults in %s\n' "$(compact_home_path "$file")"

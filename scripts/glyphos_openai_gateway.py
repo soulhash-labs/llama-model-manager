@@ -330,9 +330,18 @@ def command_context_from_output(raw: str) -> dict[str, Any]:
     return _command_context_from_output_impl(raw)
 
 
-def retrieve_context(payload: dict[str, Any], prompt: str, *, model: str, stream: bool) -> dict[str, Any]:
+def retrieve_context(
+    payload: dict[str, Any], prompt: str, *, model: str, stream: bool, gateway_mode: str = "full"
+) -> dict[str, Any]:
     _sync_context_provider_roots()
-    return _retrieve_context_impl(payload, prompt, model=model, stream=stream, command_runner=run_context_command)
+    return _retrieve_context_impl(
+        payload,
+        prompt,
+        model=model,
+        stream=stream,
+        gateway_mode=gateway_mode,
+        command_runner=run_context_command,
+    )
 
 
 def glyph_encode_context(context: str) -> dict[str, Any]:
@@ -351,7 +360,7 @@ def assemble_prompt(
 
 
 def prepare_gateway_pipeline(
-    payload: dict[str, Any], raw_prompt: str, *, model: str, stream: bool
+    payload: dict[str, Any], raw_prompt: str, *, model: str, stream: bool, gateway_mode: str = "full"
 ) -> tuple[str, dict[str, Any]]:
     _sync_context_provider_roots()
     return _prepare_gateway_pipeline_impl(
@@ -359,6 +368,7 @@ def prepare_gateway_pipeline(
         raw_prompt,
         model=model,
         stream=stream,
+        gateway_mode=gateway_mode,
         command_runner=run_context_command,
     )
 
@@ -369,6 +379,7 @@ def prepare_gateway_context(
     *,
     model: str,
     stream: bool,
+    gateway_mode: str = "full",
 ) -> tuple[dict[str, Any], Any | None, dict[str, Any] | None]:
     _sync_context_provider_roots()
     return _prepare_gateway_context_impl(
@@ -376,6 +387,7 @@ def prepare_gateway_context(
         prompt,
         model=model,
         stream=stream,
+        gateway_mode=gateway_mode,
         command_runner=run_context_command,
     )
 
@@ -731,6 +743,7 @@ def create_gateway_server(
     port: int = 4010,
     backend_base_url: str = "http://127.0.0.1:8081/v1",
     model_id: str = "",
+    gateway_mode: str = "full",
     watcher_config: object | None = None,
 ) -> ThreadingHTTPServer:
     """Create a configured ThreadingHTTPServer for the LMM OpenAI gateway.
@@ -746,7 +759,9 @@ def create_gateway_server(
     server = ThreadingHTTPServer((host, port), GatewayHandler)
     server.backend_base_url = backend_base_url  # type: ignore[attr-defined]
     server.model_id = model_id  # type: ignore[attr-defined]
+    server.gateway_mode = gateway_mode  # type: ignore[attr-defined]
     server.gateway = LMMOpenAIGateway(backend_base_url=backend_base_url, model_id=model_id)  # type: ignore[attr-defined]
+    server.gateway.gateway_mode = gateway_mode  # type: ignore[attr-defined]
     server.health_checker = server.gateway.health_checker  # type: ignore[attr-defined]
 
     if getattr(watcher_config, "enabled", False):
@@ -771,18 +786,24 @@ def main(argv: list[str]) -> int:
     config = load_lmm_config_from_env().gateway
     parser = argparse.ArgumentParser(description="LMM OpenAI-compatible gateway through GlyphOS AI Compute")
     parser.add_argument("--host", default=config.host)
-    parser.add_argument("--port", type=int, default=config.port)
+    parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--backend-base-url", default=config.backend_base_url)
     parser.add_argument("--model-id", default=config.model_id)
+    parser.add_argument("--mode", choices=["full", "fast"], default=config.mode)
     args = parser.parse_args(argv)
+    port = args.port if args.port is not None else (config.fast_port if args.mode == "fast" else config.port)
 
     server = create_gateway_server(
         host=args.host,
-        port=args.port,
+        port=port,
         backend_base_url=args.backend_base_url,
         model_id=args.model_id,
+        gateway_mode=args.mode,
     )
-    print(f"LMM GlyphOS gateway listening on http://{args.host}:{args.port}/v1 -> {args.backend_base_url}", flush=True)
+    print(
+        f"LMM GlyphOS {args.mode} gateway listening on http://{args.host}:{port}/v1 -> {args.backend_base_url}",
+        flush=True,
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

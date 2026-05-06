@@ -56,15 +56,84 @@ def is_stale_local_opencode_provider(name: str, provider: Any, *, active_provide
     return parsed.port == 8080
 
 
+def _configure_opencode_provider(
+    provider: dict[str, Any],
+    *,
+    name: str,
+    api_base: str,
+    timeout_ms: int,
+    chunk_timeout_ms: int,
+    model_name: str,
+    display_name: str,
+) -> dict[str, Any]:
+    provider["npm"] = provider.get("npm", "@ai-sdk/openai-compatible")
+    provider["name"] = provider.get("name", name)
+    options = provider.get("options")
+    if not isinstance(options, dict):
+        options = {}
+    options["baseURL"] = api_base
+    options["timeout"] = int(timeout_ms)
+    options["chunkTimeout"] = int(chunk_timeout_ms)
+    provider["options"] = options
+    models = provider.get("models")
+    if not isinstance(models, dict):
+        models = {}
+    existing_model = models.get(model_name)
+    if not isinstance(existing_model, dict):
+        existing_model = {}
+    existing_model["name"] = display_name
+    models[model_name] = existing_model
+    provider["models"] = models
+    return provider
+
+
+def _parse_model_catalog(raw: str) -> set[str]:
+    return {item.strip() for item in str(raw or "").split(",") if item.strip()}
+
+
+def _validate_opencode_model_catalog(
+    *,
+    model_name: str,
+    provider_model_ids: list[str],
+    available_models: set[str],
+) -> list[str]:
+    if not available_models:
+        return []
+    missing: list[str] = []
+    for model_id in provider_model_ids:
+        if model_id not in available_models and model_name not in available_models:
+            missing.append(model_id)
+    return missing
+
+
 def sync_opencode(args: argparse.Namespace) -> None:
     config_path = Path(args.config_file).expanduser()
     state_path = Path(args.state_file).expanduser()
     model_name = args.model_name
     api_base = args.api_base
     provider_model = f"llamacpp/{model_name}"
+    full_provider_name = str(args.full_provider_name or "glyphos").strip() or "glyphos"
+    fast_provider_name = str(args.fast_provider_name or "glyphos-fast").strip() or "glyphos-fast"
+    gateway_api_base = str(args.gateway_api_base or api_base).strip()
+    fast_api_base = str(args.fast_api_base or "").strip()
     compaction_reserved = int(args.compaction_reserved)
     if compaction_reserved < 1024:
         raise SystemExit("opencode compaction reserve must be at least 1024")
+    intended_model_ids = [provider_model]
+    if gateway_api_base:
+        intended_model_ids.append(f"{full_provider_name}/{model_name}")
+    if fast_api_base:
+        intended_model_ids.append(f"{fast_provider_name}/{model_name}")
+    available_models = _parse_model_catalog(str(args.available_models or ""))
+    missing_models = _validate_opencode_model_catalog(
+        model_name=model_name,
+        provider_model_ids=intended_model_ids,
+        available_models=available_models,
+    )
+    if missing_models:
+        available = ", ".join(sorted(available_models))
+        missing = ", ".join(missing_models)
+        raise SystemExit(f"missing opencode model ids: {missing}; available: {available}")
 
     config = load_json(config_path)
     providers = config.get("provider")
@@ -78,25 +147,42 @@ def sync_opencode(args: argparse.Namespace) -> None:
     llamacpp = providers.get("llamacpp")
     if not isinstance(llamacpp, dict):
         llamacpp = {}
-    llamacpp["npm"] = llamacpp.get("npm", "@ai-sdk/openai-compatible")
-    llamacpp["name"] = llamacpp.get("name", "llama.cpp")
-    options = llamacpp.get("options")
-    if not isinstance(options, dict):
-        options = {}
-    options["baseURL"] = api_base
-    options["timeout"] = int(args.timeout_ms)
-    options["chunkTimeout"] = int(args.chunk_timeout_ms)
-    llamacpp["options"] = options
-    models = llamacpp.get("models")
-    if not isinstance(models, dict):
-        models = {}
-    existing_model = models.get(model_name)
-    if not isinstance(existing_model, dict):
-        existing_model = {}
-    existing_model["name"] = args.display_name
-    models[model_name] = existing_model
-    llamacpp["models"] = models
+    llamacpp = _configure_opencode_provider(
+        llamacpp,
+        name="llama.cpp",
+        api_base=api_base,
+        timeout_ms=args.timeout_ms,
+        chunk_timeout_ms=args.chunk_timeout_ms,
+        model_name=model_name,
+        display_name=args.display_name,
+    )
     providers["llamacpp"] = llamacpp
+    if gateway_api_base:
+        full_provider = providers.get(full_provider_name)
+        if not isinstance(full_provider, dict):
+            full_provider = {}
+        providers[full_provider_name] = _configure_opencode_provider(
+            full_provider,
+            name="GlyphOS full",
+            api_base=gateway_api_base,
+            timeout_ms=args.timeout_ms,
+            chunk_timeout_ms=args.chunk_timeout_ms,
+            model_name=model_name,
+            display_name=f"{args.display_name} (GlyphOS full)",
+        )
+    if fast_api_base:
+        fast_provider = providers.get(fast_provider_name)
+        if not isinstance(fast_provider, dict):
+            fast_provider = {}
+        providers[fast_provider_name] = _configure_opencode_provider(
+            fast_provider,
+            name="GlyphOS fast",
+            api_base=fast_api_base,
+            timeout_ms=args.timeout_ms,
+            chunk_timeout_ms=args.chunk_timeout_ms,
+            model_name=model_name,
+            display_name=f"{args.display_name} (GlyphOS fast)",
+        )
     config["provider"] = providers
     config["model"] = provider_model
     config["small_model"] = provider_model
@@ -143,6 +229,13 @@ def sync_opencode(args: argparse.Namespace) -> None:
         "chunkTimeoutMs": int(args.chunk_timeout_ms),
         "compactionReserved": compaction_reserved,
         "contextWindow": int_or_zero(args.context_window),
+        "glyphosProviders": {
+            "full": f"{full_provider_name}/{model_name}" if gateway_api_base else "",
+            "fast": f"{fast_provider_name}/{model_name}" if fast_api_base else "",
+            "fullBaseURL": gateway_api_base,
+            "fastBaseURL": fast_api_base,
+        },
+        "modelCatalogValidated": bool(available_models),
         "sessionTimeoutObservedMs": 1800000,
         "timeoutSource": (
             "Observed opencode message/session timeout around 1800s is distinct from provider timeout; "
@@ -265,6 +358,11 @@ def main() -> int:
     op.add_argument("--context-window", default=0, type=int)
     op.add_argument("--preset", default="balanced")
     op.add_argument("--route-mode", default="routed")
+    op.add_argument("--gateway-api-base", default="")
+    op.add_argument("--fast-api-base", default="")
+    op.add_argument("--full-provider-name", default="glyphos")
+    op.add_argument("--fast-provider-name", default="glyphos-fast")
+    op.add_argument("--available-models", default="")
     op.set_defaults(func=sync_opencode)
 
     oc = sub.add_parser("openclaw")
@@ -279,10 +377,10 @@ def main() -> int:
     oc.set_defaults(func=sync_openclaw)
 
     gc = sub.add_parser("glyphos")
-    gc.add_argument('--config-file', required=True)
-    gc.add_argument('--model-name', required=True)
-    gc.add_argument('--api-base', required=True)
-    gc.add_argument('--timeout-seconds', required=True, type=int)
+    gc.add_argument("--config-file", required=True)
+    gc.add_argument("--model-name", required=True)
+    gc.add_argument("--api-base", required=True)
+    gc.add_argument("--timeout-seconds", required=True, type=int)
     gc.set_defaults(func=sync_glyphos)
 
     cc = sub.add_parser("claude")
@@ -298,51 +396,51 @@ def main() -> int:
     return 0
 
 
-
 def load_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     if yaml is None:
-        raise SystemExit('PyYAML is required for glyphos sync')
-    data = yaml.safe_load(path.read_text(encoding='utf-8'))
+        raise SystemExit("PyYAML is required for glyphos sync")
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
     return data if isinstance(data, dict) else {}
 
 
 def write_yaml(path: Path, data: dict[str, Any]) -> None:
     if yaml is None:
-        raise SystemExit('PyYAML is required for glyphos sync')
+        raise SystemExit("PyYAML is required for glyphos sync")
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f'.{path.name}.tmp-{os.getpid()}')
-    temp_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding='utf-8')
+    temp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    temp_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     temp_path.replace(path)
 
 
 def sync_glyphos(args: argparse.Namespace) -> None:
     config_path = Path(args.config_file).expanduser()
     config = load_yaml(config_path)
-    ai_compute = config.get('ai_compute')
+    ai_compute = config.get("ai_compute")
     if not isinstance(ai_compute, dict):
         ai_compute = {}
-    routing = ai_compute.get('routing')
+    routing = ai_compute.get("routing")
     if not isinstance(routing, dict):
         routing = {}
-    routing.setdefault('high_coherence_threshold', 0.8)
-    routing.setdefault('low_coherence_threshold', 0.3)
-    routing.setdefault('complex_actions', ['ANALYZE', 'SYNTHESIZE', 'PREDICT', 'LEARN', 'TEACH'])
-    routing.pop('preferred_local_backend', None)
-    ai_compute['routing'] = routing
+    routing.setdefault("high_coherence_threshold", 0.8)
+    routing.setdefault("low_coherence_threshold", 0.3)
+    routing.setdefault("complex_actions", ["ANALYZE", "SYNTHESIZE", "PREDICT", "LEARN", "TEACH"])
+    routing.pop("preferred_local_backend", None)
+    ai_compute["routing"] = routing
 
-    llamacpp = ai_compute.get('llamacpp')
+    llamacpp = ai_compute.get("llamacpp")
     if not isinstance(llamacpp, dict):
         llamacpp = {}
-    llamacpp['enabled'] = True
-    llamacpp['url'] = args.api_base
-    llamacpp['model'] = args.model_name
-    llamacpp['timeout'] = int(args.timeout_seconds)
-    ai_compute['llamacpp'] = llamacpp
+    llamacpp["enabled"] = True
+    llamacpp["url"] = args.api_base
+    llamacpp["model"] = args.model_name
+    llamacpp["timeout"] = int(args.timeout_seconds)
+    ai_compute["llamacpp"] = llamacpp
 
-    config['ai_compute'] = ai_compute
+    config["ai_compute"] = ai_compute
     write_yaml(config_path, config)
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

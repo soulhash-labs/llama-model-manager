@@ -449,7 +449,6 @@ class AdaptiveRouter:
         action = glyph_packet.action
         ctx = _normalize_upstream_context(upstream_context)
         preferred_backend = _context_preferred_backend(ctx)
-        locality = _context_locality(ctx)
 
         if preferred_backend == "llamacpp" and self.llamacpp:
             built_prompt = self._build_local_prompt(
@@ -504,18 +503,6 @@ class AdaptiveRouter:
                 built_prompt,
                 "routing_hints - prefer xAI",
                 "context_hint_xai",
-                **generation_kwargs,
-            )
-
-        if locality in {"cloud", "external"}:
-            return self._route_cloud(
-                prompt=self._build_cloud_prompt(
-                    glyph_packet,
-                    prompt,
-                    context_payload=context_payload,
-                    upstream_context=upstream_context,
-                ),
-                action=action,
                 **generation_kwargs,
             )
 

@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from glyphos_ai import (
+from glyphos_ai import (  # noqa: E402
     AdaptiveRouter,
     ComputeTarget,
     PulseService,
@@ -18,9 +18,9 @@ from glyphos_ai import (
     glyph_to_prompt,
     route_with_configured_clients,
 )
-from glyphos_ai.ai_compute.router import reset_routing_telemetry, routing_telemetry_snapshot
-from glyphos_ai.glyph.encoder import encode_intent
-from glyphos_ai.glyph.types import GlyphPacket, Intent
+from glyphos_ai.ai_compute.router import reset_routing_telemetry, routing_telemetry_snapshot  # noqa: E402
+from glyphos_ai.glyph.encoder import encode_intent  # noqa: E402
+from glyphos_ai.glyph.types import GlyphPacket, Intent  # noqa: E402
 
 
 class DummyClient:
@@ -170,6 +170,42 @@ class GlyphosPublicFlowTests(unittest.TestCase):
             result = route_with_configured_clients(packet)
         self.assertEqual(result.target, ComputeTarget.FALLBACK)
         self.assertEqual(result.routing_reason, "no cloud backends available")
+
+    def test_external_context_does_not_silently_select_cloud(self):
+        packet = GlyphPacket(instance_id="abc", psi_coherence=0.8, action="QUERY", time_slot="T07", destination="MODEL")
+        router = AdaptiveRouter(
+            llamacpp_client=DummyClient("local-ok"),
+            openai_client=DummyClient("openai-ok"),
+        )
+
+        result = router.route(
+            packet,
+            prompt="test prompt",
+            upstream_context={"content": "retrieved context", "locality": "external"},
+        )
+
+        self.assertEqual(result.target, ComputeTarget.LOCAL_LLAMACPP)
+        self.assertIn("local-ok", result.response)
+
+    def test_manual_cloud_routing_hint_selects_cloud(self):
+        packet = GlyphPacket(instance_id="abc", psi_coherence=0.8, action="QUERY", time_slot="T07", destination="MODEL")
+        router = AdaptiveRouter(
+            llamacpp_client=DummyClient("local-ok"),
+            openai_client=DummyClient("openai-ok"),
+        )
+
+        result = router.route(
+            packet,
+            prompt="test prompt",
+            upstream_context={
+                "content": "operator cloud request",
+                "routing_hints": {"preferred_backend": "openai"},
+            },
+        )
+
+        self.assertEqual(result.target, ComputeTarget.EXTERNAL_OPENAI)
+        self.assertEqual(result.routing_reason_code, "context_hint_openai")
+        self.assertIn("openai-ok", result.response)
 
     def test_pulse_service_is_unsigned_without_private_key(self):
         with patch.dict("os.environ", {}, clear=True):

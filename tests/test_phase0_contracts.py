@@ -40,6 +40,7 @@ LMM_HEALTH_PATH = ROOT_DIR / "scripts" / "lmm_health.py"
 LMM_PROVIDERS_PATH = ROOT_DIR / "scripts" / "lmm_providers.py"
 LMM_NOTIFICATIONS_PATH = ROOT_DIR / "scripts" / "lmm_notifications.py"
 LMM_UPDATES_PATH = ROOT_DIR / "scripts" / "lmm_updates.py"
+INTEGRATION_SYNC_PATH = ROOT_DIR / "scripts" / "integration_sync.py"
 
 
 class Phase0ContractTests(unittest.TestCase):
@@ -82,6 +83,9 @@ class Phase0ContractTests(unittest.TestCase):
     def load_providers_module(self) -> object:
         return self.load_script_module("llama_model_manager_providers", LMM_PROVIDERS_PATH)
 
+    def load_integration_sync_module(self) -> object:
+        return self.load_script_module("llama_model_manager_integration_sync", INTEGRATION_SYNC_PATH)
+
     def test_lmm_config_validates_gateway_environment(self) -> None:
         config_module = self.load_script_module("llama_model_manager_config", LMM_CONFIG_PATH)
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -94,6 +98,11 @@ class Phase0ContractTests(unittest.TestCase):
                     "LLAMA_MODEL_BACKEND_BASE_URL": "http://127.0.0.1:8089/v1",
                     "LMM_GATEWAY_STATE_FILE": str(state_file),
                     "LMM_GATEWAY_SSE_HEARTBEAT_SECONDS": "2.5",
+                    "LMM_GATEWAY_MODE": "fast",
+                    "LMM_GATEWAY_FAST_ENABLED": "1",
+                    "LLAMA_MODEL_GATEWAY_FAST_PORT": "4511",
+                    "LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS": "400",
+                    "LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS": "200",
                     "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
                     "LMM_CONTEXT_MCP_TIMEOUT_MS": "2500",
                 },
@@ -106,6 +115,11 @@ class Phase0ContractTests(unittest.TestCase):
         self.assertEqual(config.gateway.backend_base_url, "http://127.0.0.1:8089/v1")
         self.assertEqual(config.gateway.state_file, state_file)
         self.assertEqual(config.gateway.sse_heartbeat_seconds, 2.5)
+        self.assertEqual(config.gateway.mode, "fast")
+        self.assertTrue(config.gateway.fast_enabled)
+        self.assertEqual(config.gateway.fast_port, 4511)
+        self.assertEqual(config.gateway.fast_context_timeout_ms, 400)
+        self.assertEqual(config.gateway.fast_context_stream_timeout_ms, 200)
         self.assertTrue(config.context.enabled)
         self.assertEqual(config.context.timeout_ms, 2500)
 
@@ -531,14 +545,17 @@ class Phase0ContractTests(unittest.TestCase):
             port=0,  # ephemeral — test doesn't bind long
             backend_base_url="http://test:9999/v1",
             model_id="test-model",
+            gateway_mode="fast",
         )
 
         try:
             self.assertEqual(server.backend_base_url, "http://test:9999/v1")  # type: ignore[attr-defined]
             self.assertEqual(server.model_id, "test-model")  # type: ignore[attr-defined]
+            self.assertEqual(server.gateway_mode, "fast")  # type: ignore[attr-defined]
             self.assertIsInstance(server.gateway, gateway.LMMOpenAIGateway)  # type: ignore[attr-defined]
             self.assertEqual(server.gateway.backend_base_url, "http://test:9999/v1")
             self.assertEqual(server.gateway.model_id, "test-model")
+            self.assertEqual(server.gateway.gateway_mode, "fast")
         finally:
             server.server_close()
 
@@ -923,6 +940,9 @@ class Phase0ContractTests(unittest.TestCase):
         self.assertIn("Context + Glyph Encoding + GlyphOS", html)
         self.assertIn('id="context-trace-status"', html)
         self.assertIn('id="context-trace-encoding"', html)
+        self.assertIn('id="fast-api-base"', html)
+        self.assertIn('id="gateway-fast-status"', html)
+        self.assertIn('id="gateway-policy-status"', html)
         self.assertIn("Control-plane actions only", html)
 
     def test_unknown_post_field_is_rejected_with_error_code(self) -> None:
@@ -4251,7 +4271,12 @@ while True:
                         "LLAMA_MODEL_HARNESS_MODE=direct",
                         "LLAMA_MODEL_GATEWAY_HOST=127.0.0.2",
                         "LLAMA_MODEL_GATEWAY_PORT=4510",
+                        "LLAMA_MODEL_GATEWAY_FAST_ENABLED=1",
+                        "LLAMA_MODEL_GATEWAY_FAST_PORT=4511",
+                        "LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS=400",
+                        "LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS=200",
                         "LLAMA_MODEL_GATEWAY_LOG=$HOME/models/custom-gateway.log",
+                        "LLAMA_MODEL_GATEWAY_FAST_LOG=$HOME/models/custom-fast-gateway.log",
                     ]
                 )
                 + "\n",
@@ -4266,8 +4291,109 @@ while True:
             self.assertEqual(defaults["LLAMA_MODEL_HARNESS_MODE"], "direct")
             self.assertEqual(defaults["LLAMA_MODEL_GATEWAY_HOST"], "127.0.0.2")
             self.assertEqual(defaults["LLAMA_MODEL_GATEWAY_PORT"], "4510")
+            self.assertEqual(defaults["LLAMA_MODEL_GATEWAY_FAST_ENABLED"], "1")
+            self.assertEqual(defaults["LLAMA_MODEL_GATEWAY_FAST_PORT"], "4511")
+            self.assertEqual(defaults["LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS"], "400")
+            self.assertEqual(defaults["LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS"], "200")
             self.assertEqual(defaults["LLAMA_MODEL_GATEWAY_LOG"], "$HOME/models/custom-gateway.log")
+            self.assertEqual(defaults["LLAMA_MODEL_GATEWAY_FAST_LOG"], "$HOME/models/custom-fast-gateway.log")
             self.assertEqual(defaults["LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE"], "")
+
+    def test_integration_state_reports_full_fast_gateway_lanes_and_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self.make_manager(tmpdir)
+            manager.defaults_file.write_text(
+                "\n".join(
+                    [
+                        "LLAMA_SERVER_HOST=127.0.0.1",
+                        "LLAMA_SERVER_PORT=19081",
+                        "LLAMA_MODEL_GATEWAY_HOST=127.0.0.2",
+                        "LLAMA_MODEL_GATEWAY_PORT=4510",
+                        "LLAMA_MODEL_GATEWAY_FAST_ENABLED=1",
+                        "LLAMA_MODEL_GATEWAY_FAST_PORT=4511",
+                        "LMM_DEFAULT_MAX_TOKENS=16384",
+                        "LLAMA_CPP_STREAM_TIMEOUT=7200",
+                        "LMM_GATEWAY_SSE_HEARTBEAT_SECONDS=3",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            def fake_run_cli(*args: str) -> str:
+                if args == ("gateway", "status"):
+                    return "running: yes\nhealth: yes\ngateway_mode: full\n"
+                if args == ("gateway", "fast", "status"):
+                    return "running: no\nhealth: no\ngateway_mode: fast\n"
+                if args == ("claude-gateway", "status"):
+                    return "running: no\n"
+                return ""
+
+            with mock.patch.object(manager, "run_cli", side_effect=fake_run_cli):
+                integration = manager.integration_state(
+                    manager.defaults(),
+                    {"alias": "qwen", "model": "/models/qwen.gguf"},
+                    {"configured_mode": "single-client"},
+                )
+
+            self.assertEqual(integration["gateway_full_api_base"], "http://127.0.0.2:4510/v1")
+            self.assertEqual(integration["gateway_fast_api_base"], "http://127.0.0.2:4511/v1")
+            self.assertEqual(integration["gateway_backend_api_base"], "http://127.0.0.1:19081/v1")
+            self.assertEqual(integration["gateway_fast"]["gateway_mode"], "fast")
+            self.assertEqual(integration["gateway_effective_policy"]["max_tokens"], "16384")
+            self.assertIn("manual", integration["gateway_effective_policy"]["cloud_policy"])
+
+    def test_opencode_model_catalog_validation_detects_missing_generated_ids(self) -> None:
+        integration_sync = self.load_integration_sync_module()
+
+        missing = integration_sync._validate_opencode_model_catalog(
+            model_name="Qwen.gguf",
+            provider_model_ids=["llamacpp/Qwen.gguf", "glyphos/Qwen.gguf", "glyphos-fast/Qwen.gguf"],
+            available_models={"llamacpp/Other.gguf"},
+        )
+
+        self.assertEqual(
+            missing,
+            ["llamacpp/Qwen.gguf", "glyphos/Qwen.gguf", "glyphos-fast/Qwen.gguf"],
+        )
+
+    def test_opencode_sync_can_emit_full_and_fast_glyphos_providers(self) -> None:
+        integration_sync = self.load_integration_sync_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "opencode.json"
+            state_path = tmp / "model.json"
+            config_path.write_text('{"provider": {}}\n', encoding="utf-8")
+            state_path.write_text("{}\n", encoding="utf-8")
+            args = types.SimpleNamespace(
+                config_file=str(config_path),
+                state_file=str(state_path),
+                model_name="Qwen.gguf",
+                display_name="Qwen.gguf",
+                api_base="http://127.0.0.1:4010/v1",
+                timeout_ms=1800000,
+                chunk_timeout_ms=60000,
+                compaction_reserved=16384,
+                context_window=32768,
+                preset="balanced",
+                route_mode="routed",
+                gateway_api_base="http://127.0.0.1:4010/v1",
+                fast_api_base="http://127.0.0.1:4011/v1",
+                full_provider_name="glyphos",
+                fast_provider_name="glyphos-fast",
+                available_models="",
+            )
+
+            integration_sync.sync_opencode(args)
+
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(config["provider"]["glyphos"]["options"]["baseURL"], "http://127.0.0.1:4010/v1")
+        self.assertEqual(config["provider"]["glyphos-fast"]["options"]["baseURL"], "http://127.0.0.1:4011/v1")
+        self.assertEqual(
+            state["llamaModelManager"]["opencodeSync"]["glyphosProviders"]["fast"], "glyphos-fast/Qwen.gguf"
+        )
 
     def test_context_glyphos_pipeline_reports_toggle_and_readiness(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

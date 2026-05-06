@@ -672,6 +672,9 @@ function renderStatus(data) {
   const mode = data.mode || {};
   const effectiveMode = mode.active_mode || mode.configured_mode || "";
   const nextMode = effectiveMode === "single-client" ? "Switch to Multi Client" : "Switch to Single Client";
+  const effectiveGpuLayers = doctor.effective_gpu_layers || current.effective_gpu_layers || current.active_ngl || "";
+  const requestedGpuLayers = doctor.requested_gpu_layers || current.requested_ngl || "";
+  const gpuLayerPosture = doctor.gpu_layer_posture || current.gpu_layer_posture || "";
 
   renderNotice(data);
   renderUpdateStatus(data.update_status || {});
@@ -705,12 +708,15 @@ function renderStatus(data) {
       mode.active_parallel ? `lanes ${mode.active_parallel}` : "",
     ]) || "mode unavailable",
   );
-  setText("#metric-offload", doctor.offload || "-");
+  setText("#metric-offload", doctor.offload || gpuLayerPosture || "-");
   setText(
     "#metric-kv",
     joinNotes([
       doctor.kv_buffer ? `KV ${doctor.kv_buffer}` : "",
       doctor.graph_splits ? `splits ${doctor.graph_splits}` : "",
+      effectiveGpuLayers ? `GPU layers ${effectiveGpuLayers}` : "",
+      requestedGpuLayers && requestedGpuLayers !== effectiveGpuLayers ? `requested ${requestedGpuLayers}` : "",
+      doctor.binary_backend ? `backend ${doctor.binary_backend}` : "",
     ]) || "-",
   );
   setText("#metric-gpu-memory", doctor.fit_posture || "not reported");
@@ -747,6 +753,8 @@ function renderStatus(data) {
   );
   setText("#api-base", data.gateway_api_base || data.api_base || "-");
   setText("#anthropic-api-base", data.gateway_anthropic_api_base || "-");
+  setText("#fast-api-base", data.gateway_fast_api_base || "-");
+  setText("#fast-anthropic-api-base", data.gateway_fast_anthropic_api_base || "-");
   const formats = data.gateway_formats || [];
   const formatText = formats.length > 0
     ? formats.map(f => f.charAt(0).toUpperCase() + f.slice(1)).join(" + ")
@@ -754,6 +762,8 @@ function renderStatus(data) {
   setText("#lmm-gateway-formats", formatText);
   setText("#integration-endpoint-note", joinNotes([
     "Gateway serves both OpenAI (/v1/chat/completions) and Anthropic (/v1/messages) formats",
+    data.gateway_full_api_base ? `full ${data.gateway_full_api_base}` : "",
+    data.gateway_fast_api_base ? `fast ${data.gateway_fast_api_base}` : "",
     data.gateway_backend_api_base ? `backend ${data.gateway_backend_api_base}` : "",
     data.gateway_harness_mode_default ? `default ${routeModeLabel(data.gateway_harness_mode_default)}` : "",
     "All requests benefit from context injection and Ψ encoding.",
@@ -785,6 +795,34 @@ function renderStatus(data) {
     gateway.health ? `health ${gateway.health}` : "",
     gatewayGlyphosAvailable ? "all local traffic → GlyphOS pipeline" : "",
   ]) || "-");
+  const fastGateway = data.gateway_fast || {};
+  const fastGatewayRunning = fastGateway.running === "yes" || fastGateway.health === "yes";
+  const fastBadge = $("#lmm-gateway-fast-badge");
+  if (fastGatewayRunning) {
+    setText("#gateway-fast-status", "Running");
+    fastBadge.textContent = "Fast · Bounded Context";
+    fastBadge.classList.add("integration-badge-ready");
+    fastBadge.classList.remove("integration-badge-muted", "integration-badge-warn");
+  } else {
+    setText("#gateway-fast-status", "Stopped");
+    fastBadge.textContent = isTruthySetting(data.gateway_fast_enabled) ? "Enabled" : "Manual";
+    fastBadge.classList.add("integration-badge-muted");
+    fastBadge.classList.remove("integration-badge-ready", "integration-badge-warn");
+  }
+  const policy = data.gateway_effective_policy || {};
+  setText("#gateway-fast-route", joinNotes([
+    data.gateway_fast_api_base || "",
+    fastGateway.gateway_mode ? `mode ${fastGateway.gateway_mode}` : "mode fast",
+    policy.fast_context_timeout_ms ? `ctx ${policy.fast_context_timeout_ms}ms` : "",
+    policy.fast_context_stream_timeout_ms ? `stream ctx ${policy.fast_context_stream_timeout_ms}ms` : "",
+  ]) || "-");
+  setText("#gateway-policy-status", joinNotes([
+    policy.max_tokens ? `max ${Number(policy.max_tokens).toLocaleString()} tokens` : "",
+    policy.stream_timeout_seconds ? `stream ${policy.stream_timeout_seconds}s` : "",
+    policy.sse_heartbeat_seconds ? `SSE ${policy.sse_heartbeat_seconds}s` : "",
+  ]) || "-");
+  setText("#gateway-policy-route", policy.precedence || "-");
+  setText("#gateway-policy-cloud", policy.cloud_policy || "-");
   setText("#opencode-model", data.opencode_model || "-");
   setText("#opencode-path", joinNotes([
     data.opencode_config_exists ? "config present" : "config missing",
@@ -1981,7 +2019,12 @@ function renderDefaults(defaults) {
   $("#default-harness-mode").value = defaults.LLAMA_MODEL_HARNESS_MODE || "routed";
   $("#default-gateway-host").value = defaults.LLAMA_MODEL_GATEWAY_HOST || "127.0.0.1";
   $("#default-gateway-port").value = defaults.LLAMA_MODEL_GATEWAY_PORT || "4010";
+  $("#default-gateway-fast-enabled").value = defaults.LLAMA_MODEL_GATEWAY_FAST_ENABLED || "0";
+  $("#default-gateway-fast-port").value = defaults.LLAMA_MODEL_GATEWAY_FAST_PORT || "4011";
+  $("#default-gateway-fast-context-timeout").value = defaults.LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS || "500";
+  $("#default-gateway-fast-stream-context-timeout").value = defaults.LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS || "250";
   $("#default-gateway-log").value = defaults.LLAMA_MODEL_GATEWAY_LOG || "$HOME/models/lmm-gateway.log";
+  $("#default-gateway-fast-log").value = defaults.LLAMA_MODEL_GATEWAY_FAST_LOG || "$HOME/models/lmm-gateway-fast.log";
   $("#default-context-glyphos-pipeline").checked = isTruthySetting(defaults.LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE) || contextGlyphosLocallyActivated();
   $("#default-update-watcher-enabled").checked = isTruthySetting(defaults.LMM_UPDATE_WATCHER_ENABLED);
   $("#default-update-interval").value = defaults.LMM_UPDATE_CHECK_INTERVAL_HOURS || "12";
@@ -2141,7 +2184,12 @@ function collectDefaultsPayload() {
     LLAMA_MODEL_HARNESS_MODE: $("#default-harness-mode").value.trim(),
     LLAMA_MODEL_GATEWAY_HOST: $("#default-gateway-host").value.trim(),
     LLAMA_MODEL_GATEWAY_PORT: $("#default-gateway-port").value.trim(),
+    LLAMA_MODEL_GATEWAY_FAST_ENABLED: $("#default-gateway-fast-enabled").value.trim(),
+    LLAMA_MODEL_GATEWAY_FAST_PORT: $("#default-gateway-fast-port").value.trim(),
+    LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS: $("#default-gateway-fast-context-timeout").value.trim(),
+    LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS: $("#default-gateway-fast-stream-context-timeout").value.trim(),
     LLAMA_MODEL_GATEWAY_LOG: $("#default-gateway-log").value.trim(),
+    LLAMA_MODEL_GATEWAY_FAST_LOG: $("#default-gateway-fast-log").value.trim(),
     LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE: $("#default-context-glyphos-pipeline").checked ? "1" : "",
     LMM_UPDATE_WATCHER_ENABLED: $("#default-update-watcher-enabled").checked ? "1" : "",
     LMM_UPDATE_CHECK_INTERVAL_HOURS: $("#default-update-interval").value.trim(),
@@ -2206,10 +2254,11 @@ async function performClaudeGatewayAction(action, button, options = {}) {
 }
 
 async function performGatewayAction(action, button, options = {}) {
+  const lane = options.lane || "full";
   await withButtonBusy(button, options.pendingLabel || "Working...", async () => {
     await api("/api/gateway", {
       method: "POST",
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ action, lane }),
     });
     await refreshState();
   }, {
@@ -2219,9 +2268,12 @@ async function performGatewayAction(action, button, options = {}) {
 }
 
 async function loadGatewayLogs(button) {
+  const lane = button?.dataset?.lane || "full";
+  const outputSelector = lane === "fast" ? "#gateway-fast-logs-output" : "#gateway-logs-output";
+  const query = lane === "fast" ? "?lines=100&lane=fast" : "?lines=100";
   await withButtonBusy(button, "Loading...", async () => {
-    const payload = await api("/api/gateway/logs?lines=100");
-    const output = $("#gateway-logs-output");
+    const payload = await api(`/api/gateway/logs${query}`);
+    const output = $(outputSelector);
     output.classList.remove("hidden");
     output.textContent = payload.content || "";
     output.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -2717,6 +2769,11 @@ function bindEvents() {
   $("#gateway-restart").addEventListener("click", (event) => performGatewayAction("restart", event.currentTarget, { pendingLabel: "Restarting...", successMessage: "LMM gateway restarted." }).catch(showError));
   $("#gateway-stop").addEventListener("click", (event) => performGatewayAction("stop", event.currentTarget, { pendingLabel: "Stopping...", successMessage: "LMM gateway stopped." }).catch(showError));
   $("#gateway-logs").addEventListener("click", (event) => loadGatewayLogs(event.currentTarget).catch(showError));
+  $("#gateway-fast-start").addEventListener("click", (event) => performGatewayAction("start", event.currentTarget, { lane: "fast", pendingLabel: "Starting...", successMessage: "Fast LMM gateway started." }).catch(showError));
+  $("#gateway-fast-restart").addEventListener("click", (event) => performGatewayAction("restart", event.currentTarget, { lane: "fast", pendingLabel: "Restarting...", successMessage: "Fast LMM gateway restarted." }).catch(showError));
+  $("#gateway-fast-stop").addEventListener("click", (event) => performGatewayAction("stop", event.currentTarget, { lane: "fast", pendingLabel: "Stopping...", successMessage: "Fast LMM gateway stopped." }).catch(showError));
+  $("#gateway-fast-logs").dataset.lane = "fast";
+  $("#gateway-fast-logs").addEventListener("click", (event) => loadGatewayLogs(event.currentTarget).catch(showError));
   $("#claude-gateway-start").addEventListener("click", (event) => performClaudeGatewayAction("start", event.currentTarget, { pendingLabel: "Starting...", successMessage: "Claude gateway started." }).catch(showError));
   $("#claude-gateway-restart").addEventListener("click", (event) => performClaudeGatewayAction("restart", event.currentTarget, { pendingLabel: "Restarting...", successMessage: "Claude gateway restarted." }).catch(showError));
   $("#claude-gateway-stop").addEventListener("click", (event) => performClaudeGatewayAction("stop", event.currentTarget, { pendingLabel: "Stopping...", successMessage: "Claude gateway stopped." }).catch(showError));

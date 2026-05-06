@@ -229,7 +229,7 @@ Localhost clients remain convenient for normal single-user workflows. External b
 
 ## Runtime portability
 
-llama.cpp source is portable, but built `llama-server` binaries are backend, platform, and architecture specific. This repo does not assume one bundled GPU binary works everywhere. `llama-model doctor` reports host backends, selected binary source, and compatibility status.
+llama.cpp source is portable, but built `llama-server` binaries are backend-, platform-, and architecture-specific. This repo does not assume one bundled GPU binary works everywhere. `llama-model doctor` reports host backends, selected binary source, and compatibility status.
 
 ### What `llama-model build-runtime` does
 
@@ -267,11 +267,16 @@ llama-model download-retry <job_id>
 |-------------|-------------|-----|
 | **opencode** | Syncs to the live local OpenAI-compatible `llama.cpp` endpoint | `llama-model sync-opencode --preset balanced\|long-run` |
 | **OpenClaw** | Syncs to the live local OpenAI-compatible `llama.cpp` endpoint | `llama-model sync-openclaw` |
+| **Harness gateway** | OpenAI-compatible routed gateway in front of Context/GlyphOS/local llama.cpp | `llama-model gateway start\|stop\|restart\|status\|logs` |
 | **Claude Code** | Syncs local Claude settings to a local Anthropic-compatible gateway | `llama-model sync-claude` |
 | **Claude gateway** | Local bridge in front of the active `llama.cpp` endpoint for Claude Code compatibility | `llama-model claude-gateway start\|stop\|restart\|status\|logs` |
 | **GlyphOS AI Compute** | Syncs `~/.glyphos/config.yaml` to the active local `llama.cpp` runtime | `llama-model sync-glyphos` |
 
 These integrations are optional. The default product behavior remains the local `llama.cpp` runtime plus the on-demand dashboard.
+
+Manage the routed harness gateway with `llama-model gateway start|stop|restart|status|logs`.
+Use `llama-model sync-opencode --mode direct` when an OpenAI-compatible client must bypass the gateway and call the raw backend endpoint.
+Override the long-run reservation with `OPENCODE_COMPACTION_RESERVED` when a harness needs a fixed compaction headroom.
 
 ### Client sync details
 

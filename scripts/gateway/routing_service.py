@@ -77,6 +77,8 @@ def route_prompt(
         "reason_code": result.routing_reason_code,
         "reason": result.routing_reason,
         "latency_ms": latency_ms,
+        "route_start_ms": 0,
+        "route_duration_ms": latency_ms,
     }, headers
 
 
@@ -91,6 +93,7 @@ def route_prompt_stream(
     create_router_fn: Callable[[], Any],
 ) -> tuple[dict[str, Any], dict[str, str], Iterator[str]]:
     packet = _gateway_packet(model, context_payload)
+    start = time.perf_counter()
     router = create_router_fn()
     routed, chunks = router.route_stream(
         packet,
@@ -109,6 +112,8 @@ def route_prompt_stream(
         "X-LMM-Encoding-Format": packet.encoding_format,
         "X-LMM-Route-Target": str(routed["target"]),
     }
+    routed["route_start_ms"] = 0
+    routed["route_duration_ms"] = round((time.perf_counter() - start) * 1000)
     return routed, headers, chunks
 
 

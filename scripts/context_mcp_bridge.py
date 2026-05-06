@@ -26,10 +26,11 @@ def read_stdin_json() -> dict[str, Any]:
 
 
 def send_message(proc: subprocess.Popen[str], payload: dict[str, Any]) -> None:
-    """Send a JSON-RPC message as a newline-delimited line (MCP SDK 1.x stdio protocol)."""
-    raw = json.dumps(payload, separators=(",", ":"))
+    """Send a JSON-RPC message using MCP stdio Content-Length framing."""
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     assert proc.stdin is not None
-    proc.stdin.write(raw + "\n")
+    proc.stdin.write(f"Content-Length: {len(raw)}\r\n\r\n")
+    proc.stdin.write(raw.decode("utf-8"))
     proc.stdin.flush()
 
 
@@ -46,6 +47,20 @@ def read_message(proc: subprocess.Popen[str], timeout: float = 10.0) -> dict[str
         stripped = line.strip()
         if not stripped:
             continue
+        if stripped.lower().startswith("content-length:"):
+            try:
+                content_length = int(stripped.split(":", 1)[1].strip())
+            except ValueError:
+                continue
+            while True:
+                header = proc.stdout.readline()
+                if not header:
+                    raise RuntimeError("Context MCP server closed stdout")
+                if not header.strip():
+                    break
+            raw = proc.stdout.read(content_length)
+            payload = json.loads(raw)
+            return payload if isinstance(payload, dict) else {}
         try:
             payload = json.loads(stripped)
             return payload if isinstance(payload, dict) else {}
@@ -81,6 +96,24 @@ def extract_context(response: dict[str, Any]) -> dict[str, Any]:
         meta = structured.get("meta")
         if isinstance(meta, dict):
             extracted["meta"] = meta
+        structured_context = structured.get("context")
+        if isinstance(structured_context, dict):
+            extracted["context"] = structured_context
+            context_items = structured_context.get("items")
+            if isinstance(context_items, list):
+                extracted["results"] = context_items
+                text_parts: list[str] = []
+                for item in context_items:
+                    if isinstance(item, dict):
+                        snippet = item.get("snippet") or item.get("content") or ""
+                        title = item.get("title") or item.get("uri") or ""
+                        if snippet:
+                            text_parts.append(f"{title}: {snippet}" if title else str(snippet))
+                    elif item:
+                        text_parts.append(str(item))
+                if text_parts:
+                    extracted["text"] = "\n".join(text_parts)
+            return extracted
         results = structured.get("results")
         if isinstance(results, list):
             extracted["results"] = results

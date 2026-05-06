@@ -78,6 +78,11 @@ class GatewayConfig:
     state_file: Path = Path.home() / ".local" / "state" / "llama-server" / "lmm-gateway-requests.json"
     sse_heartbeat_seconds: float = 5.0
     telemetry_recent_limit: int = 40
+    mode: str = "full"
+    fast_enabled: bool = False
+    fast_port: int = 4011
+    fast_context_timeout_ms: int = 500
+    fast_context_stream_timeout_ms: int = 250
 
     def __post_init__(self) -> None:
         if not self.host.strip():
@@ -89,17 +94,47 @@ class GatewayConfig:
             raise ConfigurationError("SSE heartbeat must be positive", field="sse_heartbeat_seconds")
         if self.telemetry_recent_limit < 1:
             raise ConfigurationError("telemetry recent limit must be positive", field="telemetry_recent_limit")
+        if self.mode not in {"full", "fast"}:
+            raise ConfigurationError("gateway mode must be full or fast", field="mode", value=self.mode)
+        if self.fast_port < 1 or self.fast_port > 65535:
+            raise ConfigurationError("fast gateway port out of range", field="fast_port", value=self.fast_port)
+        if self.fast_context_timeout_ms < 1:
+            raise ConfigurationError(
+                "fast context timeout must be positive",
+                field="fast_context_timeout_ms",
+                value=self.fast_context_timeout_ms,
+            )
+        if self.fast_context_stream_timeout_ms < 1:
+            raise ConfigurationError(
+                "fast stream context timeout must be positive",
+                field="fast_context_stream_timeout_ms",
+                value=self.fast_context_stream_timeout_ms,
+            )
 
 
 @dataclass(frozen=True)
 class ContextConfig:
     enabled: bool = False
     timeout_ms: int = 1500
+    stream_timeout_ms: int = 500
+    index_timeout_ms: int = 2000
     command: str = ""
 
     def __post_init__(self) -> None:
         if self.timeout_ms < 1:
             raise ConfigurationError("Context MCP timeout must be positive", field="timeout_ms", value=self.timeout_ms)
+        if self.stream_timeout_ms < 1:
+            raise ConfigurationError(
+                "Context MCP stream timeout must be positive",
+                field="stream_timeout_ms",
+                value=self.stream_timeout_ms,
+            )
+        if self.index_timeout_ms < 0:
+            raise ConfigurationError(
+                "Context MCP index timeout must be non-negative",
+                field="index_timeout_ms",
+                value=self.index_timeout_ms,
+            )
 
 
 @dataclass(frozen=True)
@@ -161,10 +196,17 @@ def load_lmm_config_from_env() -> LMMConfig:
         state_file=Path(_env("LMM_GATEWAY_STATE_FILE", str(default_state_file()))).expanduser(),
         sse_heartbeat_seconds=_float_env("LMM_GATEWAY_SSE_HEARTBEAT_SECONDS", 5.0, minimum=0.01),
         telemetry_recent_limit=_int_env("LMM_GATEWAY_RECENT_LIMIT", 40, minimum=1, maximum=500),
+        mode=_env("LMM_GATEWAY_MODE", "full"),
+        fast_enabled=_bool_env("LMM_GATEWAY_FAST_ENABLED", False),
+        fast_port=_int_env("LLAMA_MODEL_GATEWAY_FAST_PORT", 4011, minimum=1, maximum=65535),
+        fast_context_timeout_ms=_int_env("LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS", 500, minimum=1),
+        fast_context_stream_timeout_ms=_int_env("LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS", 250, minimum=1),
     )
     context = ContextConfig(
         enabled=_bool_env("LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE", False),
         timeout_ms=_int_env("LMM_CONTEXT_MCP_TIMEOUT_MS", 1500, minimum=1),
+        stream_timeout_ms=_int_env("LMM_CONTEXT_MCP_STREAM_TIMEOUT_MS", 500, minimum=1),
+        index_timeout_ms=_int_env("LMM_CONTEXT_MCP_INDEX_TIMEOUT_MS", 2000, minimum=0),
         command=_env("LMM_CONTEXT_MCP_COMMAND", ""),
     )
     glyph_encoding = GlyphEncodingConfig(

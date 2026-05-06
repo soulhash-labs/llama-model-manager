@@ -50,6 +50,9 @@ make_bundle() {
     mkdir -p "$bundle_dir"
     cat >"$bundle_dir/llama-server" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+    printf 'llama-server test bundle\n'
+fi
 exit 0
 EOF
     cat >"$bundle_dir/llama-server.compat.env" <<EOF
@@ -206,6 +209,10 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$defaults" "LLAMA_MODEL_HARNESS_MODE=routed"
     assert_contains "$defaults" "LLAMA_MODEL_GATEWAY_HOST=127.0.0.1"
     assert_contains "$defaults" "LLAMA_MODEL_GATEWAY_PORT=4010"
+    assert_contains "$defaults" "LLAMA_MODEL_GATEWAY_FAST_ENABLED=0"
+    assert_contains "$defaults" "LLAMA_MODEL_GATEWAY_FAST_PORT=4011"
+    assert_contains "$defaults" "LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS=500"
+    assert_contains "$defaults" "LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS=250"
     assert_contains "$defaults" 'LLAMA_MODEL_GATEWAY_LOG=$HOME/models/lmm-gateway.log'
     assert_contains "$defaults" "CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS=1800"
     assert_contains "$defaults" "GGML_CUDA_ENABLE_UNIFIED_MEMORY="
@@ -655,6 +662,62 @@ test_system_memory_influences_fit_posture() {
     assert_contains "$output" "no-fit"
 }
 
+test_cpu_backend_forces_requested_gpu_layers_to_zero() {
+    local tmp
+    local model
+    local output
+    local state
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    model="$tmp/models/qwen4.gguf"
+    make_model "$model"
+    : >"$tmp/llama-server.log"
+
+    # shellcheck disable=SC1090
+    source "$BIN"
+    probe_server_binary() {
+        SELECTED_LLAMA_SERVER_BIN="/bin/true"
+        SELECTED_LLAMA_SERVER_BACKEND="cpu"
+        SELECTED_LLAMA_SERVER_SOURCE="test"
+        SELECTED_LLAMA_SERVER_STATUS="compatible"
+        SELECTED_LLAMA_SERVER_HOST_BACKENDS="cpu,cuda"
+        SELECTED_LLAMA_SERVER_CUDA_OK="no"
+        return 0
+    }
+    validate_mmproj_for_model() { return 0; }
+    setsid() { return 0; }
+    wait_for_health() { return 0; }
+    write_state() { printf 'context=%s ngl=%s requested=%s effective=%s device=%s\n' "$4" "$5" "${12}" "${13}" "$9" >"$tmp/state.out"; }
+
+    LLAMA_SERVER_HOST="127.0.0.1"
+    LLAMA_SERVER_PORT="19081"
+    LLAMA_SERVER_LOG="$tmp/llama-server.log"
+    LLAMA_SERVER_CONTEXT="32768"
+    LLAMA_SERVER_NGL="999"
+    LLAMA_SERVER_BATCH="128"
+    LLAMA_SERVER_THREADS="16"
+    LLAMA_SERVER_PARALLEL="1"
+    LLAMA_SERVER_DEVICE=""
+    LLAMA_MODEL_AUTO_FIT="1"
+    LLAMA_MODEL_SYNC_OPENCODE="0"
+    LLAMA_MODEL_SYNC_CLAUDE="0"
+    LLAMA_MODEL_SYNC_OPENCLAW="0"
+    LLAMA_MODEL_SYNC_GLYPHOS="0"
+
+    output="$(start_server demo "$model" "" "32768" "999" "128" "16" "1" "" 2>&1)"
+    state="$(cat "$tmp/state.out")"
+
+    assert_contains "$output" "warning: host has CUDA capability but selected llama-server binary is CPU-only"
+    assert_contains "$output" "gpu_layers_requested: 999"
+    assert_contains "$output" "gpu_layers_effective: 0"
+    assert_contains "$output" "gpu_layer_posture: cpu-forced-zero"
+    assert_contains "$state" "ngl=0"
+    assert_contains "$state" "requested=999"
+    assert_contains "$state" "effective=0"
+    assert_contains "$state" "device="
+}
+
 test_auto_fit_uses_ram_aware_hybrid_gpu_layers() {
     local tmp
     local model
@@ -954,6 +1017,8 @@ test_current_and_doctor_report_cuda_unified_memory() {
 CURRENT_PID=$$
 CURRENT_CUDA_UNIFIED_MEMORY=enabled
 CURRENT_AUTO_FIT_OVERRIDE_REASON=unified-memory
+CURRENT_REQUESTED_NGL=999
+CURRENT_EFFECTIVE_NGL=999
 EOF
     find_pid() { printf '%s\n' "$$"; }
     lookup_alias_for_path() { printf 'demo\n'; }
@@ -983,8 +1048,12 @@ EOF
 
     assert_contains "$current_output" "cuda_unified_memory: enabled"
     assert_contains "$current_output" "auto_fit_override_reason: unified-memory"
+    assert_contains "$current_output" "requested_ngl: 999"
+    assert_contains "$current_output" "effective_gpu_layers: 999"
     assert_contains "$doctor_output" "cuda_unified_memory: enabled"
     assert_contains "$doctor_output" "auto_fit_override_reason: unified-memory"
+    assert_contains "$doctor_output" "requested_gpu_layers: 999"
+    assert_contains "$doctor_output" "effective_gpu_layers: 999"
 }
 
 test_doctor_reports_gpu_pressure_and_process_rows() {
@@ -1384,6 +1453,7 @@ EOF
     assert_contains "$output" "route_mode: routed"
     assert_contains "$output" "api_base: http://127.0.0.1:4010/v1"
     assert_contains "$output" "backend_api_base: http://127.0.0.1:19081/v1"
+    assert_contains "$output" "gateway_fast_api_base: http://127.0.0.1:4011/v1"
     assert_contains "$output" "gateway_status: autostart-disabled"
     assert_contains "$output" "timeout_ms: 1800000"
     assert_contains "$output" "chunk_timeout_ms: 60000"
@@ -1394,7 +1464,10 @@ EOF
     config="$(cat "$tmp/config/opencode/opencode.json")"
     state_json="$(cat "$tmp/state/opencode/model.json")"
     assert_contains "$config" '"model": "llamacpp/Qwen3.5-9B-Q8_0.gguf"'
+    assert_contains "$config" '"glyphos"'
+    assert_contains "$config" '"glyphos-fast"'
     assert_contains "$config" '"baseURL": "http://127.0.0.1:4010/v1"'
+    assert_contains "$config" '"baseURL": "http://127.0.0.1:4011/v1"'
     assert_contains "$config" '"timeout": 1800000'
     assert_contains "$config" '"chunkTimeout": 60000'
     assert_contains "$config" '"auto": true'
@@ -1407,6 +1480,8 @@ EOF
     assert_contains "$state_json" '"llamacpp/Qwen3.5-9B-Q8_0.gguf"'
     assert_contains "$state_json" '"compactionReserved": 16384'
     assert_contains "$state_json" '"routeMode": "routed"'
+    assert_contains "$state_json" '"glyphosProviders"'
+    assert_contains "$state_json" '"fastBaseURL": "http://127.0.0.1:4011/v1"'
     assert_contains "$state_json" '"sessionTimeoutObservedMs": 1800000'
     assert_contains "$state_json" '"pendingToolAbortGuidance"'
     assert_contains "$state_json" '"favorite"'
@@ -2041,6 +2116,7 @@ main() {
     test_system_memory_influences_fit_posture
     test_cuda_unified_memory_preserves_requested_context_and_exports_env
     test_current_and_doctor_report_cuda_unified_memory
+    test_cpu_backend_forces_requested_gpu_layers_to_zero
     test_auto_fit_uses_ram_aware_hybrid_gpu_layers
     test_doctor_reports_gpu_pressure_and_process_rows
     test_registry_parsing_preserves_empty_columns

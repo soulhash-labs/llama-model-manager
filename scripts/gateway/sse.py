@@ -79,6 +79,8 @@ def stream_completion(
         for key, value in headers.items():
             handler.send_header(key, value)
         handler.end_headers()
+        handler.wfile.write(sse_comment("lmm-stream-open"))
+        handler.wfile.flush()
         handler.wfile.write(
             sse_event({**base, "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]})
         )
@@ -196,6 +198,8 @@ def stream_anthropic_completion(
         for key, value in headers.items():
             handler.send_header(key, value)
         handler.end_headers()
+        handler.wfile.write(sse_comment("lmm-stream-open"))
+        handler.wfile.flush()
 
         handler.wfile.write(
             anthropic_sse_event(

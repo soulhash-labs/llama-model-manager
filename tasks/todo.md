@@ -25,3 +25,25 @@ Current checklist:
 
 Deferred:
 - Moving `integration_sync.py` and `context_mcp_bridge.py` under `scripts/integrations/` needs install-script and portability-test updates, so this pass will label boundaries but avoid path churn.
+
+## Phase 14 Planning
+
+Current checklist:
+- [x] Add Phase 14 from consolidated OpenCode/GlyphOS update plan.
+- [x] Research Phase 14 using the four update source documents.
+- [x] Split Phase 14 into executable wave-based plans.
+- [x] Update ROADMAP.md and STATE.md for Phase 14 planning status.
+
+## Phase 14 Execution
+
+Current checklist:
+- [x] Wave 1 / Plan 01: Reconcile Phase 13 Anthropic streaming and dashboard endpoint planning state.
+- [x] Wave 1 / Plan 02: Force CPU-only runtime GPU-layer requests to effective zero and expose requested/effective posture.
+- [x] Verify Wave 1 with focused py_compile, runtime/compatibility pytest selection, ruff, and targeted shell portability regressions.
+- [x] Wave 2 / Plan 03: Gateway timing, bounded context preflight, and early SSE liveness.
+- [x] Wave 2 / Plan 04: Fast GlyphOS lane on 4011.
+- [x] Wave 3 / Plan 05: Operator policy and web diagnostics.
+- [x] Wave 3 / Plan 06: OpenCode/oh-my-openagent integration and manual cloud override hygiene.
+
+Review notes:
+- Full `bash tests/test_portability.sh` was intentionally stopped because it entered a real temporary llama.cpp CPU runtime build path. Use targeted portability functions for this cut unless installer/build-runtime behavior is the explicit verification target.

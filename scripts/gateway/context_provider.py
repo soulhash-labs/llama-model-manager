@@ -205,6 +205,7 @@ def retrieve_context(
     *,
     model: str,
     stream: bool,
+    gateway_mode: str = "full",
     command_runner: Callable[..., subprocess.CompletedProcess[str]] = run_context_command,
 ) -> dict[str, Any]:
     context_config = load_lmm_config_from_env().context
@@ -270,7 +271,11 @@ def retrieve_context(
         )
         return result
 
-    timeout_ms = context_config.timeout_ms
+    gateway_config = load_lmm_config_from_env().gateway
+    if gateway_mode == "fast":
+        timeout_ms = gateway_config.fast_context_stream_timeout_ms if stream else gateway_config.fast_context_timeout_ms
+    else:
+        timeout_ms = context_config.stream_timeout_ms if stream else context_config.timeout_ms
     request_payload = {
         "tool": "ctx_search",
         "query": prompt[-4000:],
@@ -281,7 +286,19 @@ def retrieve_context(
         "project_root": os.getcwd(),
     }
 
-    _maybe_run_indexer(timeout_seconds=max(5, timeout_ms / 2000))
+    index_timeout_ms = 0 if stream or gateway_mode == "fast" else context_config.index_timeout_ms
+    if index_timeout_ms > 0:
+        index_started = time.perf_counter()
+        index_result = _maybe_run_indexer(timeout_seconds=index_timeout_ms / 1000)
+        result["indexer"] = index_result
+        result["indexer_latency_ms"] = round((time.perf_counter() - index_started) * 1000)
+    else:
+        result["indexer"] = {"indexed": 0, "skipped": 0, "errors": 0, "duration_ms": 0}
+        result["indexer_latency_ms"] = 0
+        if stream or gateway_mode == "fast":
+            result["search_degraded"] = True
+            reason = "fast lane preflight budget" if gateway_mode == "fast" else "stream preflight budget"
+            result["search_suggestions"] = [f"indexing skipped for {reason}"]
 
     try:
         completed = command_runner(
@@ -303,13 +320,24 @@ def retrieve_context(
                 "context": text,
                 "source": "context-mode-mcp",
                 "search_strategy": search_meta.get("strategy", ""),
-                "search_degraded": bool(search_meta.get("degraded", False)),
-                "search_suggestions": search_meta.get("suggestions", []),
+                "search_degraded": bool(result.get("search_degraded", False) or search_meta.get("degraded", False)),
+                "search_suggestions": [
+                    *list(result.get("search_suggestions", [])),
+                    *(search_meta.get("suggestions") if isinstance(search_meta.get("suggestions"), list) else []),
+                ],
             }
         )
         return result
     except subprocess.TimeoutExpired:
-        result.update({"status": "timeout", "source": "context-mode-mcp", "error": f"timeout after {timeout_ms}ms"})
+        result.update(
+            {
+                "status": "timeout",
+                "source": "context-mode-mcp",
+                "error": f"timeout after {timeout_ms}ms",
+                "search_degraded": True,
+                "search_suggestions": [f"context preflight exceeded {timeout_ms}ms budget"],
+            }
+        )
         return result
     except Exception as exc:
         result.update({"status": "error", "source": "context-mode-mcp", "error": exc.__class__.__name__})
@@ -405,11 +433,24 @@ def prepare_gateway_context(
     *,
     model: str,
     stream: bool,
+    gateway_mode: str = "full",
     command_runner: Callable[..., subprocess.CompletedProcess[str]] = run_context_command,
 ) -> tuple[dict[str, Any], Any | None, dict[str, Any] | None]:
-    context_result = retrieve_context(payload, prompt, model=model, stream=stream, command_runner=command_runner)
+    started = time.perf_counter()
+    context_result = retrieve_context(
+        payload,
+        prompt,
+        model=model,
+        stream=stream,
+        gateway_mode=gateway_mode,
+        command_runner=command_runner,
+    )
+    context_done = time.perf_counter()
     context_payload = build_context_payload(context_result) if context_result.get("used") else None
+    payload_done = time.perf_counter()
     upstream_context = build_upstream_context(context_result)
+    context_result["context_preflight_ms"] = round((context_done - started) * 1000)
+    context_result["context_payload_build_ms"] = round((payload_done - context_done) * 1000)
     return context_result, context_payload, upstream_context
 
 
@@ -496,8 +537,10 @@ def prepare_gateway_pipeline(
     *,
     model: str,
     stream: bool,
+    gateway_mode: str = "full",
     command_runner: Callable[..., subprocess.CompletedProcess[str]] = run_context_command,
 ) -> tuple[str, dict[str, Any]]:
+    pipeline_started = time.perf_counter()
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
     request_lifecycle = {
         "messages": message_summary(payload.get("messages", [])),
@@ -505,6 +548,7 @@ def prepare_gateway_pipeline(
         "temperature": payload.get("temperature", 0.7),
         "max_tokens": payload.get("max_tokens", int(os.environ.get("LMM_DEFAULT_MAX_TOKENS", "32768"))),
         "stream": stream,
+        "gateway_mode": gateway_mode,
         "harness_identity": "",
         "workspace_present": bool(payload.get("workspace") or metadata.get("workspace")),
         "session_present": bool(payload.get("session") or metadata.get("session")),
@@ -515,24 +559,39 @@ def prepare_gateway_pipeline(
         raw_prompt,
         model=model,
         stream=stream,
+        gateway_mode=gateway_mode,
         command_runner=command_runner,
     )
+    context_finished = time.perf_counter()
     encoding_result = context_payload_to_encoding_result(context_payload) if context_payload is not None else {}
     raw_ctx = str(context_result.get("context") or "") if context_result.get("used") else ""
     assembled_prompt, assembly = assemble_prompt_raw(raw_prompt, context_result)
+    pipeline_finished = time.perf_counter()
 
     pipeline_mode = "routed-full" if context_result.get("used") else "routed-basic"
     pipeline = {
         "mode": pipeline_mode,
+        "gateway_mode": gateway_mode,
         "request": request_lifecycle,
         "context_status": context_result.get("status", "unknown"),
         "context_used": bool(context_result.get("used")),
         "context_source": context_result.get("source", ""),
         "context_error": context_result.get("error", ""),
         "context_latency_ms": context_result.get("latency_ms", 0),
+        "context_preflight_ms": context_result.get("context_preflight_ms", context_result.get("latency_ms", 0)),
+        "context_payload_build_ms": context_result.get("context_payload_build_ms", 0),
+        "context_indexer_latency_ms": context_result.get("indexer_latency_ms", 0),
         "search_strategy": context_result.get("search_strategy", ""),
         "search_degraded": bool(context_result.get("search_degraded", False)),
         "search_suggestions": context_result.get("search_suggestions", []),
+        "timing": {
+            "gateway_mode": pipeline_mode,
+            "gateway_lane": gateway_mode,
+            "context_preflight_start_ms": 0,
+            "context_preflight_duration_ms": round((context_finished - pipeline_started) * 1000),
+            "prompt_assembly_duration_ms": round((pipeline_finished - context_finished) * 1000),
+            "pipeline_total_ms": round((pipeline_finished - pipeline_started) * 1000),
+        },
         "glyph_encoding_status": encoding_result.get("status", "skipped"),
         "glyph_encoding_used": bool(encoding_result.get("used")),
         "raw_context_chars": encoding_result.get("raw_context_chars", 0),
