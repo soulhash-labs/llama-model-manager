@@ -110,12 +110,21 @@ def _csv_items(value: str) -> list[str]:
     return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
 
-def _merge_fallback(value: Any, fallback_model: str) -> Any:
+def _merge_fallback_list(value: Any, fallback_model: str) -> list[str]:
+    result: list[str] = [fallback_model]
     if isinstance(value, list):
-        merged = [fallback_model]
-        merged.extend(str(item) for item in value if str(item) != fallback_model)
-        return merged
-    return fallback_model
+        for item in value:
+            item_str = str(item).strip()
+            if item_str and item_str != fallback_model:
+                result.append(item_str)
+    return result
+
+
+# Lane defaults: agents that benefit from full GlyphOS vs fast lane
+FULL_LANE_AGENTS = {"sisyphus", "prometheus", "hephaestus", "atlas", "metis", "momus", "oracle"}
+FAST_LANE_AGENTS = {"librarian", "explore", "multimodal-looker", "sisyphus-junior"}
+FULL_LANE_CATEGORIES = {"ultrabrain", "deep", "unspecified-high"}
+FAST_LANE_CATEGORIES = {"quick", "visual-engineering", "writing", "artistry", "unspecified-low"}
 
 
 def sync_opencode(args: argparse.Namespace) -> None:
@@ -124,8 +133,8 @@ def sync_opencode(args: argparse.Namespace) -> None:
     model_name = args.model_name
     api_base = args.api_base
     provider_model = f"llamacpp/{model_name}"
-    full_provider_name = str(args.full_provider_name or "glyphos").strip() or "glyphos"
-    fast_provider_name = str(args.fast_provider_name or "glyphos-fast").strip() or "glyphos-fast"
+    full_provider_name = str(args.full_provider_name or "llamacpp").strip() or "llamacpp"
+    fast_provider_name = str(args.fast_provider_name or "llamacpp_fast").strip() or "llamacpp_fast"
     gateway_api_base = str(args.gateway_api_base or api_base).strip()
     fast_api_base = str(args.fast_api_base or "").strip()
     compaction_reserved = int(args.compaction_reserved)
@@ -197,7 +206,7 @@ def sync_opencode(args: argparse.Namespace) -> None:
         )
     config["provider"] = providers
     config["model"] = provider_model
-    config["small_model"] = provider_model
+    config["small_model"] = f"{fast_provider_name}/{model_name}" if fast_api_base else provider_model
     compaction = config.get("compaction")
     if not isinstance(compaction, dict):
         compaction = {}
@@ -271,8 +280,8 @@ def sync_opencode(args: argparse.Namespace) -> None:
 def sync_oh_my_openagent(args: argparse.Namespace) -> None:
     config_path = Path(args.config_file).expanduser()
     model_name = str(args.model_name).strip()
-    full_provider_name = str(args.full_provider_name or "glyphos").strip() or "glyphos"
-    fast_provider_name = str(args.fast_provider_name or "glyphos-fast").strip() or "glyphos-fast"
+    full_provider_name = str(args.full_provider_name or "llamacpp").strip() or "llamacpp"
+    fast_provider_name = str(args.fast_provider_name or "llamacpp_fast").strip() or "llamacpp_fast"
     full_model = f"{full_provider_name}/{model_name}"
     fast_model = f"{fast_provider_name}/{model_name}"
     available_models = _parse_model_catalog(str(args.available_models or ""))
@@ -292,8 +301,17 @@ def sync_oh_my_openagent(args: argparse.Namespace) -> None:
         agent = agents.get(name)
         if not isinstance(agent, dict):
             continue
-        agent["model"] = fast_model
-        agent["fallback"] = _merge_fallback(agent.get("fallback"), full_model)
+        if name in FULL_LANE_AGENTS:
+            agent["model"] = full_model
+            agent["fallback_models"] = _merge_fallback_list(agent.get("fallback_models"), fast_model)
+        elif name in FAST_LANE_AGENTS:
+            agent["model"] = fast_model
+            agent["fallback_models"] = _merge_fallback_list(agent.get("fallback_models"), full_model)
+        else:
+            agent["model"] = fast_model
+            agent["fallback_models"] = _merge_fallback_list(agent.get("fallback_models"), full_model)
+        # Remove legacy singular fallback key
+        agent.pop("fallback", None)
         updated_agents.append(name)
 
     categories = config.get("categories")
@@ -302,8 +320,16 @@ def sync_oh_my_openagent(args: argparse.Namespace) -> None:
         for name in _csv_items(args.categories):
             value = categories.get(name)
             if isinstance(value, dict):
-                value["model"] = fast_model
-                value["fallback"] = _merge_fallback(value.get("fallback"), full_model)
+                if name in FULL_LANE_CATEGORIES:
+                    value["model"] = full_model
+                elif name in FAST_LANE_CATEGORIES:
+                    value["model"] = fast_model
+                else:
+                    value["model"] = fast_model
+                value["fallback_models"] = _merge_fallback_list(
+                    value.get("fallback_models"), full_model if value["model"] == fast_model else fast_model
+                )
+                value.pop("fallback", None)
                 updated_categories.append(name)
             elif isinstance(value, str):
                 categories[name] = fast_model
@@ -431,16 +457,16 @@ def main() -> int:
     op.add_argument("--route-mode", default="routed")
     op.add_argument("--gateway-api-base", default="")
     op.add_argument("--fast-api-base", default="")
-    op.add_argument("--full-provider-name", default="glyphos")
-    op.add_argument("--fast-provider-name", default="glyphos-fast")
+    op.add_argument("--full-provider-name", default="llamacpp")
+    op.add_argument("--fast-provider-name", default="llamacpp_fast")
     op.add_argument("--available-models", default="")
     op.set_defaults(func=sync_opencode)
 
     oma = sub.add_parser("oh-my-openagent")
     oma.add_argument("--config-file", required=True)
     oma.add_argument("--model-name", required=True)
-    oma.add_argument("--full-provider-name", default="glyphos")
-    oma.add_argument("--fast-provider-name", default="glyphos-fast")
+    oma.add_argument("--full-provider-name", default="llamacpp")
+    oma.add_argument("--fast-provider-name", default="llamacpp_fast")
     oma.add_argument(
         "--agents",
         default="sisyphus,prometheus,metis,atlas,sisyphus-junior",

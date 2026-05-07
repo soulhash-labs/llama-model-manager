@@ -79,7 +79,7 @@ class GatewayConfig:
     sse_heartbeat_seconds: float = 5.0
     telemetry_recent_limit: int = 40
     mode: str = "full"
-    fast_enabled: bool = False
+    fast_enabled: bool = True
     fast_port: int = 4011
     fast_context_timeout_ms: int = 500
     fast_context_stream_timeout_ms: int = 250
@@ -197,7 +197,7 @@ def load_lmm_config_from_env() -> LMMConfig:
         sse_heartbeat_seconds=_float_env("LMM_GATEWAY_SSE_HEARTBEAT_SECONDS", 5.0, minimum=0.01),
         telemetry_recent_limit=_int_env("LMM_GATEWAY_RECENT_LIMIT", 40, minimum=1, maximum=500),
         mode=_env("LMM_GATEWAY_MODE", "full"),
-        fast_enabled=_bool_env("LMM_GATEWAY_FAST_ENABLED", False),
+        fast_enabled=_bool_env("LMM_GATEWAY_FAST_ENABLED", True),
         fast_port=_int_env("LLAMA_MODEL_GATEWAY_FAST_PORT", 4011, minimum=1, maximum=65535),
         fast_context_timeout_ms=_int_env("LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS", 500, minimum=1),
         fast_context_stream_timeout_ms=_int_env("LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS", 250, minimum=1),

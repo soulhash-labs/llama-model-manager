@@ -5347,9 +5347,42 @@ lmm_gateway_command() {
         return $?
     fi
     case "$action" in
-        start) lmm_gateway_start full ;;
-        stop) lmm_gateway_stop full ;;
-        restart) lmm_gateway_stop full; lmm_gateway_start full ;;
+        start)
+            lmm_gateway_start full
+            if [[ "${LLAMA_MODEL_GATEWAY_FAST_ENABLED:-0}" == "1" ]]; then
+                LMM_GATEWAY_MODE="fast" \
+                LLAMA_MODEL_GATEWAY_PORT="$LLAMA_MODEL_GATEWAY_FAST_PORT" \
+                LLAMA_MODEL_GATEWAY_LOG="$LLAMA_MODEL_GATEWAY_FAST_LOG" \
+                LLAMA_MODEL_GATEWAY_PID_FILE="$LLAMA_MODEL_GATEWAY_FAST_PID_FILE" \
+                    lmm_gateway_start fast
+            fi
+            ;;
+        stop)
+            lmm_gateway_stop full
+            if [[ "${LLAMA_MODEL_GATEWAY_FAST_ENABLED:-0}" == "1" ]]; then
+                LMM_GATEWAY_MODE="fast" \
+                LLAMA_MODEL_GATEWAY_PORT="$LLAMA_MODEL_GATEWAY_FAST_PORT" \
+                LLAMA_MODEL_GATEWAY_LOG="$LLAMA_MODEL_GATEWAY_FAST_LOG" \
+                LLAMA_MODEL_GATEWAY_PID_FILE="$LLAMA_MODEL_GATEWAY_FAST_PID_FILE" \
+                    lmm_gateway_stop fast
+            fi
+            ;;
+        restart)
+            lmm_gateway_stop full
+            lmm_gateway_start full
+            if [[ "${LLAMA_MODEL_GATEWAY_FAST_ENABLED:-0}" == "1" ]]; then
+                LMM_GATEWAY_MODE="fast" \
+                LLAMA_MODEL_GATEWAY_PORT="$LLAMA_MODEL_GATEWAY_FAST_PORT" \
+                LLAMA_MODEL_GATEWAY_LOG="$LLAMA_MODEL_GATEWAY_FAST_LOG" \
+                LLAMA_MODEL_GATEWAY_PID_FILE="$LLAMA_MODEL_GATEWAY_FAST_PID_FILE" \
+                    lmm_gateway_stop fast
+                LMM_GATEWAY_MODE="fast" \
+                LLAMA_MODEL_GATEWAY_PORT="$LLAMA_MODEL_GATEWAY_FAST_PORT" \
+                LLAMA_MODEL_GATEWAY_LOG="$LLAMA_MODEL_GATEWAY_FAST_LOG" \
+                LLAMA_MODEL_GATEWAY_PID_FILE="$LLAMA_MODEL_GATEWAY_FAST_PID_FILE" \
+                    lmm_gateway_start fast
+            fi
+            ;;
         status) lmm_gateway_status full ;;
         logs) lmm_gateway_logs "$@" ;;
         help|-h|--help)
@@ -5364,7 +5397,7 @@ lmm_gateway_command_fast() {
     shift || true
     case "$action" in
         start)
-            [[ "$LLAMA_MODEL_GATEWAY_FAST_ENABLED" == "1" ]] || printf 'warning: fast gateway lane is disabled by default; starting on explicit operator request\n' >&2
+            [[ "$LLAMA_MODEL_GATEWAY_FAST_ENABLED" == "1" ]] || printf 'warning: fast gateway lane is not enabled; set LLAMA_MODEL_GATEWAY_FAST_ENABLED=1 in defaults.env\n' >&2
             lmm_gateway_start fast
             ;;
         stop) lmm_gateway_stop fast ;;
