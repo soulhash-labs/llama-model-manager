@@ -782,13 +782,19 @@ printf 'refreshed bundled integrations under %s/integrations\n' "$(compact_home_
 build_runtime_during_install
 install_basedpyright_during_install
 
-# Step 2: Copy any pre-built runtime bundles from the source tree (rare: only
+# Step 2: Merge pre-built runtime bundles from the source tree (rare: only
 # if the developer built them locally before packaging).  The install build
-# from Step 1 already wrote to $APP_SHARE_DIR/runtime, so this only layers
-# on extras that aren't host-matched.
+# from Step 1 already wrote to $APP_SHARE_DIR/runtime, so we merge without
+# overwriting the just-validated host runtime.
 if [[ -d "$ROOT_DIR/runtime" ]]; then
-    rm -rf "$APP_SHARE_DIR/runtime"
-    cp -a "$ROOT_DIR/runtime" "$APP_SHARE_DIR/runtime"
+    while IFS= read -r -d '' src; do
+        rel="${src#$ROOT_DIR/runtime/}"
+        dst="$APP_SHARE_DIR/runtime/$rel"
+        if [[ ! -e "$dst" ]]; then
+            mkdir -p "$(dirname "$dst")"
+            cp -a "$src" "$dst"
+        fi
+    done < <(find "$ROOT_DIR/runtime" -mindepth 1 -print0)
 fi
 mkdir -p "$APP_SHARE_DIR/branding"
 if [[ -f "$ROOT_DIR/desktop/llama-model-manager-icon.svg" ]]; then
@@ -811,6 +817,51 @@ else
     fi
 fi
 
+# Migrate deprecated llama-server flags in existing models.tsv rows.
+# Creates a timestamped backup before in-place migration.
+migrate_models_tsv_deprecated_flags() {
+    local file="$1"
+    local tmp
+    local modified=0
+    local line
+    local alias_field
+    local path_field
+    local extra_field
+    local rest
+
+    tmp="$(mktemp)"
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ -z "$line" || "${line:0:1}" == "#" ]]; then
+            printf '%s\n' "$line" >>"$tmp"
+            continue
+        fi
+
+        # TSV: alias \t path \t extra_args \t context \t ngl \t batch \t threads \t parallel \t device \t notes
+        alias="${line%%$'\t'*}"
+        rest="${line#*$'\t'}"
+        path_field="${rest%%$'\t'*}"
+        rest="${rest#*$'\t'}"
+        extra_field="${rest%%$'\t'*}"
+        rest="${rest#*$'\t'}"
+
+        if [[ "$extra_field" == *"--chat-templateFile"* ]]; then
+            extra_field="${extra_field//--chat-templateFile/--chat-template-file}"
+            modified=1
+        fi
+
+        printf '%s\t%s\t%s\t%s\n' "$alias" "$path_field" "$extra_field" "$rest" >>"$tmp"
+    done <"$file"
+
+    if [[ "$modified" -eq 1 ]]; then
+        cp -a "$file" "${file}.pre-migrate-$(date +%Y%m%d%H%M%S)"
+        mv "$tmp" "$file"
+        printf 'migrated deprecated flags in %s (backup saved)\n' "$(compact_home_path "$file")"
+    else
+        rm -f "$tmp"
+    fi
+}
+
 if [[ ! -f "$CONFIG_DIR/models.tsv" ]]; then
     write_empty_registry "$CONFIG_DIR/models.tsv"
     printf 'installed %s\n' "$CONFIG_DIR/models.tsv"
@@ -819,6 +870,7 @@ elif is_placeholder_seed_registry "$CONFIG_DIR/models.tsv"; then
     printf 'migrated %s\n' "$CONFIG_DIR/models.tsv"
 else
     printf 'kept existing %s\n' "$CONFIG_DIR/models.tsv"
+    migrate_models_tsv_deprecated_flags "$CONFIG_DIR/models.tsv"
 fi
 sed -e "s|^Exec=.*$|Exec=$BIN_DIR/llama-model-gui|" \
     -e "s|^Icon=.*$|Icon=$APP_SHARE_DIR/branding/llama-model-manager-icon.svg|" \

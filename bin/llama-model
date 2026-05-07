@@ -1143,6 +1143,10 @@ classify_startup_log_text() {
         STARTUP_FAILURE_CATEGORY="cuda-detect-failed"
         STARTUP_FAILURE_SUMMARY="CUDA capability detection failed for this host."
         STARTUP_FAILURE_ACTION="check the NVIDIA driver, run nvidia-smi, set LLAMA_HOST_CUDA_CC, or build/use a CPU runtime."
+    elif [[ "$lower" == *"unknown argument"* || "$lower" == *"invalid argument"* || "$lower" == *"unrecognized option"* || "$lower" == *"unknown option"* || "$text" == *"chat-templateFile"* ]]; then
+        STARTUP_FAILURE_CATEGORY="unsupported-cli-arg"
+        STARTUP_FAILURE_SUMMARY="selected model has unsupported llama-server arguments in extra_args."
+        STARTUP_FAILURE_ACTION="migrate or edit models.tsv, replacing deprecated flags such as --chat-templateFile with --chat-template-file."
     fi
 }
 
@@ -1297,6 +1301,30 @@ split_shell_words() {
     for item in "${fallback_words[@]}"; do
         printf '%s\0' "$item"
     done
+}
+
+DEPRECATED_LLAMA_FLAGS_OLD="--chat-templateFile"
+DEPRECATED_LLAMA_FLAGS_NEW="--chat-template-file"
+
+normalize_deprecated_llama_flags() {
+    local extra="$1"
+    local updated="$extra"
+
+    updated="${updated//$DEPRECATED_LLAMA_FLAGS_OLD/$DEPRECATED_LLAMA_FLAGS_NEW}"
+    if [[ "$updated" != "$extra" ]]; then
+        printf 'normalized deprecated flags in model extra args: %s -> %s\n' "$DEPRECATED_LLAMA_FLAGS_OLD" "$DEPRECATED_LLAMA_FLAGS_NEW" >&2
+    fi
+    printf '%s\n' "$updated"
+}
+
+validate_extra_args_deprecated() {
+    local extra="$1"
+    local lower
+
+    lower="${extra,,}"
+    if [[ "$lower" == *"${DEPRECATED_LLAMA_FLAGS_OLD,,}"* ]]; then
+        die "model extra_args contain unsupported flag ${DEPRECATED_LLAMA_FLAGS_OLD}. Replace with ${DEPRECATED_LLAMA_FLAGS_NEW} in models.tsv."
+    fi
 }
 
 split_tsv_record() {
@@ -2060,7 +2088,6 @@ probe_server_binary() {
                             "$BUNDLE_VALIDATE_LABEL" \
                             "$BUNDLE_VALIDATE_MANIFEST"
                         SELECTED_LLAMA_SERVER_CUDA_OK="$([[ "$BUNDLE_VALIDATE_BACKEND" == "cuda" ]] && printf 'yes' || printf 'no')"
-                        persist_selected_runtime "$configured_path"
                         return 0
                     else
                         die "configured bundled binary ${configured_path} failed validation: $VALIDATE_RUNTIME_MESSAGE. Fix the bundle or select a different binary."
@@ -2178,7 +2205,6 @@ select_compatible_bundled_binary_with_validation() {
                             "$BUNDLE_VALIDATE_LABEL" \
                             "$BUNDLE_VALIDATE_MANIFEST"
                     fi
-                    persist_selected_runtime "$candidate"
                     return 0
                 else
                     if [[ -z "$BUNDLED_SELECTION_FAILURE_REASON" ]]; then
@@ -3011,10 +3037,22 @@ set_default_value() {
 persist_selected_runtime() {
     local bin_path="$1"
     local abs_path
+    local runtime_root
+    local current_bin
 
     [[ -n "$bin_path" ]] || return 0
     [[ "$SELECTED_LLAMA_SERVER_SOURCE" == "bundled" ]] || return 0
     [[ "$SELECTED_LLAMA_SERVER_STATUS" == "compatible" || "$SELECTED_LLAMA_SERVER_STATUS" == "fallback" ]] || return 0
+
+    # Preserve user pin: skip if LLAMA_SERVER_BIN points outside managed runtime root
+    if [[ -n "${LLAMA_SERVER_BIN:-}" ]]; then
+        runtime_root="$(canonicalize_path "$LLAMA_SERVER_RUNTIME_DIR" 2>/dev/null || printf '%s\n' "$LLAMA_SERVER_RUNTIME_DIR")"
+        current_bin="$(canonicalize_path "$LLAMA_SERVER_BIN" 2>/dev/null || printf '%s\n' "$LLAMA_SERVER_BIN")"
+        if [[ "$current_bin" != "$runtime_root"* ]]; then
+            printf 'warning: LLAMA_SERVER_BIN=%s points outside managed runtime root; preserving existing pin\n' "$LLAMA_SERVER_BIN" >&2
+            return 0
+        fi
+    fi
 
     abs_path="$(canonicalize_path "$bin_path" 2>/dev/null || printf '%s' "$bin_path")"
     set_default_value "LLAMA_SERVER_BIN" "$abs_path"
@@ -3226,6 +3264,11 @@ start_server() {
     probe_server_binary || die "${SELECTED_LLAMA_SERVER_MESSAGE}
 ${SELECTED_LLAMA_SERVER_GUIDANCE}"
 
+    # Persist validated bundled runtime on explicit start/select action
+    if [[ "$SELECTED_LLAMA_SERVER_SOURCE" == "bundled" || "$SELECTED_LLAMA_SERVER_SOURCE" == "bundled-cpu-fallback" ]]; then
+        persist_selected_runtime "$SELECTED_LLAMA_SERVER_BIN"
+    fi
+
     # Preflight runtime check - fail fast on runtime problems before model load
     preflight_runtime_check "$model_path" "$model_device" "$ngl" "$device" || die "${STARTUP_FAILURE_SUMMARY}
 ${STARTUP_FAILURE_ACTION}"
@@ -3269,6 +3312,11 @@ ${STARTUP_FAILURE_ACTION}"
 
     validate_mmproj_for_model "$model_path" "$model_extra" "$force_mmproj" "$require_mmproj"
 
+    # Normalize deprecated flags before launch
+    if [[ -n "$model_extra" ]]; then
+        model_extra="$(normalize_deprecated_llama_flags "$model_extra")"
+    fi
+    validate_extra_args_deprecated "${model_extra:-}"
     if [[ -n "$model_extra" ]]; then
         mapfile -d '' -t extra_args < <(split_shell_words "$model_extra")
     fi
@@ -4224,7 +4272,7 @@ add_model() {
     mapfile -d '' -t fields < <(split_tsv_record "$parsed")
     existing_alias="${fields[0]}"
     model_path="${fields[1]}"
-    extra="${fields[2]}"
+    extra="$(normalize_deprecated_llama_flags "${fields[2]}")"
     context="${fields[3]}"
     ngl="${fields[4]}"
     batch="${fields[5]}"
@@ -4233,6 +4281,7 @@ add_model() {
     device="${fields[8]}"
     notes="${fields[9]}"
 
+    validate_extra_args_deprecated "$extra"
     validate_mmproj_for_model "$model_path" "$extra" "$ADD_FORCE_MMPROJ" "0"
 
     ensure_models_file
