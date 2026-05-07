@@ -50,7 +50,7 @@ def stream_completion(
     notification_manager_factory=None,
     time_fn=None,
     payload: dict[str, Any] | None = None,
-) -> tuple[str, bool, str, int]:
+) -> tuple[str, bool, str, int, dict[str, Any] | None]:
     _detect_tool = _detect_tool_call if payload is not None else None
     collected: list[str] = []
     iterator = iter(chunks)
@@ -119,9 +119,12 @@ def stream_completion(
             handler.wfile.flush()
 
         full_text = "".join(collected)
+        detected_call = _detect_tool(full_text, payload) if _detect_tool else None
         finish_reason = "stop"
-        if _detect_tool and _detect_tool(full_text, payload):
+        tool_call_info: dict[str, Any] | None = None
+        if detected_call:
             finish_reason = "tool_calls"
+            tool_call_info = {"detected": True, "name": str(detected_call.get("name", ""))}
 
         handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]}))
         handler.wfile.write(sse_event("[DONE]"))
@@ -136,7 +139,7 @@ def stream_completion(
                     f"Run finished in {latency_ms // 1000}s",
                     NotificationType.RUN_COMPLETED,
                 )
-        return "".join(collected), True, "", latency_ms
+        return "".join(collected), True, "", latency_ms, tool_call_info
 
     except (BrokenPipeError, ConnectionResetError) as exc:
         stop_event.set()
@@ -148,7 +151,7 @@ def stream_completion(
                 "Run cancelled by client",
                 NotificationType.CLIENT_DISCONNECTED,
             )
-        return "".join(collected), False, f"client disconnected: {exc}", latency_ms
+        return "".join(collected), False, f"client disconnected: {exc}", latency_ms, None
 
     except Exception as exc:
         stop_event.set()
@@ -167,7 +170,7 @@ def stream_completion(
             handler.wfile.flush()
         except Exception:
             pass
-        return "".join(collected), False, error_message, latency_ms
+        return "".join(collected), False, error_message, latency_ms, None
 
 
 def stream_anthropic_completion(
@@ -181,7 +184,7 @@ def stream_anthropic_completion(
     notification_manager_factory=None,
     time_fn=None,
     payload: dict[str, Any] | None = None,
-) -> tuple[str, bool, str, int]:
+) -> tuple[str, bool, str, int, dict[str, Any] | None]:
     _detect_tool = _detect_tool_call if payload is not None else None
     collected: list[str] = []
     iterator = iter(chunks)
@@ -280,9 +283,12 @@ def stream_anthropic_completion(
             handler.wfile.flush()
 
         full_text = "".join(collected)
+        detected_call = _detect_tool(full_text, payload) if _detect_tool else None
         stop_reason = "end_turn"
-        if _detect_tool and _detect_tool(full_text, payload):
+        tool_call_info: dict[str, Any] | None = None
+        if detected_call:
             stop_reason = "tool_use"
+            tool_call_info = {"detected": True, "name": str(detected_call.get("name", ""))}
 
         handler.wfile.write(anthropic_sse_event("content_block_stop", {"type": "content_block_stop", "index": 0}))
         handler.wfile.write(
@@ -307,7 +313,7 @@ def stream_anthropic_completion(
                     f"Run finished in {latency_ms // 1000}s",
                     NotificationType.RUN_COMPLETED,
                 )
-        return "".join(collected), True, "", latency_ms
+        return "".join(collected), True, "", latency_ms, tool_call_info
 
     except (BrokenPipeError, ConnectionResetError) as exc:
         stop_event.set()
@@ -319,7 +325,7 @@ def stream_anthropic_completion(
                 "Run cancelled by client",
                 NotificationType.CLIENT_DISCONNECTED,
             )
-        return "".join(collected), False, f"client disconnected: {exc}", latency_ms
+        return "".join(collected), False, f"client disconnected: {exc}", latency_ms, None
 
     except Exception as exc:
         stop_event.set()
@@ -337,7 +343,7 @@ def stream_anthropic_completion(
             handler.wfile.flush()
         except Exception:
             pass
-        return "".join(collected), False, error_message, latency_ms
+        return "".join(collected), False, error_message, latency_ms, None
 
 
 __all__ = [

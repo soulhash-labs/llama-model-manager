@@ -159,7 +159,7 @@ def handle_chat_completions(handler: BaseHTTPRequestHandler, api: dict[str, Any]
                     "encoding_aware_routing": True,
                 }
             )
-            text, success, error_message, latency_ms = stream_completion(
+            text, success, error_message, latency_ms, tool_call_info = stream_completion(
                 handler,
                 started=started,
                 model=model,
@@ -174,6 +174,8 @@ def handle_chat_completions(handler: BaseHTTPRequestHandler, api: dict[str, Any]
                     "effective_ttfb_ms": latency_ms if text else record["timing"].get("pipeline_total_ms", 0),
                     "completion_chars": len(text),
                     "completed_at": current_iso_timestamp(),
+                    "stream_tool_call_detected": bool(tool_call_info),
+                    "stream_tool_call_name": (tool_call_info or {}).get("name", ""),
                 }
             )
             if error_message:

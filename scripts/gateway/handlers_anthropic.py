@@ -158,7 +158,7 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> Non
                     "encoding_aware_routing": True,
                 }
             )
-            text, success, error_message, latency_ms = stream_anthropic_completion(
+            text, success, error_message, latency_ms, tool_call_info = stream_anthropic_completion(
                 handler,
                 started=started,
                 model=model,
@@ -176,6 +176,8 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> Non
                     "provider": record["route_target"],
                     "status": RunStatus.COMPLETED.value if success else RunStatus.CANCELLED.value,
                     "exit_result": ExitResult.SUCCESS.value if success else ExitResult.USER_CANCELLED.value,
+                    "stream_tool_call_detected": bool(tool_call_info),
+                    "stream_tool_call_name": (tool_call_info or {}).get("name", ""),
                 }
             )
             if error_message:
