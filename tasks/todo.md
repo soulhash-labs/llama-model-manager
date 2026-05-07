@@ -83,4 +83,5 @@ Current checklist:
 - [x] Add an interactive post-sync check for installed LMM assets, live llama-server config files, OpenCode config, oh-my-openagent config, and GlyphOS policy.
 - [x] Recommend an OpenCode install command based on available host package managers and offer the supported install alternatives.
 - [x] Offer to fetch the upstream oh-my-openagent installation guide when the local agent config is missing.
+- [x] Install oh-my-openagent from the wizard when missing, using `bunx` when available and `npx` as fallback.
 - [x] Add portability coverage for the new installer wizard surface.

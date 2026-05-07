@@ -150,6 +150,62 @@ run_opencode_install_command() {
     esac
 }
 
+recommended_oh_my_openagent_install_command() {
+    if command -v bunx >/dev/null 2>&1; then
+        printf 'bunx oh-my-openagent install\n'
+    elif command -v npx >/dev/null 2>&1; then
+        printf 'npx oh-my-openagent install\n'
+    elif command -v npm >/dev/null 2>&1; then
+        printf 'npx oh-my-openagent install\n'
+    else
+        printf ''
+    fi
+}
+
+run_oh_my_openagent_install_command() {
+    local command_text="$1"
+    case "$command_text" in
+        "bunx oh-my-openagent install")
+            if command -v bunx >/dev/null 2>&1; then
+                bunx oh-my-openagent install
+            else
+                printf 'post-install: bunx is unavailable\n' >&2
+                return 1
+            fi
+            ;;
+        "npx oh-my-openagent install")
+            if command -v npx >/dev/null 2>&1; then
+                npx oh-my-openagent install
+            else
+                printf 'post-install: npx is unavailable\n' >&2
+                return 1
+            fi
+            ;;
+        *)
+            printf 'post-install: unknown oh-my-openagent install command: %s\n' "$command_text" >&2
+            return 1
+            ;;
+    esac
+}
+
+fetch_oh_my_openagent_guide() {
+    local guide_url="$1"
+    local guide_path="$2"
+
+    if command -v curl >/dev/null 2>&1; then
+        mkdir -p "$(dirname "$guide_path")"
+        if curl -fsSL "$guide_url" -o "$guide_path"; then
+            printf 'post-install: saved oh-my-openagent installation guide to %s\n' "$guide_path"
+            return 0
+        fi
+        printf 'post-install warning: failed to fetch guide; open manually: %s\n' "$guide_url" >&2
+        return 1
+    fi
+
+    printf 'post-install: curl unavailable; open this guide manually:\n  %s\n' "$guide_url" >&2
+    return 1
+}
+
 path_state() {
     if [[ -e "$1" ]]; then
         printf 'present'
@@ -165,6 +221,7 @@ interactive_harness_setup_wizard() {
     local guide_url="https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/refs/heads/dev/docs/guide/installation.md"
     local guide_path="$APP_SHARE_DIR/docs/oh-my-openagent-installation.md"
     local recommendation=""
+    local openagent_recommendation=""
     local reply=""
 
     if [[ ! -t 0 || ! -t 1 ]]; then
@@ -214,16 +271,33 @@ interactive_harness_setup_wizard() {
         read -r reply || reply=""
         reply="${reply,,}"
         if [[ "$reply" != "n" && "$reply" != "no" ]]; then
-            if command -v curl >/dev/null 2>&1; then
-                mkdir -p "$(dirname "$guide_path")"
-                if curl -fsSL "$guide_url" -o "$guide_path"; then
-                    printf 'post-install: saved oh-my-openagent installation guide to %s\n' "$guide_path"
-                    printf 'post-install: follow that guide, then rerun: llama-model sync-opencode\n'
+            fetch_oh_my_openagent_guide "$guide_url" "$guide_path" || true
+        fi
+
+        openagent_recommendation="$(recommended_oh_my_openagent_install_command)"
+        if [[ -z "$openagent_recommendation" ]]; then
+            printf 'post-install: cannot install oh-my-openagent automatically because bunx/npx is unavailable\n' >&2
+            printf 'post-install: install Bun or Node.js, then run: bunx oh-my-openagent install\n' >&2
+            return 0
+        fi
+
+        printf 'Recommended oh-my-openagent install command for this machine:\n'
+        printf '  %s\n' "$openagent_recommendation"
+        printf 'Other supported oh-my-openagent install option:\n'
+        printf '  npx oh-my-openagent install\n'
+        printf 'Install oh-my-openagent now with the recommended command? [Y/n] '
+        read -r reply || reply=""
+        reply="${reply,,}"
+        if [[ "$reply" != "n" && "$reply" != "no" ]]; then
+            if run_oh_my_openagent_install_command "$openagent_recommendation"; then
+                printf 'post-install: oh-my-openagent installer completed\n'
+                if "$BIN_DIR/llama-model" sync-opencode >/dev/null 2>&1; then
+                    printf 'post-install: synced OpenCode and oh-my-openagent to LMM GlyphOS providers\n'
                 else
-                    printf 'post-install warning: failed to fetch guide; open manually: %s\n' "$guide_url" >&2
+                    printf 'post-install warning: sync-opencode failed; retry after selecting a model: llama-model sync-opencode\n' >&2
                 fi
             else
-                printf 'post-install: curl unavailable; open this guide manually:\n  %s\n' "$guide_url" >&2
+                printf 'post-install warning: oh-my-openagent install failed; retry manually with: %s\n' "$openagent_recommendation" >&2
             fi
         fi
     fi

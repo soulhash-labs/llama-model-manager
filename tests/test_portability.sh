@@ -536,6 +536,12 @@ test_interactive_installer_has_harness_setup_wizard() {
     assert_contains "$installer" "brew install anomalyco/tap/opencode"
     assert_contains "$installer" "paru -S opencode"
     assert_contains "$installer" "Fetch the oh-my-openagent installation guide now?"
+    assert_contains "$installer" "recommended_oh_my_openagent_install_command"
+    assert_contains "$installer" "bunx oh-my-openagent install"
+    assert_contains "$installer" "npx oh-my-openagent install"
+    assert_contains "$installer" "Install oh-my-openagent now with the recommended command?"
+    assert_contains "$installer" "run_oh_my_openagent_install_command"
+    assert_contains "$installer" "synced OpenCode and oh-my-openagent to LMM GlyphOS providers"
     assert_contains "$installer" "https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/refs/heads/dev/docs/guide/installation.md"
     assert_contains "$installer" "llama-model sync-opencode"
 }
