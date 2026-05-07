@@ -488,6 +488,16 @@ test_dependency_install_preview_exists() {
     assert_contains "$preview" "apt-get install -y git cmake build-essential nvidia-cuda-toolkit"
 }
 
+test_interactive_installer_declares_cuda_toolkit_install() {
+    local installer
+
+    installer="$(cat "$ROOT_DIR/install.sh")"
+    assert_contains "$installer" "CUDA host detected but nvcc is not in PATH"
+    assert_contains "$installer" "installer will attempt to install CUDA toolkit packages before compiling the CUDA runtime"
+    assert_contains "$installer" "LMM_AUTO_BUILD_RUNTIME is set, so attempting CUDA toolkit install"
+    assert_contains "$installer" "LLAMA_AUTO_INSTALL_DEPS=1"
+}
+
 test_state_and_shell_split_helpers() {
     local tmp
     local parsed
@@ -2130,6 +2140,7 @@ main() {
     test_install_migrates_placeholder_seed_registry
     test_install_preserves_real_registry_entries
     test_dependency_install_preview_exists
+    test_interactive_installer_declares_cuda_toolkit_install
     test_state_and_shell_split_helpers
     test_quoted_home_paths_from_saved_defaults_expand
     test_web_round_trip_for_quoted_values

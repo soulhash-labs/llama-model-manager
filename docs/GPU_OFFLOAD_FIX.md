@@ -233,17 +233,19 @@ esac
 
 | Mode | Behavior |
 |------|----------|
-| **Interactive terminal** (`-t 0 && -t 1`) | Shows detected backend, prompts `[Y/n]` before building |
-| **Non-interactive** (CI, pipes, scripts) | Auto-builds GPU runtime if build tools are in PATH; falls back to CPU-only if not; **never blocks** |
+| **Interactive terminal** (`-t 0 && -t 1`) | Shows detected backend, warns when CUDA is present but `nvcc` is missing, then installs CUDA toolkit/build dependencies before compiling when accepted |
+| **Non-interactive** (CI, pipes, scripts) | Auto-builds GPU runtime if build tools are in PATH; falls back to CPU-only if not; with `LMM_AUTO_BUILD_RUNTIME=1`, attempts toolkit dependency install instead of falling back immediately; **never blocks** |
 
 Non-interactive guard rails:
 
 ```bash
-# CUDA without nvcc: don't attempt a build that will fail
-elif [[ "$primary_backend" == "cuda" ]] && ! command -v nvcc >/dev/null 2>&1; then
+# CUDA without nvcc: skip by default in non-interactive mode, unless forced
+elif [[ "$primary_backend" == "cuda" ]] && ! command -v nvcc >/dev/null 2>&1 && [[ "${LMM_AUTO_BUILD_RUNTIME:-}" != "1" ]]; then
     printf 'post-install: CUDA host detected but nvcc not in PATH; skipping GPU build\n'
     printf 'note: set LMM_AUTO_BUILD_RUNTIME=1 to force, or run manually after installing CUDA toolkit\n'
     primary_backend="cpu"
+elif [[ "$primary_backend" == "cuda" ]] && ! command -v nvcc >/dev/null 2>&1; then
+    printf 'post-install: CUDA host detected but nvcc not in PATH; LMM_AUTO_BUILD_RUNTIME is set, so attempting CUDA toolkit install\n'
 ```
 
 #### Runtime Directory Override

@@ -56,3 +56,10 @@ Current checklist:
 - [x] Decide `~/.glyphos/config.yaml` / `GLYPHOS_CONFIG_FILE` is the canonical runtime policy source and expose that source in dashboard policy state.
 - [ ] Run machine-local TTFB comparison for `4010`, `4011`, and `8081` after reinstall/update.
 - [ ] Run machine-local dashboard screenshot / visual verification after reinstall/update.
+
+## Installer CUDA Toolkit Follow-Up
+
+Current checklist:
+- [x] Make the interactive installer explicit that CUDA hosts without `nvcc` will install CUDA toolkit packages before building the CUDA runtime.
+- [x] Allow forced non-interactive runtime builds to attempt CUDA toolkit dependency install instead of silently falling back to CPU.
+- [x] Add portability coverage for installer CUDA toolkit behavior.

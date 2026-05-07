@@ -113,6 +113,10 @@ build_runtime_during_install() {
     if [[ -t 0 && -t 1 ]]; then
         # Interactive: show what we're doing and ask
         printf 'post-install: host %s backend detected\n' "$primary_backend"
+        if [[ "$primary_backend" == "cuda" ]] && ! command -v nvcc >/dev/null 2>&1; then
+            printf 'post-install: CUDA host detected but nvcc is not in PATH\n'
+            printf 'post-install: installer will attempt to install CUDA toolkit packages before compiling the CUDA runtime\n'
+        fi
         printf 'Would you like to check/install build dependencies and compile a local llama.cpp runtime now? [Y/n] '
         local reply
         read -r reply || reply=""
@@ -126,11 +130,13 @@ build_runtime_during_install() {
         # available (no sudo prompts, no user interaction needed).
         if [[ "$primary_backend" == "cpu" ]]; then
             printf 'post-install: non-interactive install on CPU-only host; building CPU runtime\n'
-        elif [[ "$primary_backend" == "cuda" ]] && ! command -v nvcc >/dev/null 2>&1; then
+        elif [[ "$primary_backend" == "cuda" ]] && ! command -v nvcc >/dev/null 2>&1 && [[ "${LMM_AUTO_BUILD_RUNTIME:-}" != "1" && "${LMM_AUTO_BUILD_RUNTIME:-}" != "true" && "${LMM_AUTO_BUILD_RUNTIME:-}" != "yes" ]]; then
             printf 'post-install: CUDA host detected but nvcc not in PATH; skipping GPU build\n'
             printf 'note: set LMM_AUTO_BUILD_RUNTIME=1 to force, or run manually after installing CUDA toolkit\n'
             primary_backend="cpu"
             printf 'post-install: falling back to CPU-only runtime\n'
+        elif [[ "$primary_backend" == "cuda" ]] && ! command -v nvcc >/dev/null 2>&1; then
+            printf 'post-install: CUDA host detected but nvcc not in PATH; LMM_AUTO_BUILD_RUNTIME is set, so attempting CUDA toolkit install\n'
         elif [[ "$primary_backend" == "vulkan" ]] && ! command -v glslc >/dev/null 2>&1 && ! command -v glslangValidator >/dev/null 2>&1; then
             printf 'post-install: Vulkan host detected but SDK tools not in PATH; skipping GPU build\n'
             printf 'note: set LMM_AUTO_BUILD_RUNTIME=1 to force, or run manually after installing Vulkan SDK\n'
