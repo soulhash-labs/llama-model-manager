@@ -2686,11 +2686,21 @@ locate_built_runtime_dir() {
 copy_runtime_bundle_files() {
     local runtime_dir="$1"
     local install_dir="$2"
+    local parent_dir
     mkdir -p "$install_dir"
     # Copy the llama-server binary
     find "$runtime_dir" -maxdepth 1 -type f -name 'llama-server' -perm -u+x -exec cp -a {} "$install_dir/" \;
     # Copy all .so files (libllama*, libmtmd*, libggml*)
+    # Search: binary directory, then CMake build root (parent), then lib/ subdirectory.
+    # CMake often puts the binary in build_dir/bin/ and shared libs in build_dir/.
     find "$runtime_dir" -maxdepth 1 \( -name 'libllama*.so*' -o -name 'libmtmd*.so*' -o -name 'libggml*.so*' \) -exec cp -a {} "$install_dir/" \;
+    parent_dir="$(cd "$runtime_dir/.." 2>/dev/null && pwd -P || true)"
+    if [[ -n "$parent_dir" && "$parent_dir" != "$runtime_dir" ]]; then
+        find "$parent_dir" -maxdepth 1 \( -name 'libllama*.so*' -o -name 'libmtmd*.so*' -o -name 'libggml*.so*' \) -exec cp -an {} "$install_dir/" \;
+        if [[ -d "$parent_dir/lib" ]]; then
+            find "$parent_dir/lib" -maxdepth 1 \( -name 'libllama*.so*' -o -name 'libmtmd*.so*' -o -name 'libggml*.so*' \) -exec cp -an {} "$install_dir/" \;
+        fi
+    fi
 }
 
 resolve_bundle_payload_binary() {

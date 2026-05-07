@@ -17,6 +17,59 @@ Policy: local-first by default. Cloud use is explicit human choice, not hidden f
 
 ---
 
+## Using an Existing llama.cpp Installation
+
+If you already have a llama.cpp build on the target machine and want LMM to use it instead of building its own:
+
+1. **Pin the binary**: Edit `~/.config/llama-server/defaults.env`:
+   ```env
+   LLAMA_SERVER_BIN=/path/to/your/existing/llama-server
+   ```
+   LMM's `probe_server_binary()` picks up explicit paths as Priority 1, and the user-pin guard prevents the installer/runtime from overwriting it.
+
+2. **If your existing build uses shared libraries** (`libllama*.so*` not in standard system paths), add:
+   ```env
+   LD_LIBRARY_PATH=/path/to/llama.cpp/build-dir:${LD_LIBRARY_PATH:-}
+   ```
+   `defaults.env` is sourced at startup, so the `setsid` launch inherits it.
+
+3. **Alternative — wrapper script** (cleaner, no env vars): Create a one-line wrapper:
+   ```bash
+   #!/usr/bin/env bash
+   set -euo pipefail
+   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+   export LD_LIBRARY_PATH="$SCRIPT_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+   exec "$SCRIPT_DIR/llama-server.bin" "$@"
+   ```
+   Place it alongside your real binary (renamed to `llama-server.bin`), then point `LLAMA_SERVER_BIN` at the wrapper. This is the same pattern LMM uses for its own bundled runtime.
+
+4. **Verify**:
+   ```bash
+   llama-model doctor
+   ```
+   The doctor output should show `source: configured` or `source: external` for the binary path you set.
+
+---
+
+## How Reinstall Corrects Previous Issues
+
+Re-running the installer (`curl -fsSL https://soulhash.ai/install_lmm.sh | sh`) on a machine with a prior buggy installation:
+
+| Previous Bug | How Reinstall Fixes It |
+|-------------|----------------------|
+| **Missing shared libs** (`libllama-common.so.0 not found`) | `copy_runtime_bundle_files()` now searches the CMake build root (`build_dir/`) and `lib/` subdirectory — not just `build_dir/bin/` — so `.so` files are copied alongside `llama-server.bin` and the wrapper's `LD_LIBRARY_PATH` resolves them. |
+| **Runtime clobber** (validated build replaced by prebuilt `$ROOT_DIR/runtime`) | Installer now uses no-clobber merge instead of `rm -rf`+`cp -a`. Just-built host binaries are preserved. |
+| **User pins overwritten** (`LLAMA_SERVER_BIN` silently replaced) | `persist_selected_runtime()` now checks if the existing value points outside the managed runtime root. If so, it warns and preserves the pin. |
+| **Doctor mutates config** (diagnostic command writes to `defaults.env`) | `persist_selected_runtime` removed from `probe_server_binary()`; persistence only happens on explicit `start`/`build-runtime`/`persist-runtime` actions. |
+| **Stale `--chat-templateFile` flags** crash startup | `normalize_deprecated_llama_flags()` rewrites them at registry-write and preflight; `classify_startup_log_text()` detects unsupported CLI args. |
+
+After reinstall:
+- **Existing `models.tsv`** is migrated with a timestamped backup (deprecated flags are rewritten).
+- **Existing `defaults.env`** is preserved; the user-pin guard ensures your `LLAMA_SERVER_BIN` is not overwritten.
+- **Existing runtime directory** is overlaid (not replaced) so previously built host binaries survive.
+
+---
+
 ## Phase A — LMM Install
 
 ```bash
@@ -136,7 +189,8 @@ Compare visible model IDs against agent config in `oh-my-openagent.json`. Replac
 
 | Symptom | Root Cause | Fix |
 |---------|-----------|-----|
-| `invalid argument: --chat-templateFile` | Deprecated flag in models.tsv | Replace with `--chat-template-file` |
+| `invalid argument: --chat-templateFile` | Deprecated flag in models.tsv | Run install.sh migration or replace with `--chat-template-file` |
+| `error while loading shared libraries: libllama-common.so.0` | `.so` files not copied to bundle dir by old installer | Reinstall LMM (fixed in current `copy_runtime_bundle_files()`) or set `LD_LIBRARY_PATH` in `defaults.env` |
 | `SSE read timed out` | Pre-stream enrichment too slow | Set explicit timeouts, use direct path for diagnosis |
 | `Model not found: openai/*` | oh-my-openagent references unavailable models | Normalize to live catalog IDs |
 | `EBADENGINE` | Node version mismatch | Install Node 22+ via nvm/fnm |
