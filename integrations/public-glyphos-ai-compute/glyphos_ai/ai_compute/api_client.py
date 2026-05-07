@@ -198,8 +198,7 @@ class LlamaCppClient(BaseChatClient):
     ):
         super().__init__(model=model, max_tokens=max_tokens, timeout=timeout)
         self.base_url = base_url.rstrip("/")
-        self._available = False
-        self._check_availability()
+        self._available: bool | None = None
 
     def _models_url(self) -> str:
         return f"{self.base_url}/models"
@@ -215,7 +214,16 @@ class LlamaCppClient(BaseChatClient):
             self._available = False
 
     def is_available(self) -> bool:
+        if self._available is None:
+            try:
+                response = _http_json("GET", self._models_url(), timeout=2)
+                self._available = response.status_code == 200
+            except Exception:
+                self._available = False
         return self._available
+
+    def _reset_availability(self) -> None:
+        self._available = None
 
     def _resolve_model(self) -> str:
         if self.model:
@@ -241,7 +249,7 @@ class LlamaCppClient(BaseChatClient):
         }
 
     def generate(self, prompt: str, **kwargs) -> str:
-        if not self._available:
+        if not self.is_available():
             raise RuntimeError("llama.cpp backend is offline")
         try:
             response = _http_json(
@@ -257,7 +265,7 @@ class LlamaCppClient(BaseChatClient):
             raise RuntimeError(f"llama.cpp request failed: {exc}") from exc
 
     def stream_generate(self, prompt: str, **kwargs) -> Iterator[str]:
-        if not self._available:
+        if not self.is_available():
             raise RuntimeError("llama.cpp backend is offline")
         payload = self._chat_payload(prompt, **kwargs)
         payload["stream"] = True
@@ -419,6 +427,12 @@ def create_configured_clients() -> dict[str, Any]:
         llamacpp = LlamaCppClient(base_url=llama_url, model=llama_model, timeout=llama_timeout)
         if llamacpp.is_available():
             clients["llamacpp"] = llamacpp
+        elif _env_first("GLYPHOS_LLAMACPP_ENABLED", default="true").lower() != "false":
+            warnings.warn(
+                f"llama.cpp backend at {llama_url} is not reachable; check that the server is running",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
     lane_keys = ["aurora", "terran", "starlight", "polaris"]
     for lane in lane_keys:
