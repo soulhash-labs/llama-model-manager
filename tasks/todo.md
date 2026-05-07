@@ -63,3 +63,9 @@ Current checklist:
 - [x] Make the interactive installer explicit that CUDA hosts without `nvcc` will install CUDA toolkit packages before building the CUDA runtime.
 - [x] Allow forced non-interactive runtime builds to attempt CUDA toolkit dependency install instead of silently falling back to CPU.
 - [x] Add portability coverage for installer CUDA toolkit behavior.
+
+## Installer Python Diagnostics Follow-Up
+
+Current checklist:
+- [x] Add interactive user-scope basedpyright install using `python3 -m pip install --user basedpyright`.
+- [x] Add portability coverage for the basedpyright installer prompt and retry guidance.

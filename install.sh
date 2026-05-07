@@ -64,6 +64,35 @@ die() {
     exit 1
 }
 
+install_basedpyright_during_install() {
+    if [[ ! -t 0 || ! -t 1 ]]; then
+        return 0
+    fi
+    if command -v basedpyright >/dev/null 2>&1; then
+        printf 'post-install: basedpyright already available\n'
+        return 0
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        printf 'post-install: python3 not found; skipping basedpyright install\n' >&2
+        return 0
+    fi
+
+    printf 'Install basedpyright for local Python type diagnostics? [Y/n] '
+    local reply
+    read -r reply || reply=""
+    reply="${reply,,}"
+    if [[ "$reply" == "n" || "$reply" == "no" ]]; then
+        printf 'post-install: basedpyright install skipped by user\n'
+        return 0
+    fi
+
+    if python3 -m pip install --user basedpyright; then
+        printf 'post-install: basedpyright installed with python3 -m pip --user\n'
+    else
+        printf 'post-install: basedpyright install failed; retry manually with: python3 -m pip install --user basedpyright\n' >&2
+    fi
+}
+
 # build_runtime_during_install — auto-build a bundled llama.cpp runtime after
 # the installer binaries are in place.  Replaces the old interactive-only prompt
 # at the end of the script so fresh installs get GPU offload out of the box.
@@ -518,6 +547,7 @@ printf 'refreshed bundled integrations under %s/integrations\n' "$(compact_home_
 # "no runtime shipped" gap — we now compile GPU/CPU binaries during install so
 # fresh installs can actually run models on their hardware.
 build_runtime_during_install
+install_basedpyright_during_install
 
 # Step 2: Copy any pre-built runtime bundles from the source tree (rare: only
 # if the developer built them locally before packaging).  The install build
