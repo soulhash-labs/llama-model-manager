@@ -498,6 +498,16 @@ test_interactive_installer_declares_cuda_toolkit_install() {
     assert_contains "$installer" "LLAMA_AUTO_INSTALL_DEPS=1"
 }
 
+test_installer_validates_runtime_bundle_subdirectories() {
+    local installer
+
+    installer="$(cat "$ROOT_DIR/install.sh")"
+    assert_contains "$installer" "valid_runtime_binaries"
+    assert_contains "$installer" "runtime bundle failed --version check"
+    assert_contains "$installer" '*-"${primary_backend}"/llama-server'
+    assert_not_contains "$installer" '"$runtime_dir/llama-server" --version'
+}
+
 test_interactive_installer_uses_user_basedpyright_install() {
     local installer
 
@@ -2153,6 +2163,7 @@ main() {
     test_install_preserves_real_registry_entries
     test_dependency_install_preview_exists
     test_interactive_installer_declares_cuda_toolkit_install
+    test_installer_validates_runtime_bundle_subdirectories
     test_interactive_installer_uses_user_basedpyright_install
     test_state_and_shell_split_helpers
     test_quoted_home_paths_from_saved_defaults_expand

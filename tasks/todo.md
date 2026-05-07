@@ -69,3 +69,10 @@ Current checklist:
 Current checklist:
 - [x] Add interactive basedpyright install through `pipx` for externally-managed Python environments.
 - [x] Add apt-based `pipx` install guidance and portability coverage for the basedpyright installer prompt and retry guidance.
+
+## Installer Runtime Validation Follow-Up
+
+Current checklist:
+- [x] Fix post-build validation to inspect built runtime bundle subdirectories instead of the runtime root.
+- [x] Prefer the detected GPU backend bundle when persisting `LLAMA_SERVER_BIN`.
+- [x] Add portability coverage preventing regression to root-level runtime validation.

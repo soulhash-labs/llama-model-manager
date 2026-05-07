@@ -203,22 +203,43 @@ build_runtime_during_install() {
     # Post-build validation: ldd + --version checks
     local runtime_dir="${APP_SHARE_DIR}/runtime/llama-server"
     local mark_runtime_invalid=0
+    local -a runtime_binaries=()
+    local -a valid_runtime_binaries=()
+    local b=""
+    local payload_binary=""
 
     if [[ -d "$runtime_dir" ]] && find "$runtime_dir" -name 'llama-server' -type f -print -quit 2>/dev/null | grep -q .; then
-        # Run ldd check to find missing libraries
-        binary="$runtime_dir/llama-server.bin"
-        if [[ -x "$binary" ]]; then
-            missing="$(ldd "$binary" 2>&1 | grep 'not found' | grep -E 'lib(ggml|llama|mtmd)' || true)"
-            if [[ -n "$missing" ]]; then
-                printf 'post-install: runtime build produced incomplete bundle (missing libs: %s)\n' "$missing"
-                printf 'post-install: runtime marked invalid, will not be auto-selected\n'
-                mark_runtime_invalid=1
+        for b in "$runtime_dir"/*-"${primary_backend}"/llama-server; do
+            [[ -x "$b" ]] || continue
+            runtime_binaries+=("$b")
+            break
+        done
+        while IFS= read -r -d '' b; do
+            if ((${#runtime_binaries[@]} > 0)) && [[ "$b" == "${runtime_binaries[0]}" ]]; then
+                continue
             fi
-        fi
+            runtime_binaries+=("$b")
+        done < <(find "$runtime_dir" -name 'llama-server' -type f -print0 | sort -z)
 
-        # Run --version check
-        if [[ "$mark_runtime_invalid" -eq 0 ]] && ! "$runtime_dir/llama-server" --version >/dev/null 2>&1; then
-            printf 'post-install: runtime build failed --version check\n'
+        for b in "${runtime_binaries[@]}"; do
+            payload_binary="${b}.bin"
+            if [[ -x "$payload_binary" ]]; then
+                missing="$(ldd "$payload_binary" 2>&1 | grep 'not found' | grep -E 'lib(ggml|llama|mtmd)' || true)"
+                if [[ -n "$missing" ]]; then
+                    printf 'post-install: runtime bundle %s has missing libs: %s\n' "$b" "$missing"
+                    continue
+                fi
+            fi
+
+            if "$b" --version >/dev/null 2>&1; then
+                valid_runtime_binaries+=("$b")
+            else
+                printf 'post-install: runtime bundle failed --version check: %s\n' "$b"
+            fi
+        done
+
+        if ((${#valid_runtime_binaries[@]} == 0)); then
+            printf 'post-install: no built runtime bundle passed validation\n'
             mark_runtime_invalid=1
         fi
 
@@ -237,14 +258,16 @@ build_runtime_during_install() {
         # Persist only if validation passed
         if [[ "$mark_runtime_invalid" -eq 0 ]]; then
             local persisted="no"
-            while IFS= read -r -d '' b; do
+            for b in "${valid_runtime_binaries[@]}"; do
                 if "$bin" persist-runtime "$b" 2>/dev/null; then
                     persisted="yes"
                     break
                 fi
-            done < <(find "$runtime_dir" -name 'llama-server' -type f -print0 | sort -z)
+            done
             if [[ "$persisted" == "yes" ]]; then
                 printf 'post-install: persisted LLAMA_SERVER_BIN to defaults.env\n'
+            else
+                printf 'post-install: valid runtime bundles were built but none could be persisted\n' >&2
             fi
         else
             printf 'post-install: runtime build validation failed, not persisting LLAMA_SERVER_BIN\n'
