@@ -67,5 +67,5 @@ Current checklist:
 ## Installer Python Diagnostics Follow-Up
 
 Current checklist:
-- [x] Add interactive user-scope basedpyright install using `python3 -m pip install --user basedpyright`.
-- [x] Add portability coverage for the basedpyright installer prompt and retry guidance.
+- [x] Add interactive basedpyright install through `pipx` for externally-managed Python environments.
+- [x] Add apt-based `pipx` install guidance and portability coverage for the basedpyright installer prompt and retry guidance.

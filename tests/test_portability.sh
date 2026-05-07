@@ -503,8 +503,11 @@ test_interactive_installer_uses_user_basedpyright_install() {
 
     installer="$(cat "$ROOT_DIR/install.sh")"
     assert_contains "$installer" "Install basedpyright for local Python type diagnostics?"
-    assert_contains "$installer" "python3 -m pip install --user basedpyright"
-    assert_contains "$installer" "basedpyright install failed; retry manually with: python3 -m pip install --user basedpyright"
+    assert_contains "$installer" "pipx is required for basedpyright on externally-managed Python environments"
+    assert_contains "$installer" "apt-get install -y pipx"
+    assert_contains "$installer" "pipx ensurepath"
+    assert_contains "$installer" "pipx install basedpyright"
+    assert_not_contains "$installer" "python3 -m pip install --user basedpyright"
 }
 
 test_state_and_shell_split_helpers() {

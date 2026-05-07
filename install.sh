@@ -72,11 +72,6 @@ install_basedpyright_during_install() {
         printf 'post-install: basedpyright already available\n'
         return 0
     fi
-    if ! command -v python3 >/dev/null 2>&1; then
-        printf 'post-install: python3 not found; skipping basedpyright install\n' >&2
-        return 0
-    fi
-
     printf 'Install basedpyright for local Python type diagnostics? [Y/n] '
     local reply
     read -r reply || reply=""
@@ -86,10 +81,31 @@ install_basedpyright_during_install() {
         return 0
     fi
 
-    if python3 -m pip install --user basedpyright; then
-        printf 'post-install: basedpyright installed with python3 -m pip --user\n'
+    if ! command -v pipx >/dev/null 2>&1; then
+        printf 'post-install: pipx is required for basedpyright on externally-managed Python environments\n'
+        if command -v apt-get >/dev/null 2>&1; then
+            printf 'post-install: installing pipx with apt\n'
+            if [[ "$EUID" -eq 0 ]]; then
+                apt-get update && apt-get install -y pipx
+            elif command -v sudo >/dev/null 2>&1; then
+                sudo apt-get update && sudo apt-get install -y pipx
+            else
+                printf 'post-install: sudo not available; install pipx manually with: sudo apt install pipx\n' >&2
+            fi
+        else
+            printf 'post-install: install pipx with your OS package manager, then run: pipx install basedpyright\n' >&2
+        fi
+    fi
+
+    if command -v pipx >/dev/null 2>&1; then
+        pipx ensurepath || true
+        if pipx install basedpyright; then
+            printf 'post-install: basedpyright installed with pipx\n'
+        else
+            printf 'post-install: basedpyright install failed; retry manually with: pipx install basedpyright\n' >&2
+        fi
     else
-        printf 'post-install: basedpyright install failed; retry manually with: python3 -m pip install --user basedpyright\n' >&2
+        printf 'post-install: basedpyright install skipped; retry manually with: sudo apt install pipx && pipx ensurepath && pipx install basedpyright\n' >&2
     fi
 }
 
