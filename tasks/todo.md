@@ -76,3 +76,11 @@ Current checklist:
 - [x] Fix post-build validation to inspect built runtime bundle subdirectories instead of the runtime root.
 - [x] Prefer the detected GPU backend bundle when persisting `LLAMA_SERVER_BIN`.
 - [x] Add portability coverage preventing regression to root-level runtime validation.
+
+## Installer Harness Integration Follow-Up
+
+Current checklist:
+- [x] Add an interactive post-sync check for installed LMM assets, live llama-server config files, OpenCode config, oh-my-openagent config, and GlyphOS policy.
+- [x] Recommend an OpenCode install command based on available host package managers and offer the supported install alternatives.
+- [x] Offer to fetch the upstream oh-my-openagent installation guide when the local agent config is missing.
+- [x] Add portability coverage for the new installer wizard surface.

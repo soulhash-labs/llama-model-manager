@@ -109,6 +109,126 @@ install_basedpyright_during_install() {
     fi
 }
 
+recommended_opencode_install_command() {
+    local os
+    os="$(uname -s)"
+    if [[ "$os" == "Darwin" ]] && command -v brew >/dev/null 2>&1; then
+        printf 'brew install anomalyco/tap/opencode\n'
+    elif command -v paru >/dev/null 2>&1; then
+        printf 'paru -S opencode\n'
+    elif command -v bun >/dev/null 2>&1; then
+        printf 'bun add -g opencode-ai\n'
+    elif command -v npm >/dev/null 2>&1; then
+        printf 'npm i -g opencode-ai\n'
+    else
+        printf 'curl -fsSL https://opencode.ai/install | bash\n'
+    fi
+}
+
+run_opencode_install_command() {
+    local command_text="$1"
+    case "$command_text" in
+        "curl -fsSL https://opencode.ai/install | bash")
+            curl -fsSL https://opencode.ai/install | bash
+            ;;
+        "npm i -g opencode-ai")
+            npm i -g opencode-ai
+            ;;
+        "bun add -g opencode-ai")
+            bun add -g opencode-ai
+            ;;
+        "brew install anomalyco/tap/opencode")
+            brew install anomalyco/tap/opencode
+            ;;
+        "paru -S opencode")
+            paru -S opencode
+            ;;
+        *)
+            printf 'post-install: unknown OpenCode install command: %s\n' "$command_text" >&2
+            return 1
+            ;;
+    esac
+}
+
+path_state() {
+    if [[ -e "$1" ]]; then
+        printf 'present'
+    else
+        printf 'missing'
+    fi
+}
+
+interactive_harness_setup_wizard() {
+    local opencode_config="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"
+    local openagent_config="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/oh-my-openagent.json"
+    local glyphos_config="$HOME/.glyphos/config.yaml"
+    local guide_url="https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/refs/heads/dev/docs/guide/installation.md"
+    local guide_path="$APP_SHARE_DIR/docs/oh-my-openagent-installation.md"
+    local recommendation=""
+    local reply=""
+
+    if [[ ! -t 0 || ! -t 1 ]]; then
+        return 0
+    fi
+
+    printf '\nIntegration setup check:\n'
+    printf '  installed CLI: %s (%s)\n' "$BIN_DIR/llama-model" "$(path_state "$BIN_DIR/llama-model")"
+    printf '  installed assets: %s (%s)\n' "$APP_SHARE_DIR" "$(path_state "$APP_SHARE_DIR")"
+    printf '  integration bundle: %s (%s)\n' "$APP_SHARE_DIR/integrations/public-glyphos-ai-compute" "$(path_state "$APP_SHARE_DIR/integrations/public-glyphos-ai-compute")"
+    printf '  LMM defaults: %s (%s)\n' "$CONFIG_DIR/defaults.env" "$(path_state "$CONFIG_DIR/defaults.env")"
+    printf '  LMM model registry: %s (%s)\n' "$CONFIG_DIR/models.tsv" "$(path_state "$CONFIG_DIR/models.tsv")"
+    printf '  OpenCode config: %s (%s)\n' "$opencode_config" "$(path_state "$opencode_config")"
+    printf '  oh-my-openagent config: %s (%s)\n' "$openagent_config" "$(path_state "$openagent_config")"
+    printf '  GlyphOS policy: %s (%s)\n' "$glyphos_config" "$(path_state "$glyphos_config")"
+
+    if command -v opencode >/dev/null 2>&1; then
+        printf 'post-install: opencode already available\n'
+    else
+        recommendation="$(recommended_opencode_install_command)"
+        printf 'post-install: opencode is not installed or not on PATH\n'
+        printf 'Recommended install command for this machine:\n'
+        printf '  %s\n' "$recommendation"
+        printf 'Other supported OpenCode install options:\n'
+        printf '  curl -fsSL https://opencode.ai/install | bash\n'
+        printf '  npm i -g opencode-ai\n'
+        printf '  bun add -g opencode-ai\n'
+        printf '  brew install anomalyco/tap/opencode\n'
+        printf '  paru -S opencode\n'
+        printf 'Install OpenCode now with the recommended command? [Y/n] '
+        read -r reply || reply=""
+        reply="${reply,,}"
+        if [[ "$reply" != "n" && "$reply" != "no" ]]; then
+            if run_opencode_install_command "$recommendation"; then
+                printf 'post-install: OpenCode install command completed\n'
+            else
+                printf 'post-install warning: OpenCode install command failed; retry manually with: %s\n' "$recommendation" >&2
+            fi
+        fi
+    fi
+
+    if [[ -f "$openagent_config" ]]; then
+        printf 'post-install: oh-my-openagent config found: %s\n' "$openagent_config"
+    else
+        printf 'post-install: oh-my-openagent config missing: %s\n' "$openagent_config"
+        printf 'Fetch the oh-my-openagent installation guide now? [Y/n] '
+        read -r reply || reply=""
+        reply="${reply,,}"
+        if [[ "$reply" != "n" && "$reply" != "no" ]]; then
+            if command -v curl >/dev/null 2>&1; then
+                mkdir -p "$(dirname "$guide_path")"
+                if curl -fsSL "$guide_url" -o "$guide_path"; then
+                    printf 'post-install: saved oh-my-openagent installation guide to %s\n' "$guide_path"
+                    printf 'post-install: follow that guide, then rerun: llama-model sync-opencode\n'
+                else
+                    printf 'post-install warning: failed to fetch guide; open manually: %s\n' "$guide_url" >&2
+                fi
+            else
+                printf 'post-install: curl unavailable; open this guide manually:\n  %s\n' "$guide_url" >&2
+            fi
+        fi
+    fi
+}
+
 # build_runtime_during_install — auto-build a bundled llama.cpp runtime after
 # the installer binaries are in place.  Replaces the old interactive-only prompt
 # at the end of the script so fresh installs get GPU offload out of the box.
@@ -639,6 +759,7 @@ if [[ -d "$DESKTOP_DIR" ]]; then
 fi
 
 post_install_sync_clients
+interactive_harness_setup_wizard
 
 printf '\nInstalled llama-model-manager.\n'
 printf 'Next steps:\n'

@@ -520,6 +520,26 @@ test_interactive_installer_uses_user_basedpyright_install() {
     assert_not_contains "$installer" "python3 -m pip install --user basedpyright"
 }
 
+test_interactive_installer_has_harness_setup_wizard() {
+    local installer
+
+    installer="$(cat "$ROOT_DIR/install.sh")"
+    assert_contains "$installer" "Integration setup check:"
+    assert_contains "$installer" "recommended_opencode_install_command"
+    assert_contains "$installer" "integration bundle:"
+    assert_contains "$installer" "LMM defaults:"
+    assert_contains "$installer" "LMM model registry:"
+    assert_contains "$installer" "oh-my-openagent config:"
+    assert_contains "$installer" "curl -fsSL https://opencode.ai/install | bash"
+    assert_contains "$installer" "npm i -g opencode-ai"
+    assert_contains "$installer" "bun add -g opencode-ai"
+    assert_contains "$installer" "brew install anomalyco/tap/opencode"
+    assert_contains "$installer" "paru -S opencode"
+    assert_contains "$installer" "Fetch the oh-my-openagent installation guide now?"
+    assert_contains "$installer" "https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/refs/heads/dev/docs/guide/installation.md"
+    assert_contains "$installer" "llama-model sync-opencode"
+}
+
 test_state_and_shell_split_helpers() {
     local tmp
     local parsed
@@ -2165,6 +2185,7 @@ main() {
     test_interactive_installer_declares_cuda_toolkit_install
     test_installer_validates_runtime_bundle_subdirectories
     test_interactive_installer_uses_user_basedpyright_install
+    test_interactive_installer_has_harness_setup_wizard
     test_state_and_shell_split_helpers
     test_quoted_home_paths_from_saved_defaults_expand
     test_web_round_trip_for_quoted_values
