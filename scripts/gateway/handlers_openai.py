@@ -165,6 +165,7 @@ def handle_chat_completions(handler: BaseHTTPRequestHandler, api: dict[str, Any]
                 model=model,
                 chunks=chunks,
                 headers=headers,
+                payload=payload,
             )
             record.update(
                 {

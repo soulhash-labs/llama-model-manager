@@ -12,6 +12,11 @@ from typing import Any
 from lmm_config import load_lmm_config_from_env
 from lmm_notifications import NotificationType, create_notification_manager
 
+try:
+    from gateway.protocol_normalizers import _normalize_tool_call as _detect_tool_call
+except Exception:
+    _detect_tool_call = None
+
 
 def _notification_manager():
     enabled = os.environ.get("LMM_NOTIFICATIONS_ENABLED", "").lower() in {"1", "true", "yes"}
@@ -44,7 +49,9 @@ def stream_completion(
     heartbeat_seconds: float | None = None,
     notification_manager_factory=None,
     time_fn=None,
+    payload: dict[str, Any] | None = None,
 ) -> tuple[str, bool, str, int]:
+    _detect_tool = _detect_tool_call if payload is not None else None
     collected: list[str] = []
     iterator = iter(chunks)
     events: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -111,7 +118,12 @@ def stream_completion(
             )
             handler.wfile.flush()
 
-        handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}))
+        full_text = "".join(collected)
+        finish_reason = "stop"
+        if _detect_tool and _detect_tool(full_text, payload):
+            finish_reason = "tool_calls"
+
+        handler.wfile.write(sse_event({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]}))
         handler.wfile.write(sse_event("[DONE]"))
         handler.wfile.flush()
 
@@ -168,7 +180,9 @@ def stream_anthropic_completion(
     heartbeat_seconds: float | None = None,
     notification_manager_factory=None,
     time_fn=None,
+    payload: dict[str, Any] | None = None,
 ) -> tuple[str, bool, str, int]:
+    _detect_tool = _detect_tool_call if payload is not None else None
     collected: list[str] = []
     iterator = iter(chunks)
     events: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -265,13 +279,18 @@ def stream_anthropic_completion(
             )
             handler.wfile.flush()
 
+        full_text = "".join(collected)
+        stop_reason = "end_turn"
+        if _detect_tool and _detect_tool(full_text, payload):
+            stop_reason = "tool_use"
+
         handler.wfile.write(anthropic_sse_event("content_block_stop", {"type": "content_block_stop", "index": 0}))
         handler.wfile.write(
             anthropic_sse_event(
                 "message_delta",
                 {
                     "type": "message_delta",
-                    "delta": {"stop_reason": "end_turn"},
+                    "delta": {"stop_reason": stop_reason},
                     "usage": {"input_tokens": 0, "output_tokens": output_tokens},
                 },
             )

@@ -164,6 +164,7 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> Non
                 model=model,
                 chunks=chunks,
                 headers=headers,
+                payload=payload,
             )
             record.update(
                 {
