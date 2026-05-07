@@ -157,6 +157,13 @@ def sync_opencode(args: argparse.Namespace) -> None:
         raise SystemExit(f"missing opencode model ids: {missing}; available: {available}")
 
     config = load_json(config_path)
+    # Strip non-standard top-level keys that OpenCode rejects
+    config.pop("lanes", None)
+    config.pop("category_lane_mapping", None)
+    known_config_keys = {"$schema", "plugin", "provider", "model", "small_model", "compaction"}
+    for key in list(config.keys()):
+        if key not in known_config_keys:
+            config.pop(key, None)
     providers = config.get("provider")
     if not isinstance(providers, dict):
         providers = {}
@@ -165,6 +172,16 @@ def sync_opencode(args: argparse.Namespace) -> None:
         for name, provider in providers.items()
         if not is_stale_local_opencode_provider(str(name), provider)
     }
+    # Strip any local provider entries not in our managed set (e.g. old llamacpp_direct)
+    managed_names = {"llamacpp", full_provider_name, fast_provider_name}
+    for name in list(providers.keys()):
+        if name in managed_names:
+            continue
+        prov = providers.get(name)
+        if isinstance(prov, dict):
+            base_url = str((prov.get("options") or {}).get("baseURL", "")).strip()
+            if any(host in base_url for host in ("127.0.0.1", "localhost", "::1")):
+                providers.pop(name, None)
     llamacpp = providers.get("llamacpp")
     if not isinstance(llamacpp, dict):
         llamacpp = {}
