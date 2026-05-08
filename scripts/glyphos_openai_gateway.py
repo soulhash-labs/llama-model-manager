@@ -292,7 +292,8 @@ def stream_completion(
     chunks: Iterator[str],
     headers: dict[str, str],
     heartbeat_seconds: float | None = None,
-) -> tuple[str, bool, str, int]:
+    payload: dict[str, Any] | None = None,
+) -> tuple[str, bool, str, int, dict[str, Any] | None]:
     return gateway_stream_completion(
         handler,
         started=started,
@@ -302,6 +303,7 @@ def stream_completion(
         heartbeat_seconds=heartbeat_seconds,
         notification_manager_factory=notification_manager,
         time_fn=now,
+        payload=payload,
     )
 
 
@@ -313,7 +315,8 @@ def stream_anthropic_completion(
     chunks: Iterator[str],
     headers: dict[str, str],
     heartbeat_seconds: float | None = None,
-) -> tuple[str, bool, str, int]:
+    payload: dict[str, Any] | None = None,
+) -> tuple[str, bool, str, int, dict[str, Any] | None]:
     return gateway_stream_anthropic_completion(
         handler,
         started=started,
@@ -323,6 +326,7 @@ def stream_anthropic_completion(
         heartbeat_seconds=heartbeat_seconds,
         notification_manager_factory=notification_manager,
         time_fn=now,
+        payload=payload,
     )
 
 
