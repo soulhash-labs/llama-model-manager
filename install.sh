@@ -637,7 +637,7 @@ migrate_routed_gateway_defaults() {
         printf 'LLAMA_MODEL_GATEWAY_LOG=$HOME/models/lmm-gateway.log\n' >>"$tmp"
     fi
     if ! defaults_has_key LLAMA_MODEL_GATEWAY_FAST_ENABLED "$tmp"; then
-        printf 'LLAMA_MODEL_GATEWAY_FAST_ENABLED=0\n' >>"$tmp"
+        printf 'LLAMA_MODEL_GATEWAY_FAST_ENABLED=1\n' >>"$tmp"
     fi
     if ! defaults_has_key LLAMA_MODEL_GATEWAY_FAST_PORT "$tmp"; then
         printf 'LLAMA_MODEL_GATEWAY_FAST_PORT=4011\n' >>"$tmp"
