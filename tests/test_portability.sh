@@ -1397,6 +1397,53 @@ EOF
     assert_contains "$output" "route_guidance: Run install.sh to migrate defaults"
 }
 
+test_doctor_reports_oh_my_openagent_wake_patch_status() {
+    local tmp
+    local package_dir
+    local output
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    package_dir="$tmp/home/.cache/opencode/packages/oh-my-openagent@latest/node_modules/oh-my-openagent"
+    mkdir -p "$package_dir/dist"
+    cat >"$package_dir/package.json" <<'EOF'
+{"version":"3.17.13"}
+EOF
+    cat >"$package_dir/dist/index.js" <<'EOF'
+class BackgroundManager {
+  async notifyParentSession(task) {
+    this.client.session.prompt({
+      path: { id: task.parentSessionId },
+      body: { parts: [] }
+    }).catch(() => {})
+  }
+  hasRunningTasks() { return false }
+}
+EOF
+
+    output="$(LLAMA_MODEL_WEB_PORT=9 run_doctor "$tmp")"
+
+    assert_contains "$output" "oh_my_openagent_version: 3.17.13"
+    assert_contains "$output" "oh_my_openagent_wake_patch: yes"
+
+    cat >"$package_dir/dist/index.js" <<'EOF'
+class BackgroundManager {
+  async notifyParentSession(task) {
+    await this.client.session.promptAsync({
+      path: { id: task.parentSessionId },
+      body: { parts: [] }
+    })
+  }
+  hasRunningTasks() { return false }
+}
+EOF
+
+    output="$(LLAMA_MODEL_WEB_PORT=9 run_doctor "$tmp")"
+
+    assert_contains "$output" "oh_my_openagent_wake_patch: no"
+    assert_contains "$output" "session.prompt wake-up patch"
+}
+
 test_dashboard_service_unit_rendering() {
     local unit
 
@@ -2213,6 +2260,7 @@ main() {
     test_doctor_reports_install_health
     test_context_mcp_build_repairs_missing_dist
     test_doctor_reports_legacy_route_state
+    test_doctor_reports_oh_my_openagent_wake_patch_status
     test_dashboard_service_unit_rendering
     test_dashboard_service_status_reports_unsupported_without_systemctl
     test_doctor_reports_external_systemd_owner

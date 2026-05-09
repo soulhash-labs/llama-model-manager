@@ -3728,6 +3728,10 @@ show_doctor() {
     local route_state="routed"
     local route_guidance=""
     local stale_opencode_providers=""
+    local oh_my_openagent_package_dir=""
+    local oh_my_openagent_version="not-installed"
+    local oh_my_openagent_wake_patch="not-installed"
+    local oh_my_openagent_guidance=""
     local requested_ngl="${LLAMA_SERVER_NGL:-}"
     local effective_ngl=""
     local gpu_layers_posture=""
@@ -3849,7 +3853,58 @@ for name, provider in providers.items():
         stale.append(str(name))
 print(",".join(sorted(set(stale))))
 PY
-)"
+	)"
+    fi
+    for candidate in \
+        "${XDG_CACHE_HOME:-$HOME/.cache}/opencode/packages/oh-my-openagent@latest/node_modules/oh-my-openagent" \
+        "${XDG_CACHE_HOME:-$HOME/.cache}/opencode/packages/oh-my-opencode@latest/node_modules/oh-my-opencode"; do
+        if [[ -f "$candidate/package.json" || -f "$candidate/dist/index.js" ]]; then
+            oh_my_openagent_package_dir="$candidate"
+            break
+        fi
+    done
+    if [[ -n "$oh_my_openagent_package_dir" ]]; then
+        while IFS='=' read -r key value; do
+            case "$key" in
+                version) oh_my_openagent_version="$value" ;;
+                wake_patch) oh_my_openagent_wake_patch="$value" ;;
+                guidance) oh_my_openagent_guidance="$value" ;;
+            esac
+        done < <(python3 - "$oh_my_openagent_package_dir" <<'PY' 2>/dev/null || printf 'wake_patch=unknown\nguidance=Unable to inspect oh-my-openagent dist bundle.\n'
+import json
+import re
+import sys
+from pathlib import Path
+
+package_dir = Path(sys.argv[1])
+version = "unknown"
+try:
+    version = str(json.loads((package_dir / "package.json").read_text(encoding="utf-8")).get("version") or "unknown")
+except Exception:
+    pass
+
+dist = package_dir / "dist" / "index.js"
+status = "unknown"
+guidance = ""
+try:
+    code = dist.read_text(encoding="utf-8")
+    match = re.search(r"async notifyParentSession\s*\([^)]*\)\s*\{(?P<body>.*?)(?:\n\s*hasRunningTasks\s*\(|\n\s*async\s+\w+\s*\()", code, re.S)
+    body = match.group("body") if match else ""
+    if "this.client.session.prompt({" in body:
+        status = "yes"
+    elif "this.client.session.promptAsync({" in body:
+        status = "no"
+        guidance = "Restart after applying the session.prompt wake-up patch, or install an upstream version that uses /session/{id}/message for parent task notifications."
+    else:
+        guidance = "Could not identify notifyParentSession prompt call in dist/index.js."
+except Exception as exc:
+    guidance = f"Unable to read {dist}: {exc}"
+
+print(f"version={version}")
+print(f"wake_patch={status}")
+print(f"guidance={guidance}")
+PY
+        )
     fi
     if [[ "$legacy_opencode_gateway_default" == "yes" || -n "$stale_opencode_providers" ]]; then
         route_state="mixed-legacy"
@@ -3964,6 +4019,10 @@ print("glyphos_config=" + ("yes" if data.get("glyphos_config_exists") else "no")
     printf 'legacy_opencode_gateway_default: %s\n' "$legacy_opencode_gateway_default"
     printf 'harness_mode_configured: %s\n' "$harness_mode_configured"
     printf 'stale_opencode_providers: %s\n' "$stale_opencode_providers"
+    printf 'oh_my_openagent_package: %s\n' "$oh_my_openagent_package_dir"
+    printf 'oh_my_openagent_version: %s\n' "$oh_my_openagent_version"
+    printf 'oh_my_openagent_wake_patch: %s\n' "$oh_my_openagent_wake_patch"
+    printf 'oh_my_openagent_guidance: %s\n' "$oh_my_openagent_guidance"
     printf 'binary_ok: %s\n' "$binary_ok"
     printf 'binary: %s\n' "${SELECTED_LLAMA_SERVER_BIN:-}"
     printf 'binary_source: %s\n' "${SELECTED_LLAMA_SERVER_SOURCE:-none}"

@@ -85,3 +85,18 @@ Current checklist:
 - [x] Offer to fetch the upstream oh-my-openagent installation guide when the local agent config is missing.
 - [x] Install oh-my-openagent from the wizard when missing, using `bunx` when available and `npx` as fallback.
 - [x] Add portability coverage for the new installer wizard surface.
+
+## oh-my-openagent Wake-Up Fix Verification
+
+Current checklist:
+- [x] Inspect deployed oh-my-openagent package and confirm whether the local prompt wake-up patch is present.
+- [x] Compare the local patch against current upstream repository behavior.
+- [x] Check whether additional LMM-side fixes or install guidance are required.
+- [x] Document verification result and remaining test gap.
+
+Review:
+- Deployed oh-my-openagent 3.17.13 has the local wake-up hot patch: `notifyParentSession` calls `client.session.prompt(...)` in `dist/index.js`.
+- Upstream dev at `dc69383b2d2fb927735734ecc1bfdaa82b35e002` still shows `promptAsync(...)` in `src/features/background-agent/manager.ts`, despite a hook comment saying direct `session.prompt({ noReply })` delivery is intended.
+- Added `llama-model doctor` diagnostics for installed oh-my-openagent package path, version, and wake-patch status so reinstall/update drift is visible.
+- Deployed the updated CLI to `/home/angelo/.local/bin/llama-model`; installed doctor now reports `oh_my_openagent_wake_patch: yes`.
+- Remaining runtime test gap: opencode still needs a restart and a real background sub-agent completion to prove parent wake-up end-to-end in the live TUI.
