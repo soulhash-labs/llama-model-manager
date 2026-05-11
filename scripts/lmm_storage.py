@@ -4,6 +4,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -12,6 +13,14 @@ from typing import Any, Protocol
 
 def _utc_timestamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _next_duplicate_count(record: dict[str, Any]) -> int:
+    try:
+        current = int(record.get("duplicate_count", 1) or 1)
+    except (TypeError, ValueError):
+        current = 1
+    return max(1, current) + 1
 
 
 class _FileLockedJsonStore:
@@ -25,9 +34,16 @@ class _FileLockedJsonStore:
             return dict(default_state)
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except Exception:
+        except (OSError, TypeError, json.JSONDecodeError) as exc:
+            sys.stderr.write(f"warning: failed to read JSON store {self.path}: {exc}; using default state\n")
             return dict(default_state)
-        return payload if isinstance(payload, dict) else dict(default_state)
+        if not isinstance(payload, dict):
+            sys.stderr.write(
+                f"warning: JSON store {self.path} contained {type(payload).__name__}, expected object; "
+                "using default state\n"
+            )
+            return dict(default_state)
+        return payload
 
     def _write_state(self, payload: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -71,15 +87,22 @@ class JsonGatewayTelemetryStore(_FileLockedJsonStore):
             counters = state.get("counters")
             if not isinstance(counters, dict):
                 counters = {}
-            for key in ("mode", "route_target", "context_status", "success"):
-                value = str(record.get(key, "unknown"))
-                counter_key = f"{key}:{value}"
-                counters[counter_key] = int(counters.get(counter_key, 0)) + 1
 
             recent = state.get("recent_requests")
             if not isinstance(recent, list):
                 recent = []
-            recent.insert(0, record)
+            record = dict(record)
+            fingerprint = str(record.get("request_fingerprint", "")).strip()
+            existing = recent[0] if recent and isinstance(recent[0], dict) else None
+            if fingerprint and existing is not None and str(existing.get("request_fingerprint", "")) == fingerprint:
+                record["duplicate_count"] = _next_duplicate_count(existing)
+                recent[0] = record
+            else:
+                for key in ("mode", "route_target", "context_status", "success"):
+                    value = str(record.get(key, "unknown"))
+                    counter_key = f"{key}:{value}"
+                    counters[counter_key] = int(counters.get(counter_key, 0)) + 1
+                recent.insert(0, record)
             del recent[self.recent_limit:]
 
             state["counters"] = counters
@@ -107,7 +130,13 @@ class JsonRunRecordStore(_FileLockedJsonStore):
             if not isinstance(records, list):
                 records = []
             records = [entry for entry in records if isinstance(entry, dict)]
-            records.insert(0, record)
+            record = dict(record)
+            fingerprint = str(record.get("request_fingerprint", "")).strip()
+            if fingerprint and records and str(records[0].get("request_fingerprint", "")) == fingerprint:
+                record["duplicate_count"] = _next_duplicate_count(records[0])
+                records[0] = record
+            else:
+                records.insert(0, record)
             del records[self.recent_limit:]
 
             state["schema_version"] = 1

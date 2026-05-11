@@ -111,13 +111,44 @@ def _csv_items(value: str) -> list[str]:
 
 
 def _merge_fallback_list(value: Any, fallback_model: str) -> list[str]:
+    _VALID_PROVIDER_PREFIXES = {"llamacpp", "llamacpp_fast"}
     result: list[str] = [fallback_model]
     if isinstance(value, list):
         for item in value:
             item_str = str(item).strip()
             if item_str and item_str != fallback_model:
-                result.append(item_str)
+                # Only preserve entries with known provider prefixes;
+                # stale prefixes (e.g. old "glyphos/..." names) are dropped.
+                provider = item_str.split("/", 1)[0] if "/" in item_str else ""
+                if provider in _VALID_PROVIDER_PREFIXES:
+                    result.append(item_str)
     return result
+
+
+def _merge_agent_fallbacks(agent: dict[str, Any], fallback_model: str) -> list[str]:
+    merged = _merge_fallback_list(agent.get("fallback_models"), fallback_model)
+    for item in _merge_fallback_list(agent.get("fallback"), fallback_model):
+        if item not in merged:
+            merged.append(item)
+    return merged
+
+
+def _assert_openagent_provider_names(full_provider_name: str, fast_provider_name: str) -> None:
+    expected = {"llamacpp", "llamacpp_fast"}
+    actual = {full_provider_name, fast_provider_name}
+    stale = sorted(name for name in actual if name in {"glyphos", "glyphos-fast"})
+    if stale:
+        joined = ", ".join(stale)
+        raise SystemExit(
+            f"stale oh-my-openagent provider prefix requested: {joined}; "
+            "use llamacpp for the full lane and llamacpp_fast for the fast lane"
+        )
+    if not actual.issubset(expected):
+        joined = ", ".join(sorted(actual - expected))
+        raise SystemExit(
+            f"unsupported oh-my-openagent provider prefix requested: {joined}; "
+            "LMM manages oh-my-openagent with llamacpp/ and llamacpp_fast/ model ids"
+        )
 
 
 # Lane defaults: agents that benefit from full GlyphOS vs fast lane
@@ -299,6 +330,7 @@ def sync_oh_my_openagent(args: argparse.Namespace) -> None:
     model_name = str(args.model_name).strip()
     full_provider_name = str(args.full_provider_name or "llamacpp").strip() or "llamacpp"
     fast_provider_name = str(args.fast_provider_name or "llamacpp_fast").strip() or "llamacpp_fast"
+    _assert_openagent_provider_names(full_provider_name, fast_provider_name)
     full_model = f"{full_provider_name}/{model_name}"
     fast_model = f"{fast_provider_name}/{model_name}"
     available_models = _parse_model_catalog(str(args.available_models or ""))
@@ -320,13 +352,13 @@ def sync_oh_my_openagent(args: argparse.Namespace) -> None:
             continue
         if name in FULL_LANE_AGENTS:
             agent["model"] = full_model
-            agent["fallback_models"] = _merge_fallback_list(agent.get("fallback_models"), fast_model)
+            agent["fallback_models"] = _merge_agent_fallbacks(agent, fast_model)
         elif name in FAST_LANE_AGENTS:
             agent["model"] = fast_model
-            agent["fallback_models"] = _merge_fallback_list(agent.get("fallback_models"), full_model)
+            agent["fallback_models"] = _merge_agent_fallbacks(agent, full_model)
         else:
             agent["model"] = fast_model
-            agent["fallback_models"] = _merge_fallback_list(agent.get("fallback_models"), full_model)
+            agent["fallback_models"] = _merge_agent_fallbacks(agent, full_model)
         # Remove legacy singular fallback key
         agent.pop("fallback", None)
         updated_agents.append(name)
@@ -355,12 +387,14 @@ def sync_oh_my_openagent(args: argparse.Namespace) -> None:
     diagnostics = config.get("llamaModelManager")
     if not isinstance(diagnostics, dict):
         diagnostics = {}
+    config["auto_update"] = False
     diagnostics["openagentSync"] = {
         "fastModel": fast_model,
         "fullFallbackModel": full_model,
         "updatedAgents": updated_agents,
         "requestedAgents": requested_agents,
         "updatedCategories": updated_categories,
+        "autoUpdatePinned": True,
         "modelCatalogValidated": bool(available_models),
         "modelCatalogMissing": missing_models,
     }
@@ -486,9 +520,12 @@ def main() -> int:
     oma.add_argument("--fast-provider-name", default="llamacpp_fast")
     oma.add_argument(
         "--agents",
-        default="sisyphus,prometheus,metis,atlas,sisyphus-junior",
+        default="sisyphus,prometheus,hephaestus,atlas,metis,momus,oracle,librarian,explore,multimodal-looker,sisyphus-junior",
     )
-    oma.add_argument("--categories", default="")
+    oma.add_argument(
+        "--categories",
+        default="ultrabrain,deep,unspecified-high,quick,visual-engineering,writing,artistry,unspecified-low",
+    )
     oma.add_argument("--available-models", default="")
     oma.set_defaults(func=sync_oh_my_openagent)
 

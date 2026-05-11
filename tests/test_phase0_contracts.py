@@ -41,6 +41,7 @@ LMM_PROVIDERS_PATH = ROOT_DIR / "scripts" / "lmm_providers.py"
 LMM_NOTIFICATIONS_PATH = ROOT_DIR / "scripts" / "lmm_notifications.py"
 LMM_UPDATES_PATH = ROOT_DIR / "scripts" / "lmm_updates.py"
 INTEGRATION_SYNC_PATH = ROOT_DIR / "scripts" / "integration_sync.py"
+GATEWAY_HTTP_UTILS_PATH = ROOT_DIR / "scripts" / "gateway" / "http_utils.py"
 
 
 class Phase0ContractTests(unittest.TestCase):
@@ -82,6 +83,9 @@ class Phase0ContractTests(unittest.TestCase):
 
     def load_providers_module(self) -> object:
         return self.load_script_module("llama_model_manager_providers", LMM_PROVIDERS_PATH)
+
+    def load_gateway_http_utils_module(self) -> object:
+        return self.load_script_module("llama_model_manager_gateway_http_utils", GATEWAY_HTTP_UTILS_PATH)
 
     def load_integration_sync_module(self) -> object:
         return self.load_script_module("llama_model_manager_integration_sync", INTEGRATION_SYNC_PATH)
@@ -177,6 +181,81 @@ class Phase0ContractTests(unittest.TestCase):
         self.assertEqual(state["counters"]["success:True"], 2)
         self.assertEqual(state["counters"]["success:False"], 1)
 
+    def test_json_gateway_storage_adapter_logs_malformed_state_recovery(self) -> None:
+        storage_module = self.load_script_module("llama_model_manager_storage_malformed", LMM_STORAGE_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "gateway-state.json"
+            path.write_text("{not valid json", encoding="utf-8")
+            store = storage_module.JsonGatewayTelemetryStore(path, recent_limit=2)
+            stderr = io.StringIO()
+
+            with mock.patch("sys.stderr", stderr):
+                state = store.read_state()
+
+        self.assertEqual(state, {"recent_requests": [], "counters": {}})
+        self.assertIn("failed to read JSON store", stderr.getvalue())
+        self.assertIn("gateway-state.json", stderr.getvalue())
+
+    def test_json_gateway_storage_adapter_logs_non_object_state_recovery(self) -> None:
+        storage_module = self.load_script_module("llama_model_manager_storage_non_object", LMM_STORAGE_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "gateway-state.json"
+            path.write_text("[]", encoding="utf-8")
+            store = storage_module.JsonGatewayTelemetryStore(path, recent_limit=2)
+            stderr = io.StringIO()
+
+            with mock.patch("sys.stderr", stderr):
+                state = store.read_state()
+
+        self.assertEqual(state, {"recent_requests": [], "counters": {}})
+        self.assertIn("expected object", stderr.getvalue())
+
+    def test_json_gateway_storage_adapter_dedupes_consecutive_request_fingerprint(self) -> None:
+        storage_module = self.load_script_module("llama_model_manager_storage_gateway_dedupe", LMM_STORAGE_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "gateway-state.json"
+            store = storage_module.JsonGatewayTelemetryStore(path, recent_limit=5)
+            store.append_event(
+                {
+                    "request_fingerprint": "same-request",
+                    "mode": "routed-basic",
+                    "route_target": "llamacpp",
+                    "context_status": "empty",
+                    "success": True,
+                    "n": 1,
+                }
+            )
+            state = store.append_event(
+                {
+                    "request_fingerprint": "same-request",
+                    "mode": "routed-basic",
+                    "route_target": "llamacpp",
+                    "context_status": "empty",
+                    "success": True,
+                    "n": 2,
+                }
+            )
+
+            self.assertEqual(len(state["recent_requests"]), 1)
+            self.assertEqual(state["recent_requests"][0]["n"], 2)
+            self.assertEqual(state["recent_requests"][0]["duplicate_count"], 2)
+            self.assertEqual(state["counters"]["mode:routed-basic"], 1)
+            self.assertEqual(state["counters"]["success:True"], 1)
+
+            state = store.append_event(
+                {
+                    "request_fingerprint": "different-request",
+                    "mode": "routed-full",
+                    "route_target": "llamacpp",
+                    "context_status": "retrieved",
+                    "success": True,
+                    "n": 3,
+                }
+            )
+
+        self.assertEqual([item["n"] for item in state["recent_requests"]], [3, 2])
+        self.assertEqual(state["counters"]["mode:routed-full"], 1)
+
     def test_run_record_round_trips_to_dict(self) -> None:
         types_module = self.load_script_module("llama_model_manager_types_round_trip", LMM_TYPES_PATH)
         run_record = types_module.RunRecord(
@@ -197,12 +276,28 @@ class Phase0ContractTests(unittest.TestCase):
             exit_result=None,
             duration_ms=None,
             error_message=None,
+            request_fingerprint="fingerprint-123",
+            tool_invocation_mode="textual_pseudo_call",
+            tool_name="task",
+            lane="4011",
+            repair_attempted=True,
+            repair_succeeded=True,
+            stream_tool_call_detected=True,
+            stream_tool_call_name="task",
         )
 
         payload = run_record.to_dict()
         restored = types_module.RunRecord.from_dict(payload)
 
         self.assertEqual(payload["status"], types_module.RunStatus.PENDING.value)
+        self.assertEqual(payload["request_fingerprint"], "fingerprint-123")
+        self.assertEqual(payload["tool_invocation_mode"], "textual_pseudo_call")
+        self.assertEqual(payload["tool_name"], "task")
+        self.assertEqual(payload["lane"], "4011")
+        self.assertTrue(payload["repair_attempted"])
+        self.assertTrue(payload["repair_succeeded"])
+        self.assertTrue(payload["stream_tool_call_detected"])
+        self.assertEqual(payload["stream_tool_call_name"], "task")
         self.assertEqual(restored.to_dict(), payload)
 
     def test_run_record_truncates_long_prompt(self) -> None:
@@ -476,6 +571,44 @@ class Phase0ContractTests(unittest.TestCase):
             self.assertEqual(len(store.list_recent(limit=10)), 3)
             recent = store.list_recent()
             self.assertEqual([record["id"] for record in recent], ["record-4", "record-3", "record-2"])
+
+    def test_json_run_record_store_dedupes_consecutive_request_fingerprint(self) -> None:
+        storage_module = self.load_script_module("llama_model_manager_storage_run_dedupe", LMM_STORAGE_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "run-records.json"
+            store = storage_module.JsonRunRecordStore(path, recent_limit=5)
+            store.append_record(
+                {
+                    "id": "run-1",
+                    "status": "running",
+                    "model": "model.gguf",
+                    "request_fingerprint": "same-request",
+                }
+            )
+            records = store.append_record(
+                {
+                    "id": "run-2",
+                    "status": "completed",
+                    "model": "model.gguf",
+                    "request_fingerprint": "same-request",
+                }
+            )
+
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["id"], "run-2")
+            self.assertEqual(records[0]["status"], "completed")
+            self.assertEqual(records[0]["duplicate_count"], 2)
+
+            records = store.append_record(
+                {
+                    "id": "run-3",
+                    "status": "completed",
+                    "model": "other-model.gguf",
+                    "request_fingerprint": "different-request",
+                }
+            )
+
+        self.assertEqual([record["id"] for record in records], ["run-3", "run-2"])
 
     def test_json_run_record_store_filters_by_status(self) -> None:
         storage_module = self.load_script_module("llama_model_manager_storage_run_filter", LMM_STORAGE_PATH)
@@ -2721,6 +2854,59 @@ class Phase0ContractTests(unittest.TestCase):
         self.assertEqual(message["tool_calls"][0]["function"]["name"], "get_weather")
         self.assertEqual(json.loads(message["tool_calls"][0]["function"]["arguments"]), {"city": "Paris"})
 
+    def test_gateway_chat_completion_repairs_textual_task_pseudo_call(self) -> None:
+        task_text = (
+            'task(subagent_type="explore", run_in_background=true, load_skills=[], '
+            'description="E2E task harness smoke test", prompt="Reply with exactly E2E_OK.")'
+        )
+
+        def fake_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str]]:
+            return {
+                "text": task_text,
+                "target": "llamacpp_fast",
+                "reason_code": "default_local",
+                "reason": "default - use fast local llama.cpp",
+                "latency_ms": 7,
+            }, {"X-LMM-Route-Mode": "routed"}
+
+        gateway = self.load_gateway_module()
+        with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+            server = self.start_gateway_server(gateway_module=gateway)
+            body = self.post_json(
+                f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                {
+                    "model": "tool-model",
+                    "messages": [{"role": "user", "content": "invoke task"}],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "task",
+                                "parameters": {"type": "object"},
+                            },
+                        }
+                    ],
+                },
+            )
+
+        choice = body["choices"][0]
+        message = choice["message"]
+        self.assertIsNone(message["content"])
+        self.assertEqual(choice["finish_reason"], "tool_calls")
+        self.assertEqual(message["tool_calls"][0]["function"]["name"], "task")
+        self.assertEqual(
+            json.loads(message["tool_calls"][0]["function"]["arguments"]),
+            {
+                "subagent_type": "explore",
+                "run_in_background": True,
+                "load_skills": [],
+                "description": "E2E task harness smoke test",
+                "prompt": "Reply with exactly E2E_OK.",
+            },
+        )
+
     def test_gateway_context_payload_is_glyph_encoded_before_routing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = Path(tmpdir) / "gateway-state.json"
@@ -3038,24 +3224,14 @@ import json
 import sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            sys.exit(0)
-        line = line.decode().strip()
-        if not line:
-            break
-        if ":" in line:
-            key, value = line.split(":", 1)
-            headers[key.lower()] = value.strip()
-    raw = sys.stdin.buffer.read(int(headers.get("content-length", "0")))
-    return json.loads(raw)
+    line = sys.stdin.readline()
+    if not line:
+        sys.exit(0)
+    return json.loads(line)
 
 def send(payload):
-    raw = json.dumps(payload, separators=(",", ":")).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(raw)}\\r\\n\\r\\n".encode() + raw)
-    sys.stdout.buffer.flush()
+    sys.stdout.write(json.dumps(payload, separators=(",", ":")) + "\\n")
+    sys.stdout.flush()
 
 while True:
     message = read_message()
@@ -3079,6 +3255,50 @@ while True:
         self.assertEqual(status, 0)
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["context"]["items"][0]["snippet"], "bridge context")
+
+    def test_context_mcp_bridge_reports_missing_stdin_pipe(self) -> None:
+        bridge = self.load_context_bridge_module()
+        proc = types.SimpleNamespace(stdin=None)
+
+        with self.assertRaises(RuntimeError) as raised:
+            bridge.send_message(proc, {"jsonrpc": "2.0"})
+
+        self.assertIn("stdin pipe is unavailable", str(raised.exception))
+
+    def test_context_mcp_bridge_reports_malformed_stdout_json(self) -> None:
+        bridge = self.load_context_bridge_module()
+        proc = types.SimpleNamespace(stdout=io.StringIO("not-json\n"))
+
+        with mock.patch.object(bridge.select, "select", return_value=([proc.stdout], [], [])):
+            with self.assertRaises(RuntimeError) as raised:
+                bridge.read_message(proc)
+
+        self.assertIn("malformed JSON", str(raised.exception))
+
+    def test_context_mcp_bridge_reports_malformed_stdin_json(self) -> None:
+        bridge = self.load_context_bridge_module()
+
+        with mock.patch("sys.stdin", io.StringIO("{not-json}")):
+            with self.assertRaises(RuntimeError) as raised:
+                bridge.read_stdin_json()
+
+        self.assertIn("stdin JSON malformed", str(raised.exception))
+
+    def test_gateway_http_json_preserves_malformed_error_body(self) -> None:
+        http_utils = self.load_gateway_http_utils_module()
+        http_error = error.HTTPError(
+            url="http://127.0.0.1:1/v1/test",
+            code=503,
+            msg="unavailable",
+            hdrs={},
+            fp=io.BytesIO(b"not-json"),
+        )
+
+        with mock.patch.object(http_utils.urlrequest, "urlopen", side_effect=http_error):
+            status, body = http_utils.http_json("GET", "http://127.0.0.1:1/v1/test")
+
+        self.assertEqual(status, 503)
+        self.assertEqual(body, {"error": "not-json"})
 
     def test_gateway_telemetry_redacts_raw_request_messages(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3104,7 +3324,11 @@ while True:
                         {
                             "model": "privacy-model",
                             "messages": [{"role": "user", "content": "SECRET_TOKEN_SHOULD_NOT_PERSIST"}],
-                            "metadata": {"workspace": "/private/workspace", "session": "secret-session"},
+                            "metadata": {
+                                "workspace": "/private/workspace",
+                                "session": "secret-session",
+                                "command_substitution": "$(SECRET_COMMAND_SUBSTITUTION)",
+                            },
                         },
                     )
 
@@ -3115,6 +3339,8 @@ while True:
             self.assertNotIn("SECRET_TOKEN_SHOULD_NOT_PERSIST", telemetry_text)
             self.assertNotIn("/private/workspace", telemetry_text)
             self.assertNotIn("secret-session", telemetry_text)
+            self.assertNotIn("command_substitution", telemetry_text)
+            self.assertNotIn("SECRET_COMMAND_SUBSTITUTION", telemetry_text)
             self.assertEqual(request["messages"]["count"], 1)
             self.assertEqual(request["messages"]["roles"]["user"], 1)
             self.assertNotIn("content_hash", json.dumps(request))
@@ -3306,6 +3532,79 @@ while True:
         self.assertEqual(captured["max_tokens"], 42)
         self.assertEqual(captured["temperature"], 0.1)
 
+    def test_gateway_chat_completion_stream_records_pseudo_tool_repair(self) -> None:
+        task_text = (
+            'task(subagent_type="explore", run_in_background=true, load_skills=[], '
+            'description="E2E task harness smoke test", prompt="Reply with exactly E2E_OK.")'
+        )
+
+        def fake_stream_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str], object]:
+            return (
+                {
+                    "target": "llamacpp_fast",
+                    "reason_code": "default_local",
+                    "reason": "default - use fast local llama.cpp",
+                },
+                {"X-LMM-Route-Mode": "routed"},
+                iter([task_text]),
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gateway = self.load_gateway_module()
+            run_records = Path(tmpdir) / "run-records.json"
+            gateway_state = Path(tmpdir) / "gateway-state.json"
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LMM_RUN_RECORDS_FILE": str(run_records),
+                    "LMM_GATEWAY_STATE_FILE": str(gateway_state),
+                },
+                clear=False,
+            ):
+                with mock.patch.object(gateway, "route_prompt_stream", side_effect=fake_stream_route):
+                    server = self.start_gateway_server(gateway_module=gateway)
+                    payload = {
+                        "model": "stream-tool-model",
+                        "messages": [{"role": "user", "content": "invoke task"}],
+                        "stream": True,
+                        "tools": [
+                            {
+                                "type": "function",
+                                "function": {
+                                    "name": "task",
+                                    "parameters": {"type": "object"},
+                                },
+                            }
+                        ],
+                    }
+                    req = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+
+                    with urllib.request.urlopen(req, timeout=5) as response:
+                        raw = response.read().decode("utf-8")
+
+            run_state = json.loads(run_records.read_text(encoding="utf-8"))
+            telemetry = json.loads(gateway_state.read_text(encoding="utf-8"))
+            record = run_state["records"][0]
+            recent = telemetry["recent_requests"][0]
+
+        self.assertIn('"finish_reason": "tool_calls"', raw)
+        self.assertEqual(record["tool_invocation_mode"], "textual_pseudo_call")
+        self.assertEqual(record["tool_name"], "task")
+        self.assertTrue(record["repair_attempted"])
+        self.assertTrue(record["repair_succeeded"])
+        self.assertTrue(record["stream_tool_call_detected"])
+        self.assertEqual(record["stream_tool_call_name"], "task")
+        self.assertEqual(recent["tool_invocation_mode"], "textual_pseudo_call")
+        self.assertTrue(recent["repair_attempted"])
+        self.assertTrue(recent["repair_succeeded"])
+
     def test_gateway_anthropic_messages_supports_sse_streaming(self) -> None:
         captured: dict[str, object] = {}
 
@@ -3369,6 +3668,71 @@ while True:
         self.assertEqual(captured["model"], "claude-harness-model")
         self.assertEqual(captured["max_tokens"], 33)
         self.assertEqual(captured["temperature"], 0.2)
+
+    def test_gateway_anthropic_stream_records_pseudo_tool_repair(self) -> None:
+        tool_text = (
+            'tool_use: {"type":"tool_use","id":"toolu_lookup_1","name":"lookup_ticket",'
+            '"input":{"ticket_id":"OPS-7"}}'
+        )
+
+        def fake_stream_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str], object]:
+            return (
+                {
+                    "target": "llamacpp",
+                    "reason_code": "default_local",
+                    "reason": "default - use local llama.cpp",
+                },
+                {"X-LMM-Route-Mode": "routed"},
+                iter([tool_text]),
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gateway = self.load_gateway_module()
+            run_records = Path(tmpdir) / "run-records.json"
+            gateway_state = Path(tmpdir) / "gateway-state.json"
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LMM_RUN_RECORDS_FILE": str(run_records),
+                    "LMM_GATEWAY_STATE_FILE": str(gateway_state),
+                },
+                clear=False,
+            ):
+                with mock.patch.object(gateway, "route_prompt_stream", side_effect=fake_stream_route):
+                    server = self.start_gateway_server(gateway_module=gateway)
+                    payload = {
+                        "model": "claude-tool-model",
+                        "messages": [{"role": "user", "content": "ticket"}],
+                        "stream": True,
+                        "tools": [{"name": "lookup_ticket", "input_schema": {"type": "object"}}],
+                    }
+                    req = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/v1/messages",
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+
+                    with urllib.request.urlopen(req, timeout=5) as response:
+                        raw = response.read().decode("utf-8")
+
+            run_state = json.loads(run_records.read_text(encoding="utf-8"))
+            telemetry = json.loads(gateway_state.read_text(encoding="utf-8"))
+            record = run_state["records"][0]
+            recent = telemetry["recent_requests"][0]
+
+        self.assertIn('"stop_reason":"tool_use"', raw)
+        self.assertEqual(record["tool_invocation_mode"], "textual_pseudo_call")
+        self.assertEqual(record["tool_name"], "lookup_ticket")
+        self.assertTrue(record["repair_attempted"])
+        self.assertTrue(record["repair_succeeded"])
+        self.assertTrue(record["stream_tool_call_detected"])
+        self.assertEqual(record["stream_tool_call_name"], "lookup_ticket")
+        self.assertEqual(recent["tool_invocation_mode"], "textual_pseudo_call")
+        self.assertTrue(recent["repair_attempted"])
+        self.assertTrue(recent["repair_succeeded"])
 
     def test_gateway_anthropic_messages_threads_tool_contract_into_prompt(self) -> None:
         captured: dict[str, object] = {}
@@ -3489,7 +3853,7 @@ while True:
             events.append("first_content_requested")
             yield "late content"
 
-        text, success, error_message, _latency_ms = gateway.stream_completion(
+        text, success, error_message, _latency_ms, _tool_info = gateway.stream_completion(
             FakeHandler(),
             started=time.time(),
             model="stream-order-model",
@@ -3533,7 +3897,7 @@ while True:
             time.sleep(0.04)
             yield "eventual content"
 
-        text, success, error_message, _latency_ms = gateway.stream_completion(
+        text, success, error_message, _latency_ms, _tool_info = gateway.stream_completion(
             FakeHandler(),
             started=time.time(),
             model="heartbeat-model",
@@ -3642,7 +4006,7 @@ while True:
             def end_headers(self) -> None:
                 return None
 
-        text, success, error_message, latency_ms = gateway.stream_completion(
+        text, success, error_message, latency_ms, _tool_info = gateway.stream_completion(
             FakeHandler(),
             started=time.time(),
             model="disconnect-model",
@@ -4103,6 +4467,52 @@ while True:
             self.assertEqual(records[0]["provider"], "llamacpp")
             self.assertIsInstance(records[0]["duration_ms"], int)
 
+    def test_gateway_dedupes_identical_request_records(self) -> None:
+        route_calls: list[str] = []
+
+        def fake_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str]]:
+            route_calls.append(prompt)
+            return {
+                "text": "response text",
+                "target": "llamacpp",
+                "reason_code": "default_local",
+                "reason": "default route",
+                "latency_ms": 9,
+            }, {"X-LMM-Route-Mode": "routed"}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gateway = self.load_gateway_module()
+            run_records = Path(tmpdir) / "run-records.json"
+            gateway_state = Path(tmpdir) / "gateway-state.json"
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "LMM_RUN_RECORDS_FILE": str(run_records),
+                    "LMM_GATEWAY_STATE_FILE": str(gateway_state),
+                },
+                clear=False,
+            ):
+                with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+                    server = self.start_gateway_server(gateway_module=gateway)
+                    payload = {"model": "run-record-model", "messages": [{"role": "user", "content": "hello"}]}
+                    _ = self.post_json(f"http://127.0.0.1:{server.server_port}/v1/chat/completions", payload)
+                    _ = self.post_json(f"http://127.0.0.1:{server.server_port}/v1/chat/completions", payload)
+
+            run_state = json.loads(run_records.read_text(encoding="utf-8"))
+            records = run_state.get("records", [])
+            telemetry = json.loads(gateway_state.read_text(encoding="utf-8"))
+            recent_requests = telemetry.get("recent_requests", [])
+
+        self.assertEqual(len(route_calls), 2)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["duplicate_count"], 2)
+        self.assertTrue(records[0]["request_fingerprint"])
+        self.assertEqual(len(recent_requests), 1)
+        self.assertEqual(recent_requests[0]["duplicate_count"], 2)
+        self.assertEqual(recent_requests[0]["request_fingerprint"], records[0]["request_fingerprint"])
+
     def test_gateway_emits_run_record_on_failure(self) -> None:
         def fake_route(
             prompt: str, model: str, max_tokens: int, temperature: float
@@ -4122,12 +4532,15 @@ while True:
             ):
                 with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
                     server = self.start_gateway_server(gateway_module=gateway)
-                    status, body = self.post_json_raw(
-                        f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
-                        {"model": "run-record-model", "messages": [{"role": "user", "content": "hello"}]},
-                    )
+                    stderr = io.StringIO()
+                    with mock.patch("sys.stderr", stderr):
+                        status, body = self.post_json_raw(
+                            f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                            {"model": "run-record-model", "messages": [{"role": "user", "content": "hello"}]},
+                        )
                     self.assertEqual(status, HTTPStatus.SERVICE_UNAVAILABLE)
                     self.assertEqual(body["error"]["type"], "lmm_gateway_error")
+                    self.assertIn("unexpected OpenAI gateway handler failure", stderr.getvalue())
 
             state = json.loads(run_records.read_text(encoding="utf-8"))
             records = state.get("records", [])
@@ -4363,16 +4776,16 @@ while True:
 
         missing = integration_sync._validate_opencode_model_catalog(
             model_name="Qwen.gguf",
-            provider_model_ids=["llamacpp/Qwen.gguf", "glyphos/Qwen.gguf", "glyphos-fast/Qwen.gguf"],
+            provider_model_ids=["llamacpp/Qwen.gguf", "llamacpp_fast/Qwen.gguf"],
             available_models={"llamacpp/Other.gguf"},
         )
 
         self.assertEqual(
             missing,
-            ["llamacpp/Qwen.gguf", "glyphos/Qwen.gguf", "glyphos-fast/Qwen.gguf"],
+            ["llamacpp/Qwen.gguf", "llamacpp_fast/Qwen.gguf"],
         )
 
-    def test_opencode_sync_can_emit_full_and_fast_glyphos_providers(self) -> None:
+    def test_opencode_sync_can_emit_full_and_fast_llamacpp_providers(self) -> None:
         integration_sync = self.load_integration_sync_module()
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -4394,8 +4807,8 @@ while True:
                 route_mode="routed",
                 gateway_api_base="http://127.0.0.1:4010/v1",
                 fast_api_base="http://127.0.0.1:4011/v1",
-                full_provider_name="glyphos",
-                fast_provider_name="glyphos-fast",
+                full_provider_name="llamacpp",
+                fast_provider_name="llamacpp_fast",
                 available_models="",
             )
 
@@ -4404,13 +4817,13 @@ while True:
             config = json.loads(config_path.read_text(encoding="utf-8"))
             state = json.loads(state_path.read_text(encoding="utf-8"))
 
-        self.assertEqual(config["provider"]["glyphos"]["options"]["baseURL"], "http://127.0.0.1:4010/v1")
-        self.assertEqual(config["provider"]["glyphos-fast"]["options"]["baseURL"], "http://127.0.0.1:4011/v1")
+        self.assertEqual(config["provider"]["llamacpp"]["options"]["baseURL"], "http://127.0.0.1:4010/v1")
+        self.assertEqual(config["provider"]["llamacpp_fast"]["options"]["baseURL"], "http://127.0.0.1:4011/v1")
         self.assertEqual(
-            state["llamaModelManager"]["opencodeSync"]["glyphosProviders"]["fast"], "glyphos-fast/Qwen.gguf"
+            state["llamaModelManager"]["opencodeSync"]["glyphosProviders"]["fast"], "llamacpp_fast/Qwen.gguf"
         )
 
-    def test_oh_my_openagent_sync_prefers_fast_glyphos_with_full_fallback(self) -> None:
+    def test_oh_my_openagent_sync_prefers_lane_specific_llamacpp_models_and_pins_update(self) -> None:
         integration_sync = self.load_integration_sync_module()
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "oh-my-openagent.json"
@@ -4419,7 +4832,10 @@ while True:
                     {
                         "agents": {
                             "sisyphus": {"model": "old/model"},
-                            "prometheus": {"model": "old/model", "fallback": ["legacy/model"]},
+                            "prometheus": {
+                                "model": "old/model",
+                                "fallback": ["llamacpp/legacy.gguf", "legacy/model"],
+                            },
                             "oracle": {"model": "keep/model"},
                         },
                         "categories": {
@@ -4434,30 +4850,57 @@ while True:
             args = types.SimpleNamespace(
                 config_file=str(config_path),
                 model_name="Qwen.gguf",
-                full_provider_name="glyphos",
-                fast_provider_name="glyphos-fast",
+                full_provider_name="llamacpp",
+                fast_provider_name="llamacpp_fast",
                 agents="sisyphus,prometheus,missing",
                 categories="coding,review,missing",
-                available_models="glyphos-fast/Qwen.gguf,glyphos/Qwen.gguf",
+                available_models="llamacpp_fast/Qwen.gguf,llamacpp/Qwen.gguf",
             )
 
             integration_sync.sync_oh_my_openagent(args)
 
             config = json.loads(config_path.read_text(encoding="utf-8"))
 
-        self.assertEqual(config["agents"]["sisyphus"]["model"], "glyphos-fast/Qwen.gguf")
-        self.assertEqual(config["agents"]["sisyphus"]["fallback"], "glyphos/Qwen.gguf")
-        self.assertEqual(config["agents"]["prometheus"]["model"], "glyphos-fast/Qwen.gguf")
-        self.assertEqual(config["agents"]["prometheus"]["fallback"], ["glyphos/Qwen.gguf", "legacy/model"])
+        self.assertEqual(config["agents"]["sisyphus"]["model"], "llamacpp/Qwen.gguf")
+        self.assertEqual(config["agents"]["sisyphus"]["fallback_models"], ["llamacpp_fast/Qwen.gguf"])
+        self.assertNotIn("fallback", config["agents"]["sisyphus"])
+        self.assertEqual(config["agents"]["prometheus"]["model"], "llamacpp/Qwen.gguf")
+        self.assertEqual(
+            config["agents"]["prometheus"]["fallback_models"],
+            ["llamacpp_fast/Qwen.gguf", "llamacpp/legacy.gguf"],
+        )
         self.assertEqual(config["agents"]["oracle"]["model"], "keep/model")
-        self.assertEqual(config["categories"]["coding"]["model"], "glyphos-fast/Qwen.gguf")
-        self.assertEqual(config["categories"]["coding"]["fallback"], "glyphos/Qwen.gguf")
-        self.assertEqual(config["categories"]["review"], "glyphos-fast/Qwen.gguf")
+        self.assertEqual(config["categories"]["coding"]["model"], "llamacpp_fast/Qwen.gguf")
+        self.assertEqual(config["categories"]["coding"]["fallback_models"], ["llamacpp/Qwen.gguf"])
+        self.assertNotIn("fallback", config["categories"]["coding"])
+        self.assertEqual(config["categories"]["review"], "llamacpp_fast/Qwen.gguf")
+        self.assertFalse(config["auto_update"])
         diagnostics = config["llamaModelManager"]["openagentSync"]
         self.assertEqual(diagnostics["updatedAgents"], ["sisyphus", "prometheus"])
         self.assertEqual(diagnostics["updatedCategories"], ["coding", "review"])
+        self.assertTrue(diagnostics["autoUpdatePinned"])
         self.assertTrue(diagnostics["modelCatalogValidated"])
         self.assertEqual(diagnostics["modelCatalogMissing"], [])
+
+    def test_oh_my_openagent_sync_rejects_legacy_glyphos_provider_names(self) -> None:
+        integration_sync = self.load_integration_sync_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "oh-my-openagent.json"
+            config_path.write_text("{}\n", encoding="utf-8")
+            args = types.SimpleNamespace(
+                config_file=str(config_path),
+                model_name="Qwen.gguf",
+                full_provider_name="glyphos",
+                fast_provider_name="glyphos-fast",
+                agents="sisyphus",
+                categories="quick",
+                available_models="",
+            )
+
+            with self.assertRaises(SystemExit) as exc:
+                integration_sync.sync_oh_my_openagent(args)
+
+        self.assertIn("stale oh-my-openagent provider prefix requested", str(exc.exception))
 
     def test_context_glyphos_pipeline_reports_toggle_and_readiness(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -5742,6 +6185,35 @@ while True:
             self.assertTrue(job["resume_available"])
             self.assertTrue(partial_path.exists())
 
+    def test_recover_stale_download_jobs_keeps_registered_unstarted_worker_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self.make_manager(tmpdir)
+            manager.write_json_store(
+                manager.download_jobs_file,
+                {
+                    "schema_version": 1,
+                    "updated_at": "2026-04-21T00:00:00+00:00",
+                    "items": [
+                        {
+                            "id": "handoff-running-01",
+                            "status": "running",
+                            "repo_id": "author/model",
+                            "artifact_name": "model-Q4_K_M.gguf",
+                        }
+                    ],
+                },
+            )
+            worker = threading.Thread(target=lambda: None, daemon=True)
+            manager._register_download_controls("handoff-running-01", thread=worker)
+
+            result = manager.recover_stale_download_jobs()
+
+            self.assertEqual(result["recovered"], [])
+            store = manager.read_download_jobs_store()
+            job = store["items"][0]
+            self.assertEqual(job["status"], "running")
+            self.assertIn("handoff-running-01", manager.download_threads)
+
     def test_download_recover_api_marks_orphan_running_job_resumable(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = self.make_manager(tmpdir)
@@ -5945,6 +6417,66 @@ while True:
         providers_module = self.load_providers_module()
         provider = providers_module.LlamaCppProvider(base_url="http://127.0.0.1:0/v1")
         self.assertFalse(provider.health_check(timeout=0.25))
+
+    def test_llamacpp_provider_sse_content_ignores_malformed_json(self) -> None:
+        providers_module = self.load_providers_module()
+        self.assertIsNone(providers_module._sse_content("data: {not-json}"))
+        self.assertEqual(
+            providers_module._sse_content('data: {"choices":[{"delta":{"content":"x"}}]}'),
+            "x",
+        )
+
+    def test_llamacpp_provider_stream_timeout_maps_to_provider_timeout(self) -> None:
+        providers_module = self.load_providers_module()
+
+        class TimeoutStreamResponse:
+            status = 200
+
+            def __enter__(self) -> "TimeoutStreamResponse":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def __iter__(self) -> Iterator[bytes]:
+                raise TimeoutError("stream timed out")
+
+        provider = providers_module.LlamaCppProvider(base_url="http://127.0.0.1:8081/v1", timeout=0.25)
+        with mock.patch.object(providers_module.request, "urlopen", return_value=TimeoutStreamResponse()):
+            with self.assertRaises(providers_module.ProviderTimeoutError):
+                list(provider.generate_stream("hello", model="local-model"))
+
+    def test_llamacpp_provider_generate_malformed_json_maps_to_provider_error(self) -> None:
+        providers_module = self.load_providers_module()
+
+        class MalformedJsonResponse:
+            status = 200
+
+            def __enter__(self) -> "MalformedJsonResponse":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return b"not-json"
+
+        provider = providers_module.LlamaCppProvider(base_url="http://127.0.0.1:8081/v1", timeout=0.25)
+        with mock.patch.object(providers_module.request, "urlopen", return_value=MalformedJsonResponse()):
+            with self.assertRaises(providers_module.ProviderError) as raised:
+                provider.generate("hello", model="local-model")
+
+        self.assertIn("JSON malformed", str(raised.exception))
+
+    def test_llamacpp_provider_rejects_empty_resolved_model_name(self) -> None:
+        providers_module = self.load_providers_module()
+        provider = providers_module.LlamaCppProvider(base_url="http://127.0.0.1:8081/v1", model=" ")
+
+        with mock.patch.object(provider, "_resolve_model", return_value=" "):
+            with self.assertRaises(providers_module.ProviderError) as raised:
+                provider.generate("hello")
+
+        self.assertIn("non-empty model name", str(raised.exception))
 
     def test_provider_registry_registers_and_lists_providers(self) -> None:
         providers_module = self.load_providers_module()

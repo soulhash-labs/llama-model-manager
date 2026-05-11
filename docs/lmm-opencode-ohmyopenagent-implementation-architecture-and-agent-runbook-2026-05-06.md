@@ -116,11 +116,11 @@ Run:
 llama-model sync-opencode
 ```
 
-This writes OpenCode provider entries for:
+This writes OpenCode provider entries that route into the GlyphOS lanes:
 
-- `llamacpp/<model>` for direct diagnostics
-- `glyphos/<model>` for the full `4010` lane
-- `glyphos-fast/<model>` for the fast `4011` lane
+- GlyphOS full lane on `4010`, registered as `llamacpp/<model>`
+- GlyphOS fast lane on `4011`, registered as `llamacpp_fast/<model>`
+- Raw backend diagnostics remain available separately through direct mode
 
 When the OpenCode CLI is available, sync also reads the live OpenCode model
 catalog and validates the selected local model before writing config.
@@ -148,12 +148,13 @@ also updates known oh-my-openagent agents.
 The desired result is:
 
 ```text
-primary model:  glyphos-fast/<model>
-fallback model: glyphos/<model>
+full-lane model:  llamacpp/<model>
+fast-lane model:  llamacpp_fast/<model>
 ```
 
-This gives agents the fast GlyphOS lane first, while preserving the full
-GlyphOS lane as fallback.
+This keeps oh-my-openagent aligned with the provider names that OpenCode
+actually registers while still routing traffic through the LMM/GlyphOS lanes.
+The sync also pins `auto_update: false` so local hot patches are not overwritten.
 
 To disable this automatic agent-layer sync:
 
@@ -231,12 +232,12 @@ Check for these model IDs:
 
 ```text
 llamacpp/<model>
-glyphos/<model>
-glyphos-fast/<model>
+llamacpp_fast/<model>
 ```
 
 For a working fast-lane setup, oh-my-openagent entries should point at
-`glyphos-fast/<model>` first and `glyphos/<model>` as fallback.
+`llamacpp_fast/<model>` for fast-lane agents and `llamacpp/<model>` for
+full-lane agents.
 
 ## Measure Fast Lane Latency
 
@@ -317,7 +318,7 @@ Then inspect:
 cat ~/.config/opencode/oh-my-openagent.json
 ```
 
-Known agent entries should now prefer `glyphos-fast/<model>`.
+Known fast-lane agent entries should now prefer `llamacpp_fast/<model>`.
 
 ### Gateway stream feels slow
 

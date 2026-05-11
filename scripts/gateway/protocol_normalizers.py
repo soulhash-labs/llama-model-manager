@@ -1,10 +1,42 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
+import re
 from typing import Any
 
 MAX_TOOL_CONTRACT_CHARS = 12_000
+BASH_COMMAND_PREFIXES = (
+    "awk ",
+    "cat ",
+    "cd ",
+    "chmod ",
+    "cp ",
+    "curl ",
+    "echo ",
+    "env ",
+    "find ",
+    "git ",
+    "grep ",
+    "head ",
+    "jq ",
+    "ls",
+    "mkdir ",
+    "node ",
+    "npm ",
+    "python ",
+    "python3 ",
+    "pwd",
+    "rg ",
+    "sed ",
+    "tail ",
+    "tee ",
+    "test ",
+    "touch ",
+    "wc ",
+    "xargs ",
+)
 
 
 def compact_json(value: Any) -> str:
@@ -19,11 +51,17 @@ def _bounded_json(value: Any, *, max_chars: int = MAX_TOOL_CONTRACT_CHARS) -> st
 
 
 def _content_to_text(content: Any, *, provider: str) -> str:
+    if content is None:
+        return ""
     if isinstance(content, list):
         parts: list[str] = []
         for part in content:
+            if part is None:
+                continue
             if isinstance(part, dict) and part.get("type") in {"text", "input_text"}:
-                parts.append(str(part.get("text", "")))
+                text = part.get("text")
+                if text is not None:
+                    parts.append(str(text))
             elif provider == "anthropic" and isinstance(part, dict) and part.get("type") == "tool_result":
                 tool_id = str(part.get("tool_use_id", "")).strip()
                 tool_content = part.get("content", "")
@@ -118,7 +156,13 @@ def format_tool_contract(payload: dict[str, Any], *, protocol: str) -> str:
         "instructions": (
             "Use these tools/functions only when the user request requires them. "
             "Do not invent undeclared tools. If a tool call is required, return a valid "
-            "tool-call request for the declared provider shape with JSON arguments."
+            "tool-call request for the declared provider shape with JSON arguments. "
+            "If you decide to use the task tool, you must emit a structured tool invocation. "
+            "Never print task(...) as plain text. Do not explain the tool call. "
+            "If you decide to use the Bash tool, you must emit a structured tool invocation. "
+            "Never print shell commands as plain text. Do not explain the shell command. "
+            "Never print tool_use: blocks or raw tool_use JSON as plain text. "
+            "Do not wrap tool calls in markdown. If a tool is needed, invoke it directly."
         ),
     }
     return "[TOOL_CONTRACT]\n" + _bounded_json(body)
@@ -170,12 +214,371 @@ def _parse_json_object(text: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _parse_embedded_json_object(text: str) -> dict[str, Any] | None:
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text):
+        try:
+            parsed, _ = decoder.raw_decode(text[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _extract_balanced_object_after(text: str, marker: str) -> str | None:
+    start_marker = text.find(marker)
+    if start_marker < 0:
+        return None
+    start = text.find("{", start_marker + len(marker))
+    if start < 0:
+        return None
+    depth = 0
+    quote: str | None = None
+    escape = False
+    for index, char in enumerate(text[start:], start=start):
+        if quote:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return None
+
+
+def _extract_simple_json_field(text: str, key: str) -> Any:
+    string_match = re.search(rf'"{re.escape(key)}"\s*:\s*"(?P<value>(?:\\.|[^"\\])*)"', text, flags=re.DOTALL)
+    if string_match:
+        return string_match.group("value").encode("utf-8").decode("unicode_escape")
+
+    array_match = re.search(rf'"{re.escape(key)}"\s*:\s*(?P<value>\[[^\]]*\])', text, flags=re.DOTALL)
+    if array_match:
+        try:
+            return json.loads(array_match.group("value"))
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def _extract_balanced_call(text: str, name: str) -> str | None:
+    stripped = text.strip()
+    match = re.search(rf"\b{re.escape(name)}\s*\(", stripped)
+    if not match:
+        return None
+    start = match.start()
+    depth = 0
+    quote: str | None = None
+    escape = False
+    for index, char in enumerate(stripped[start:], start=start):
+        if quote:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return stripped[start : index + 1]
+    return None
+
+
+def _pythonish_call_to_tool_call(text: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    declared_names = _declared_tool_names(payload)
+    if "task" not in declared_names:
+        return None
+    call_text = _extract_balanced_call(text, "task")
+    if not call_text:
+        return None
+    normalized = re.sub(r"\btrue\b", "True", call_text)
+    normalized = re.sub(r"\bfalse\b", "False", normalized)
+    normalized = re.sub(r"\bnull\b", "None", normalized)
+    try:
+        parsed = ast.parse(normalized, mode="eval")
+    except SyntaxError:
+        return None
+    call = parsed.body
+    if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name) or call.func.id != "task":
+        return None
+    arguments: dict[str, Any] = {}
+    for keyword in call.keywords:
+        if keyword.arg is None:
+            return None
+        try:
+            arguments[keyword.arg] = ast.literal_eval(keyword.value)
+        except (ValueError, TypeError):
+            return None
+    return {
+        "id": "call_" + hashlib.sha1(f"task:{compact_json(arguments)}".encode()).hexdigest()[:12],
+        "name": "task",
+        "arguments": arguments,
+        "mode": "textual_pseudo_call",
+    }
+
+
+def _extract_fenced_shell_command(text: str) -> str | None:
+    match = re.search(r"```(?:bash|sh|shell)?\s*\n(?P<body>.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    command = match.group("body").strip()
+    return command or None
+
+
+def _extract_bash_xml_command(text: str) -> str | None:
+    match = re.search(r"<\s*Bash\b(?P<attrs>[^>]*)/?>", text, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    attrs = match.group("attrs")
+    command_start = attrs.find('command="')
+    if command_start >= 0:
+        rest = attrs[command_start + len('command="') :]
+        marker_positions = [
+            position
+            for position in (rest.find('" timeout='), rest.find('" description='))
+            if position >= 0
+        ]
+        if marker_positions:
+            command = rest[: min(marker_positions)].strip()
+        else:
+            command = rest.rsplit('"', 1)[0].strip()
+    else:
+        command_match = re.search(r"\bcommand\s*=\s*'(?P<command>.*)'\s*/?\s*$", attrs, flags=re.DOTALL)
+        if not command_match:
+            return None
+        command = command_match.group("command").strip()
+    return command or None
+
+
+def _extract_tool_code_command(text: str) -> str | None:
+    match = re.search(r"<\s*tool_code\b(?P<body>.*?)</\s*tool_code\s*>", text, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    body = match.group("body")
+    code_match = re.search(r"\bcode\s*=\s*\"(?P<command>.*?)\"", body, flags=re.DOTALL)
+    if code_match:
+        command = code_match.group("command").strip()
+        return command or None
+    lines = [line.strip() for line in body.splitlines()]
+    command_lines = [line for line in lines if _looks_like_shell_command(line)]
+    return "\n".join(command_lines) or None
+
+
+def _extract_bash_json_command(text: str) -> str | None:
+    parsed = _parse_json_object(text) or _parse_embedded_json_object(text)
+    if not parsed:
+        return None
+    name = str(
+        parsed.get("name")
+        or parsed.get("toolName")
+        or parsed.get("tool_name")
+        or parsed.get("tool")
+        or parsed.get("tool_name")
+        or ""
+    )
+    if isinstance(parsed.get("arguments"), dict):
+        arguments = parsed["arguments"]
+    elif isinstance(parsed.get("input"), dict):
+        arguments = parsed["input"]
+    elif isinstance(parsed.get("tool_input"), dict):
+        arguments = parsed["tool_input"]
+    else:
+        arguments = parsed
+    command = arguments.get("command") if isinstance(arguments, dict) else None
+    if isinstance(command, str) and command.strip() and (name.lower() == "bash" or "<tool_call" in text):
+        return command.strip()
+    return None
+
+
+def _extract_command_assignment(line: str) -> str | None:
+    stripped = line.strip()
+    if not stripped.startswith("command="):
+        return None
+    command = stripped[len("command=") :].strip()
+    if len(command) >= 2 and command[0] in {"'", '"'}:
+        command = command[1:]
+    if command.endswith(("'", '"')):
+        command = command[:-1]
+    return command.strip() or None
+
+
+def _looks_like_shell_command(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if stripped.startswith(("{", "[")):
+        return False
+    if stripped.startswith(("#", "$", ">", "- ", "* ")):
+        stripped = stripped[1:].strip()
+    if stripped.startswith("command="):
+        return True
+    if not stripped or stripped.endswith(":"):
+        return False
+    if stripped.startswith("<"):
+        return False
+    lowered = stripped.lower()
+    if lowered.startswith(BASH_COMMAND_PREFIXES):
+        return True
+    return any(token in stripped for token in (" | ", " && ", " || ", " 2>/", " >/"))
+
+
+def _shell_text_to_tool_call(text: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    declared_names = _declared_tool_names(payload)
+    bash_name = next((name for name in declared_names if name.lower() == "bash"), None)
+    if not bash_name:
+        return None
+
+    command = _extract_fenced_shell_command(text)
+    if command is None:
+        command = _extract_bash_json_command(text)
+    if command is None:
+        command = _extract_bash_xml_command(text)
+    if command is None:
+        command = _extract_tool_code_command(text)
+    if command is None:
+        commands = []
+        for line in text.splitlines():
+            if not _looks_like_shell_command(line):
+                continue
+            command_assignment = _extract_command_assignment(line)
+            commands.append(command_assignment or line.strip().lstrip("$> ").strip())
+        command = "\n".join(command for command in commands if command)
+    if not command:
+        return None
+
+    arguments = {"command": command}
+    return {
+        "id": "call_" + hashlib.sha1(f"{bash_name}:{compact_json(arguments)}".encode()).hexdigest()[:12],
+        "name": bash_name,
+        "arguments": arguments,
+        "mode": "textual_pseudo_call",
+    }
+
+
+def _function_json_text_to_tool_call(text: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    declared_names = _declared_tool_names(payload)
+    if not declared_names:
+        return None
+
+    parsed = _parse_json_object(text) or _parse_embedded_json_object(text)
+    candidate: dict[str, Any] | None = None
+    if isinstance(parsed, dict) and parsed.get("type") == "function" and isinstance(parsed.get("function"), dict):
+        candidate = parsed["function"]
+
+    if candidate is None:
+        if not re.search(r'"type"\s*:\s*"function"', text):
+            return None
+        name_match = re.search(r'"name"\s*:\s*"(?P<name>[^"]+)"', text)
+        if not name_match:
+            return None
+        name = name_match.group("name")
+        if name not in declared_names:
+            return None
+
+        arguments: dict[str, Any] = {}
+        raw_arguments = _extract_balanced_object_after(text, '"arguments"')
+        if raw_arguments:
+            parsed_arguments = _parse_json_object(raw_arguments)
+            if isinstance(parsed_arguments, dict):
+                arguments.update(parsed_arguments)
+
+        # Some local models emit `"arguments": {"pattern": "..."} "lang": "json"`
+        # with the remaining intended arguments outside the arguments object.
+        for key in ("task_id", "subagent_type", "description", "prompt", "pattern", "lang", "globs"):
+            if key in arguments:
+                continue
+            value = _extract_simple_json_field(text, key)
+            if value is not None:
+                arguments[key] = value
+
+        if not arguments:
+            return None
+    else:
+        name = str(candidate.get("name", ""))
+        if name not in declared_names:
+            return None
+        arguments = candidate.get("arguments", {})
+        if isinstance(arguments, str):
+            parsed_arguments = _parse_json_object(arguments)
+            arguments = parsed_arguments if parsed_arguments is not None else {"value": arguments}
+        if not isinstance(arguments, dict):
+            arguments = {"value": arguments}
+
+    return {
+        "id": "call_" + hashlib.sha1(f"{name}:{compact_json(arguments)}".encode()).hexdigest()[:12],
+        "name": name,
+        "arguments": arguments,
+        "mode": "textual_pseudo_call",
+    }
+
+
+def _anthropic_tool_use_text_to_tool_call(text: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    declared_names = _declared_tool_names(payload)
+    if not declared_names:
+        return None
+
+    parsed = _parse_json_object(text) or _parse_embedded_json_object(text)
+    if not isinstance(parsed, dict) or str(parsed.get("type", "")).replace("-", "_") != "tool_use":
+        return None
+
+    name = str(parsed.get("name", ""))
+    if name not in declared_names:
+        return None
+
+    arguments = parsed.get("input", parsed.get("arguments", {}))
+    if isinstance(arguments, str):
+        parsed_arguments = _parse_json_object(arguments)
+        arguments = parsed_arguments if parsed_arguments is not None else {"value": arguments}
+    if not isinstance(arguments, dict):
+        arguments = {"value": arguments}
+
+    return {
+        "id": str(
+            parsed.get("id") or "call_" + hashlib.sha1(f"{name}:{compact_json(arguments)}".encode()).hexdigest()[:12]
+        ),
+        "name": name,
+        "arguments": arguments,
+        "mode": "textual_pseudo_call",
+    }
+
+
 def _normalize_tool_call(text: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     declared_names = _declared_tool_names(payload)
     if not declared_names:
         return None
 
-    parsed = _parse_json_object(text)
+    anthropic_tool_use_call = _anthropic_tool_use_text_to_tool_call(text, payload)
+    if anthropic_tool_use_call:
+        return anthropic_tool_use_call
+
+    function_json_call = _function_json_text_to_tool_call(text, payload)
+    if function_json_call:
+        return function_json_call
+
+    pseudo_call = _pythonish_call_to_tool_call(text, payload)
+    if pseudo_call:
+        return pseudo_call
+
+    shell_call = _shell_text_to_tool_call(text, payload)
+    if shell_call:
+        return shell_call
+
+    parsed = _parse_json_object(text) or _parse_embedded_json_object(text)
     if not parsed:
         return None
 
@@ -213,6 +616,36 @@ def _normalize_tool_call(text: str, payload: dict[str, Any]) -> dict[str, Any] |
         ),
         "name": name,
         "arguments": arguments,
+        "mode": "structured",
+    }
+
+
+def classify_tool_invocation(text: str, payload: dict[str, Any]) -> dict[str, Any]:
+    tool_call = _normalize_tool_call(text, payload)
+    if tool_call:
+        mode = str(tool_call.get("mode", "structured"))
+        repaired = mode == "textual_pseudo_call"
+        return {
+            "tool_invocation_mode": mode,
+            "tool_name": str(tool_call.get("name", "")),
+            "repair_attempted": repaired,
+            "repair_succeeded": repaired,
+        }
+
+    textual_task_seen = "task" in _declared_tool_names(payload) and _extract_balanced_call(text, "task") is not None
+    if textual_task_seen:
+        return {
+            "tool_invocation_mode": "textual_pseudo_call",
+            "tool_name": "task",
+            "repair_attempted": True,
+            "repair_succeeded": False,
+        }
+
+    return {
+        "tool_invocation_mode": "none",
+        "tool_name": "",
+        "repair_attempted": False,
+        "repair_succeeded": False,
     }
 
 
@@ -372,6 +805,7 @@ __all__ = [
     "anthropic_messages_to_text",
     "format_tool_contract",
     "append_tool_contract_to_prompt",
+    "classify_tool_invocation",
     "apply_openai_tool_call_response",
     "apply_anthropic_tool_use_response",
     "message_summary",

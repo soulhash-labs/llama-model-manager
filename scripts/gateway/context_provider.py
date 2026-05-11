@@ -59,11 +59,11 @@ def run_context_command(
     except subprocess.TimeoutExpired as exc:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
-        except Exception:
+        except (ProcessLookupError, PermissionError, OSError):
             try:
                 proc.kill()
-            except Exception:
-                pass
+            except (ProcessLookupError, OSError) as kill_err:
+                sys.stderr.write(f"warning: failed to kill timed-out context process (pid {proc.pid}): {kill_err}\n")
         stdout, stderr = proc.communicate()
         raise subprocess.TimeoutExpired(command, timeout_seconds, output=stdout, stderr=stderr) from exc
     return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
@@ -97,10 +97,11 @@ def _maybe_run_indexer(timeout_seconds: float) -> dict[str, Any]:
                     "errors": int(result.get("errors", 0)),
                     "duration_ms": int(result.get("duration_ms", 0)),
                 }
-        except (json.JSONDecodeError, ValueError):
-            pass
+        except (json.JSONDecodeError, ValueError) as parse_err:
+            sys.stderr.write(f"warning: failed to parse context indexer JSON output: {parse_err}\n")
         return empty
-    except Exception:
+    except (OSError, subprocess.SubprocessError) as sub_err:
+        sys.stderr.write(f"warning: context indexer subprocess error: {sub_err}\n")
         return empty
 
 
@@ -308,7 +309,8 @@ def retrieve_context(
             cwd=str(root),
         )
         if completed.returncode != 0:
-            result.update({"status": "error", "source": "context-mode-mcp", "error": "context_command_failed"})
+            stderr_trimmed = (completed.stderr or "")[:500]
+            result.update({"status": "error", "source": "context-mode-mcp", "error": f"context_command_failed: {stderr_trimmed}"})
             return result
         extracted = command_context_from_output(completed.stdout)
         text = context_to_text(extracted.get("context", ""))
@@ -334,12 +336,13 @@ def retrieve_context(
                 "status": "timeout",
                 "source": "context-mode-mcp",
                 "error": f"timeout after {timeout_ms}ms",
+                "timeout_ms": timeout_ms,
                 "search_degraded": True,
                 "search_suggestions": [f"context preflight exceeded {timeout_ms}ms budget"],
             }
         )
         return result
-    except Exception as exc:
+    except (json.JSONDecodeError, OSError, subprocess.SubprocessError, TypeError, ValueError, RuntimeError) as exc:
         result.update({"status": "error", "source": "context-mode-mcp", "error": exc.__class__.__name__})
         return result
     finally:
@@ -359,7 +362,7 @@ def build_context_payload(context_result: dict[str, Any]) -> Any:
             disabled=bool(encoding_config.disabled),
             force_error=bool(encoding_config.force_error),
         )
-    except Exception as exc:
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
         return SimpleNamespace(
             raw_context=raw_context,
             raw_context_chars=len(raw_context),
@@ -458,6 +461,37 @@ def _context_payload_value(context_payload: Any | None, name: str, default: Any)
     if context_payload is None:
         return default
     return getattr(context_payload, name, default)
+
+
+def glyph_encoding_result_for_context(
+    context_result: dict[str, Any], context_payload: Any | None
+) -> dict[str, Any]:
+    if context_payload is not None:
+        return context_payload_to_encoding_result(context_payload)
+
+    context_status = str(context_result.get("status", "unknown"))
+    if context_status == "disabled":
+        status = "disabled"
+    elif context_status in {"empty", "available_no_context"}:
+        status = "no_context"
+    elif context_status in {"missing", "missing_bridge", "missing_dist", "timeout", "error"}:
+        status = "context_unavailable"
+    elif not context_result.get("used"):
+        status = "no_context"
+    else:
+        status = "skipped"
+    return {
+        "status": status,
+        "used": False,
+        "raw_context_chars": 0,
+        "encoded_context_chars": 0,
+        "estimated_token_delta": 0,
+        "encoding_ratio": 1.0,
+        "encoded_context": "",
+        "encoding_format": "",
+        "error": "",
+        "latency_ms": 0,
+    }
 
 
 def assemble_prompt_raw(raw_prompt: str, context_result: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -563,7 +597,7 @@ def prepare_gateway_pipeline(
         command_runner=command_runner,
     )
     context_finished = time.perf_counter()
-    encoding_result = context_payload_to_encoding_result(context_payload) if context_payload is not None else {}
+    encoding_result = glyph_encoding_result_for_context(context_result, context_payload)
     raw_ctx = str(context_result.get("context") or "") if context_result.get("used") else ""
     assembled_prompt, assembly = assemble_prompt_raw(raw_prompt, context_result)
     pipeline_finished = time.perf_counter()
@@ -625,6 +659,7 @@ __all__ = [
     "context_to_text",
     "extract_payload_context",
     "glyph_encode_context",
+    "glyph_encoding_result_for_context",
     "prepare_gateway_context",
     "prepare_gateway_pipeline",
     "retrieve_context",

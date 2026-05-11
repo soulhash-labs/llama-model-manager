@@ -55,7 +55,7 @@ def _http_json(
         raw = exc.read().decode("utf-8", errors="replace")
         try:
             parsed = json.loads(raw) if raw else {}
-        except Exception:
+        except json.JSONDecodeError:
             parsed = {"error": raw}
         return int(exc.code), parsed if isinstance(parsed, dict) else {"error": raw}
     except urerror.URLError:
@@ -79,7 +79,7 @@ def _sse_content(line: str) -> str | None:
         return None
     try:
         parsed = json.loads(payload)
-    except Exception:
+    except json.JSONDecodeError:
         return None
     if not isinstance(parsed, dict):
         return None
@@ -113,7 +113,7 @@ class LlamaCppProvider:
     def _resolve_model(self) -> str:
         try:
             _, payload = _http_json("GET", f"{self.base_url}/models", timeout=self.timeout)
-        except Exception:
+        except (json.JSONDecodeError, OSError, TimeoutError, urerror.URLError):
             return self.model or "local-llama"
 
         models = payload.get("data") if isinstance(payload, dict) else None
@@ -130,7 +130,7 @@ class LlamaCppProvider:
     def health_check(self, timeout: float = 5.0) -> bool:
         try:
             status, _ = _http_json("GET", f"{self.base_url}/models", timeout=timeout)
-        except Exception:
+        except (json.JSONDecodeError, OSError, TimeoutError, urerror.URLError):
             return False
         return status == 200
 
@@ -143,7 +143,9 @@ class LlamaCppProvider:
         }
 
     def generate(self, prompt: str, model: str = "", max_tokens: int = 1000, temperature: float = 0.7) -> str:
-        selected_model = model or self._resolve_model()
+        selected_model = (model or self._resolve_model()).strip()
+        if not selected_model:
+            raise ProviderError("generate requires a non-empty model name", provider=self.name)
         payload = {
             "model": selected_model,
             "messages": [{"role": "user", "content": prompt}],
@@ -162,6 +164,10 @@ class LlamaCppProvider:
             if _is_timeout_error(exc):
                 raise ProviderTimeoutError(self.name, self.timeout) from exc
             raise ProviderError(str(exc), provider=self.name) from exc
+        except (socket.timeout, TimeoutError) as exc:
+            raise ProviderTimeoutError(self.name, self.timeout) from exc
+        except json.JSONDecodeError as exc:
+            raise ProviderError(f"generate response JSON malformed: {exc.msg}", provider=self.name) from exc
 
         if status != 200:
             message = response if isinstance(response, dict) else {}
@@ -190,7 +196,9 @@ class LlamaCppProvider:
         max_tokens: int = 1000,
         temperature: float = 0.7,
     ) -> Iterator[str]:
-        selected_model = model or self._resolve_model()
+        selected_model = (model or self._resolve_model()).strip()
+        if not selected_model:
+            raise ProviderError("generate_stream requires a non-empty model name", provider=self.name)
         payload = {
             "model": selected_model,
             "messages": [{"role": "user", "content": prompt}],
@@ -229,6 +237,8 @@ class LlamaCppProvider:
             if _is_timeout_error(exc):
                 raise ProviderTimeoutError(self.name, self.timeout) from exc
             raise ProviderError(str(exc), provider=self.name) from exc
+        except (socket.timeout, TimeoutError) as exc:
+            raise ProviderTimeoutError(self.name, self.timeout) from exc
 
 
 @dataclass

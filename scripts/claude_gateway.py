@@ -15,6 +15,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+SCRIPT_ROOT = Path(__file__).resolve().parent
+if str(SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT))
+
+from gateway.protocol_normalizers import (  # noqa: E402
+    append_tool_contract_to_prompt,
+    apply_anthropic_tool_use_response,
+    classify_tool_invocation,
+    compact_json,
+)
+
 
 class UpstreamClient:
     def __init__(self, upstream_base: str, request_timeout_seconds: int = 1800) -> None:
@@ -105,6 +116,20 @@ class ClaudeGateway:
             for item in content:
                 if isinstance(item, dict) and item.get("type") == "text":
                     parts.append(str(item.get("text", "")))
+                elif isinstance(item, dict) and item.get("type") == "tool_use":
+                    parts.append("tool_use: " + compact_json(item))
+                elif isinstance(item, dict) and item.get("type") == "tool_result":
+                    tool_id = str(item.get("tool_use_id", "")).strip()
+                    tool_content = item.get("content", "")
+                    if isinstance(tool_content, list):
+                        tool_text = "\n".join(
+                            str(part.get("text", ""))
+                            for part in tool_content
+                            if isinstance(part, dict) and part.get("type") == "text"
+                        )
+                    else:
+                        tool_text = str(tool_content)
+                    parts.append(f"tool_result {tool_id}: {tool_text}".strip())
             return "\n".join(part for part in parts if part)
         return ""
 
@@ -125,6 +150,7 @@ class ClaudeGateway:
     def _messages_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         messages: list[dict[str, str]] = []
         system_text = self._normalize_content(payload.get("system"))
+        system_text = append_tool_contract_to_prompt(system_text, payload, protocol="anthropic-messages")
         if system_text:
             messages.append({"role": "system", "content": system_text})
         for item in payload.get("messages", []):
@@ -157,7 +183,7 @@ class ClaudeGateway:
         if isinstance(message, dict):
             text = str(message.get("content", ""))
         usage = upstream.get("usage") if isinstance(upstream.get("usage"), dict) else {}
-        return {
+        response = {
             "id": f"msg_{int(time.time() * 1000)}",
             "type": "message",
             "role": "assistant",
@@ -169,6 +195,15 @@ class ClaudeGateway:
                 "output_tokens": int(usage.get("completion_tokens", 0) or 0),
             },
         }
+        response = apply_anthropic_tool_use_response(response, text, payload)
+        tool_report = classify_tool_invocation(text, payload)
+        response["lmm"] = {
+            "tool_invocation_mode": tool_report["tool_invocation_mode"],
+            "tool_name": tool_report["tool_name"],
+            "repair_attempted": tool_report["repair_attempted"],
+            "repair_succeeded": tool_report["repair_succeeded"],
+        }
+        return response
 
 
 class GatewayHandler(BaseHTTPRequestHandler):
@@ -258,22 +293,44 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 except concurrent.futures.TimeoutError:
                     self.write_sse_comment()
 
-        self.write_sse_event("content_block_start", {
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {"type": "text", "text": ""},
-        })
-        text = message["content"][0]["text"] if message.get("content") else ""
-        if text:
+        content = message.get("content") if isinstance(message.get("content"), list) else []
+        first_block = content[0] if content and isinstance(content[0], dict) else {"type": "text", "text": ""}
+        if first_block.get("type") == "tool_use":
+            self.write_sse_event("content_block_start", {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": first_block.get("id", f"toolu_{int(time.time() * 1000)}"),
+                    "name": first_block.get("name", ""),
+                    "input": {},
+                },
+            })
             self.write_sse_event("content_block_delta", {
                 "type": "content_block_delta",
                 "index": 0,
-                "delta": {"type": "text_delta", "text": text},
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": json.dumps(first_block.get("input", {}), ensure_ascii=True),
+                },
             })
+        else:
+            self.write_sse_event("content_block_start", {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""},
+            })
+            text = str(first_block.get("text", ""))
+            if text:
+                self.write_sse_event("content_block_delta", {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": text},
+                })
         self.write_sse_event("content_block_stop", {"type": "content_block_stop", "index": 0})
         self.write_sse_event("message_delta", {
             "type": "message_delta",
-            "delta": {"stop_reason": "end_turn"},
+            "delta": {"stop_reason": message.get("stop_reason", "end_turn")},
             "usage": message.get("usage", {"input_tokens": 0, "output_tokens": 0}),
         })
         self.write_sse_event("message_stop", {"type": "message_stop"})

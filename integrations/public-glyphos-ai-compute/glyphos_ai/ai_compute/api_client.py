@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import warnings
 from collections.abc import Iterator
 from pathlib import Path
@@ -199,6 +200,7 @@ class LlamaCppClient(BaseChatClient):
         super().__init__(model=model, max_tokens=max_tokens, timeout=timeout)
         self.base_url = base_url.rstrip("/")
         self._available: bool | None = None
+        self._availability_lock = threading.Lock()
 
     def _models_url(self) -> str:
         return f"{self.base_url}/models"
@@ -207,23 +209,27 @@ class LlamaCppClient(BaseChatClient):
         return f"{self.base_url}/chat/completions"
 
     def _check_availability(self) -> None:
-        try:
-            response = _http_json("GET", self._models_url(), timeout=2)
-            self._available = response.status_code == 200
-        except Exception:
-            self._available = False
-
-    def is_available(self) -> bool:
-        if self._available is None:
+        with self._availability_lock:
             try:
                 response = _http_json("GET", self._models_url(), timeout=2)
                 self._available = response.status_code == 200
             except Exception:
                 self._available = False
+
+    def is_available(self) -> bool:
+        if self._available is None:
+            with self._availability_lock:
+                if self._available is None:
+                    try:
+                        response = _http_json("GET", self._models_url(), timeout=2)
+                        self._available = response.status_code == 200
+                    except Exception:
+                        self._available = False
         return self._available
 
     def _reset_availability(self) -> None:
-        self._available = None
+        with self._availability_lock:
+            self._available = None
 
     def _resolve_model(self) -> str:
         if self.model:
@@ -280,6 +286,20 @@ class LlamaCppClient(BaseChatClient):
         except Exception as exc:
             raise RuntimeError(f"llama.cpp streaming request failed: {exc}") from exc
 
+        # Per-chunk stall timeout: if llama.cpp pauses for longer than this
+        # between chunks, fail fast rather than blocking the entire stream.
+        # Set via LLAMA_CPP_CHUNK_TIMEOUT env var (default 120 seconds).
+        _CHUNK_READ_TIMEOUT = int(os.environ.get("LLAMA_CPP_CHUNK_TIMEOUT", "120"))
+        try:
+            if hasattr(response, "fp"):
+                fp = response.fp
+                if hasattr(fp, "settimeout"):
+                    fp.settimeout(float(_CHUNK_READ_TIMEOUT))
+                elif hasattr(fp, "raw") and hasattr(fp.raw, "settimeout"):
+                    fp.raw.settimeout(float(_CHUNK_READ_TIMEOUT))
+        except Exception:
+            pass
+
         def chunks() -> Iterator[str]:
             try:
                 with response:
@@ -302,8 +322,13 @@ class LlamaCppClient(BaseChatClient):
                         if not isinstance(choice, dict):
                             continue
                         delta = choice.get("delta")
-                        if isinstance(delta, dict) and delta.get("content"):
-                            yield str(delta["content"])
+                        if isinstance(delta, dict):
+                            if delta.get("content"):
+                                yield str(delta["content"])
+                            # Surface reasoning_content so the client doesn't
+                            # stall waiting for the first content delta
+                            elif delta.get("reasoning_content"):
+                                yield str(delta["reasoning_content"])
                         message = choice.get("message")
                         if isinstance(message, dict) and message.get("content"):
                             yield str(message["content"])

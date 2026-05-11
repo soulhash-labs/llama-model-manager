@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -16,6 +17,14 @@ try:
 except ImportError:
     HandoffSummary = None  # type: ignore
     format_handoff_text = None  # type: ignore
+
+
+SENSITIVE_TELEMETRY_KEYS = {
+    "command_substitution",
+    "command_substitutions",
+    "raw_command",
+    "shell_command",
+}
 
 
 def telemetry_store() -> JsonGatewayTelemetryStore:
@@ -39,7 +48,7 @@ def load_gateway_state() -> dict[str, Any]:
 
 
 def redact_gateway_telemetry_record(record: dict[str, Any]) -> dict[str, Any]:
-    redacted = dict(record)
+    redacted = _redact_sensitive_telemetry_value(record)
     prompt = redacted.pop("prompt", "")
     if isinstance(prompt, str):
         redacted.setdefault("prompt_chars", len(prompt))
@@ -48,21 +57,64 @@ def redact_gateway_telemetry_record(record: dict[str, Any]) -> dict[str, Any]:
     return redacted
 
 
+def _redact_sensitive_telemetry_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text in SENSITIVE_TELEMETRY_KEYS:
+                continue
+            redacted[key_text] = _redact_sensitive_telemetry_value(item)
+        return redacted
+    if isinstance(value, list):
+        return [
+            _redact_sensitive_telemetry_value(item)
+            for item in value
+            if not (isinstance(item, str) and item in SENSITIVE_TELEMETRY_KEYS)
+        ]
+    return value
+
+
+def request_fingerprint(record: dict[str, Any]) -> str:
+    selected = {
+        "format": record.get("format", "openai"),
+        "model": record.get("model", ""),
+        "prompt": record.get("prompt", ""),
+        "gateway_mode": record.get("gateway_mode", ""),
+        "mode": record.get("mode", ""),
+        "harness": record.get("harness", ""),
+        "stream": bool(record.get("stream", False)),
+    }
+    payload = json.dumps(selected, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def with_request_fingerprint(record: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(record)
+    if not str(enriched.get("request_fingerprint", "")).strip():
+        enriched["request_fingerprint"] = request_fingerprint(enriched)
+    return enriched
+
+
 def record_gateway_request(record: dict[str, Any]) -> None:
-    telemetry_store().append_event(redact_gateway_telemetry_record(record))
+    """Record gateway request with full error propagation."""
+    try:
+        telemetry_store().append_event(redact_gateway_telemetry_record(with_request_fingerprint(record)))
+    except Exception as exc:
+        sys.stderr.write(f"warning: failed to record gateway telemetry: {exc}\n")
 
 
 def safe_record_gateway_request(record: dict[str, Any]) -> None:
     try:
         record_gateway_request(record)
-    except Exception as exc:
+    except (LookupError, OSError, RuntimeError, TypeError, ValueError) as exc:
         sys.stderr.write(f"warning: failed to persist LMM gateway telemetry: {exc}\n")
 
 
 def safe_record_run_record(record: RunRecord) -> None:
     try:
         run_record_store().append_record(record.to_dict())
-    except Exception as exc:
+    except (LookupError, OSError, RuntimeError, TypeError, ValueError) as exc:
         sys.stderr.write(f"warning: failed to persist LMM run record: {exc}\n")
 
 
@@ -110,6 +162,14 @@ def run_record_from_dict(record: dict[str, Any]) -> RunRecord:
         handoff_summary=str(record.get("handoff_summary", "")),
         artifacts=list(record.get("artifacts", [])),
         tags=list(record.get("tags", [])),
+        request_fingerprint=str(record.get("request_fingerprint", "") or request_fingerprint(record)),
+        tool_invocation_mode=str(record.get("tool_invocation_mode", "")),
+        tool_name=str(record.get("tool_name", "")),
+        lane=str(record.get("lane", "")),
+        repair_attempted=bool(record.get("repair_attempted", False)),
+        repair_succeeded=bool(record.get("repair_succeeded", False)),
+        stream_tool_call_detected=bool(record.get("stream_tool_call_detected", False)),
+        stream_tool_call_name=str(record.get("stream_tool_call_name", "")),
     )
 
 
@@ -124,8 +184,8 @@ def generate_handoff_summary(record: dict[str, Any], duration_ms: int) -> None:
     try:
         summary = HandoffSummary.from_run_record(record)
         record["handoff_summary"] = format_handoff_text(summary)
-    except Exception:
-        pass
+    except (LookupError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        sys.stderr.write(f"warning: failed to generate LMM handoff summary: {exc}\n")
 
 
 __all__ = [
@@ -133,6 +193,8 @@ __all__ = [
     "run_record_store",
     "load_gateway_state",
     "redact_gateway_telemetry_record",
+    "request_fingerprint",
+    "with_request_fingerprint",
     "record_gateway_request",
     "safe_record_gateway_request",
     "safe_record_run_record",

@@ -10,6 +10,7 @@ import os
 import select
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -17,57 +18,60 @@ APP_ROOT = Path(__file__).resolve().parents[1]
 MCP_ROOT = APP_ROOT / "integrations" / "context-mode-mcp"
 
 
+def _pipe_error(name: str) -> RuntimeError:
+    return RuntimeError(f"Context MCP server {name} pipe is unavailable")
+
+
 def read_stdin_json() -> dict[str, Any]:
     raw = sys.stdin.read()
     if not raw.strip():
         return {}
-    payload = json.loads(raw)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Context MCP bridge stdin JSON malformed: {exc}") from exc
     return payload if isinstance(payload, dict) else {}
 
 
 def send_message(proc: subprocess.Popen[str], payload: dict[str, Any]) -> None:
-    """Send a JSON-RPC message using MCP stdio Content-Length framing."""
-    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    assert proc.stdin is not None
-    proc.stdin.write(f"Content-Length: {len(raw)}\r\n\r\n")
-    proc.stdin.write(raw.decode("utf-8"))
-    proc.stdin.flush()
+    """Send a JSON-RPC message as newline-delimited JSON (NDJSON).
+
+    The MCP SDK StdioServerTransport uses newline-delimited JSON, not
+    the Content-Length framing from earlier protocol versions.
+    """
+    if proc.stdin is None:
+        raise _pipe_error("stdin")
+    try:
+        proc.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
+        proc.stdin.flush()
+    except (BrokenPipeError, OSError) as exc:
+        raise RuntimeError(f"Context MCP server stdin write failed: {exc}") from exc
 
 
 def read_message(proc: subprocess.Popen[str], timeout: float = 10.0) -> dict[str, Any]:
-    """Read a single JSON-RPC response line from the MCP server stdout with timeout safety."""
-    assert proc.stdout is not None
-    while True:
+    """Read a single JSON-RPC response line (NDJSON) from the MCP server stdout."""
+    if proc.stdout is None:
+        raise _pipe_error("stdout")
+    try:
         ready = select.select([proc.stdout], [], [], timeout)
-        if not ready[0]:
-            raise TimeoutError(f"MCP bridge read timeout after {timeout}s")
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Context MCP server stdout wait failed: {exc}") from exc
+    if not ready[0]:
+        raise TimeoutError(f"MCP bridge read timeout after {timeout}s")
+    try:
         line = proc.stdout.readline()
-        if not line:
-            raise RuntimeError("Context MCP server closed stdout")
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.lower().startswith("content-length:"):
-            try:
-                content_length = int(stripped.split(":", 1)[1].strip())
-            except ValueError:
-                continue
-            while True:
-                header = proc.stdout.readline()
-                if not header:
-                    raise RuntimeError("Context MCP server closed stdout")
-                if not header.strip():
-                    break
-            raw = proc.stdout.read(content_length)
-            payload = json.loads(raw)
-            return payload if isinstance(payload, dict) else {}
-        try:
-            payload = json.loads(stripped)
-            return payload if isinstance(payload, dict) else {}
-        except json.JSONDecodeError:
-            # Log stray output but continue (shouldn't happen with clean stdout)
-            print(f"[MCP Bridge] Non-JSON line: {stripped[:200]}", file=sys.stderr)
-            continue
+    except OSError as exc:
+        raise RuntimeError(f"Context MCP server stdout read failed: {exc}") from exc
+    if not line:
+        raise RuntimeError("Context MCP server closed stdout")
+    stripped = line.strip()
+    if not stripped:
+        raise RuntimeError("Context MCP server returned empty line")
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Context MCP server returned malformed JSON: {exc}") from exc
+    return payload if isinstance(payload, dict) else {}
 
 
 def request(proc: subprocess.Popen[str], payload: dict[str, Any]) -> dict[str, Any]:
@@ -149,7 +153,9 @@ def _start_mcp_process(project_root: str) -> subprocess.Popen[str]:
     """Spawn and initialize the MCP server process."""
     entry = MCP_ROOT / "dist" / "index.js"
     if not entry.is_file():
-        raise SystemExit("Context MCP entrypoint is missing; run npm install/build in integrations/context-mode-mcp")
+        raise SystemExit(
+            f"Context MCP entrypoint is missing at {entry}; run npm install/build in {MCP_ROOT}"
+        )
 
     command = ["node", str(entry)]
     env = dict(os.environ)
@@ -165,6 +171,10 @@ def _start_mcp_process(project_root: str) -> subprocess.Popen[str]:
         env=env,
     )
     try:
+        # Give the Node.js MCP process time to start accepting stdin.
+        # Without this delay, writing immediately after spawn causes the MCP
+        # process to silently ignore the input, leading to a read timeout.
+        time.sleep(0.2)
         request(
             proc,
             {
@@ -179,29 +189,40 @@ def _start_mcp_process(project_root: str) -> subprocess.Popen[str]:
             },
         )
         send_message(proc, {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
-    except Exception:
-        proc.terminate()
-        raise
+    except (BrokenPipeError, json.JSONDecodeError, OSError, RuntimeError, TimeoutError, ValueError) as exc:
+        try:
+            _terminate_mcp_process(proc)
+        except RuntimeError as cleanup_exc:
+            raise RuntimeError(f"Context MCP initialization failed: {exc}; cleanup failed: {cleanup_exc}") from exc
+        raise RuntimeError(f"Context MCP initialization failed: {exc}") from exc
     return proc
 
 
-def _terminate_mcp_process(proc: subprocess.Popen[str]) -> None:
+def _terminate_mcp_process(proc: subprocess.Popen[str], *, strict: bool = True) -> None:
     """Gracefully terminate the MCP server process."""
+    errors: list[str] = []
     try:
-        proc.terminate()
-        proc.wait(timeout=1)
-    except Exception:
-        proc.kill()
-        try:
+        if proc.poll() is None:
+            proc.terminate()
             proc.wait(timeout=1)
-        except Exception:
-            pass
-    for pipe in (proc.stdin, proc.stdout, proc.stderr):
+    except (ProcessLookupError, subprocess.TimeoutExpired, OSError) as exc:
+        errors.append(f"terminate failed: {exc}")
+        try:
+            proc.kill()
+            proc.wait(timeout=1)
+        except (ProcessLookupError, subprocess.TimeoutExpired, OSError) as kill_exc:
+            errors.append(f"kill failed: {kill_exc}")
+    for name, pipe in (("stdin", proc.stdin), ("stdout", proc.stdout), ("stderr", proc.stderr)):
         try:
             if pipe:
                 pipe.close()
-        except Exception:
-            pass
+        except OSError as exc:
+            errors.append(f"close {name} failed: {exc}")
+    if errors:
+        message = "Context MCP process cleanup failed: " + "; ".join(errors)
+        if strict:
+            raise RuntimeError(message)
+        print(f"[MCP Bridge] warning: {message}", file=sys.stderr)
 
 
 def _dispatch_search(gateway_request: dict[str, Any]) -> int:
@@ -233,7 +254,7 @@ def _dispatch_search(gateway_request: dict[str, Any]) -> int:
         print(json.dumps(context, separators=(",", ":")))
         return 0
     finally:
-        _terminate_mcp_process(proc)
+        _terminate_mcp_process(proc, strict=False)
 
 
 def _dispatch_index(gateway_request: dict[str, Any]) -> int:
@@ -266,7 +287,7 @@ def _dispatch_index(gateway_request: dict[str, Any]) -> int:
         print(json.dumps({"ok": True, "tool": "ctx_index", **result}, separators=(",", ":")))
         return 0
     finally:
-        _terminate_mcp_process(proc)
+        _terminate_mcp_process(proc, strict=False)
 
 
 def main() -> int:

@@ -47,6 +47,7 @@ DASHBOARD_SERVICE_URL="http://${DASHBOARD_SERVICE_HOST}:${DASHBOARD_SERVICE_PORT
 OPENCODE_CONFIG_FILE="${OPENCODE_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json}"
 OPENCODE_MODEL_STATE_FILE="${OPENCODE_MODEL_STATE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/opencode/model.json}"
 OH_MY_OPENAGENT_CONFIG_FILE="${OH_MY_OPENAGENT_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/oh-my-openagent.json}"
+OH_MY_OPENAGENT_LOG_FILE="${OH_MY_OPENAGENT_LOG_FILE:-}"
 OPENCLAW_PROFILE="${OPENCLAW_PROFILE:-}"
 OPENCLAW_API_KEY="${OPENCLAW_API_KEY:-llama-local}"
 CLAUDE_SETTINGS_FILE="${CLAUDE_SETTINGS_FILE:-$HOME/.claude/settings.json}"
@@ -188,6 +189,7 @@ Usage:
   llama-model logs [lines]
   llama-model dashboard-service install|enable|disable|start|stop|restart|status|logs|uninstall
   llama-model handoff status [--json]
+  llama-model opencode-plugin status|disable|enable
 
 Examples:
   llama-model list
@@ -2090,10 +2092,26 @@ probe_server_binary() {
                         SELECTED_LLAMA_SERVER_CUDA_OK="$([[ "$BUNDLE_VALIDATE_BACKEND" == "cuda" ]] && printf 'yes' || printf 'no')"
                         return 0
                     else
-                        die "configured bundled binary ${configured_path} failed validation: $VALIDATE_RUNTIME_MESSAGE. Fix the bundle or select a different binary."
+                        select_binary_record \
+                            "$configured_path" \
+                            "bundled" \
+                            "$BUNDLE_VALIDATE_BACKEND" \
+                            "invalid" \
+                            "configured bundled binary failed validation: $VALIDATE_RUNTIME_MESSAGE" \
+                            "Fix the bundle or select a different binary."
+                        SELECTED_LLAMA_SERVER_CUDA_OK="no"
+                        return 1
                     fi
                 else
-                    die "configured bundled binary ${configured_path} failed validation: ${BUNDLE_VALIDATE_REASON}. Fix the bundle or select a different binary."
+                    select_binary_record \
+                        "$configured_path" \
+                        "bundled" \
+                        "" \
+                        "invalid" \
+                        "configured bundled binary failed validation: ${BUNDLE_VALIDATE_REASON}" \
+                        "Fix the bundle or select a different binary."
+                    SELECTED_LLAMA_SERVER_CUDA_OK="no"
+                    return 1
                 fi
             else
                 # External binary
@@ -2110,11 +2128,27 @@ probe_server_binary() {
                     SELECTED_LLAMA_SERVER_CUDA_OK="$([[ "$ext_backend" == "cuda" ]] && printf 'yes' || printf 'no')"
                     return 0
                 else
-                    die "configured external binary ${configured_path} is not valid: ${EXTERNAL_VALIDATE_REASON}. Fix the binary or select a different one."
+                    select_binary_record \
+                        "$configured_path" \
+                        "external" \
+                        "" \
+                        "invalid" \
+                        "configured external binary is not valid: ${EXTERNAL_VALIDATE_REASON}" \
+                        "Fix the binary or select a different one."
+                    SELECTED_LLAMA_SERVER_CUDA_OK="no"
+                    return 1
                 fi
             fi
         else
-            die "configured binary not found: ${configured_path}"
+            select_binary_record \
+                "" \
+                "configured" \
+                "" \
+                "unavailable" \
+                "configured binary not found: ${configured_path}" \
+                "Set LLAMA_SERVER_BIN to a valid binary path or unset it to use the default."
+            SELECTED_LLAMA_SERVER_CUDA_OK="no"
+            return 1
         fi
     fi
 
@@ -3731,7 +3765,15 @@ show_doctor() {
     local oh_my_openagent_package_dir=""
     local oh_my_openagent_version="not-installed"
     local oh_my_openagent_wake_patch="not-installed"
+    local oh_my_openagent_task_defaults_patch="not-installed"
+    local oh_my_openagent_auto_update="unknown"
+    local oh_my_openagent_config_stale_models=""
     local oh_my_openagent_guidance=""
+    local oh_my_openagent_recent_error=""
+    local oh_my_openagent_recent_error_detail=""
+    local oh_my_openagent_recent_error_log=""
+    local oh_my_openagent_recent_error_guidance=""
+    local oh_my_openagent_plugin_enabled="unknown"
     local requested_ngl="${LLAMA_SERVER_NGL:-}"
     local effective_ngl=""
     local gpu_layers_posture=""
@@ -3868,6 +3910,7 @@ PY
             case "$key" in
                 version) oh_my_openagent_version="$value" ;;
                 wake_patch) oh_my_openagent_wake_patch="$value" ;;
+                task_defaults_patch) oh_my_openagent_task_defaults_patch="$value" ;;
                 guidance) oh_my_openagent_guidance="$value" ;;
             esac
         done < <(python3 - "$oh_my_openagent_package_dir" <<'PY' 2>/dev/null || printf 'wake_patch=unknown\nguidance=Unable to inspect oh-my-openagent dist bundle.\n'
@@ -3885,6 +3928,7 @@ except Exception:
 
 dist = package_dir / "dist" / "index.js"
 status = "unknown"
+task_defaults_status = "unknown"
 guidance = ""
 try:
     code = dist.read_text(encoding="utf-8")
@@ -3897,14 +3941,199 @@ try:
         guidance = "Restart after applying the session.prompt wake-up patch, or install an upstream version that uses /session/{id}/message for parent task notifications."
     else:
         guidance = "Could not identify notifyParentSession prompt call in dist/index.js."
+    prep_match = re.search(r"async function prepareDelegateTaskArgs\s*\([^)]*\)\s*\{(?P<body>.*?)(?:\n\s*// src/tools/delegate-task/tool-description|\n\s*function\s+\w+)", code, re.S)
+    prep_body = prep_match.group("body") if prep_match else ""
+    throws_on_missing_run = "'run_in_background' parameter is REQUIRED" in prep_body
+    throws_on_missing_skills = "'load_skills' parameter is REQUIRED" in prep_body
+    defaults_run = "args.run_in_background = runInBackground" in prep_body and "const runInBackground = args.run_in_background === undefined ? false : args.run_in_background" in prep_body
+    defaults_skills = "loadSkills = []" in prep_body and "if (loadSkills === undefined)" in prep_body
+    if defaults_run and defaults_skills and not throws_on_missing_run and not throws_on_missing_skills:
+        task_defaults_status = "yes"
+    elif throws_on_missing_run or throws_on_missing_skills:
+        task_defaults_status = "no"
+        extra = " Apply the task() defaulting patch for omitted run_in_background/load_skills."
+        guidance = (guidance + extra).strip()
+    else:
+        task_defaults_status = "unknown"
 except Exception as exc:
     guidance = f"Unable to read {dist}: {exc}"
 
 print(f"version={version}")
 print(f"wake_patch={status}")
+print(f"task_defaults_patch={task_defaults_status}")
 print(f"guidance={guidance}")
 PY
         )
+    fi
+    if [[ -f "$OH_MY_OPENAGENT_CONFIG_FILE" ]]; then
+        while IFS='=' read -r key value; do
+            case "$key" in
+                auto_update) oh_my_openagent_auto_update="$value" ;;
+                stale_models) oh_my_openagent_config_stale_models="$value" ;;
+                guidance)
+                    if [[ -n "$value" ]]; then
+                        oh_my_openagent_guidance="${oh_my_openagent_guidance:+$oh_my_openagent_guidance }$value"
+                    fi
+                    ;;
+            esac
+        done < <(python3 - "$OH_MY_OPENAGENT_CONFIG_FILE" <<'PY' 2>/dev/null || printf 'auto_update=unknown\nguidance=Unable to inspect oh-my-openagent config.\n'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    print("auto_update=unknown")
+    print("guidance=Unable to inspect oh-my-openagent config.")
+    raise SystemExit(0)
+
+auto_update = data.get("auto_update")
+if auto_update is False:
+    auto_update_status = "pinned"
+elif auto_update is True:
+    auto_update_status = "enabled"
+else:
+    auto_update_status = "default-enabled"
+
+stale: list[str] = []
+
+def inspect_model(label: str, value: object) -> None:
+    if isinstance(value, str) and (value.startswith("glyphos/") or value.startswith("glyphos-fast/")):
+        stale.append(f"{label}:{value}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            inspect_model(f"{label}[{index}]", item)
+
+agents = data.get("agents")
+if isinstance(agents, dict):
+    for name, agent in agents.items():
+        if isinstance(agent, dict):
+            inspect_model(f"agents.{name}.model", agent.get("model"))
+            inspect_model(f"agents.{name}.fallback", agent.get("fallback"))
+            inspect_model(f"agents.{name}.fallback_models", agent.get("fallback_models"))
+
+categories = data.get("categories")
+if isinstance(categories, dict):
+    for name, category in categories.items():
+        if isinstance(category, dict):
+            inspect_model(f"categories.{name}.model", category.get("model"))
+            inspect_model(f"categories.{name}.fallback", category.get("fallback"))
+            inspect_model(f"categories.{name}.fallback_models", category.get("fallback_models"))
+        else:
+            inspect_model(f"categories.{name}", category)
+
+print(f"auto_update={auto_update_status}")
+print("stale_models=" + ",".join(stale))
+guidance = []
+if auto_update_status != "pinned":
+    guidance.append("Pin oh-my-openagent auto_update=false so local LMM patches are not overwritten.")
+if stale:
+    guidance.append("Run llama-model sync-opencode to replace stale glyphos/glyphos-fast oh-my-openagent model ids.")
+print("guidance=" + " ".join(guidance))
+PY
+        )
+    fi
+    # oh-my-openagent log scanner: inspect plugin log for fatal error signatures
+    if [[ -f "$OH_MY_OPENAGENT_LOG_FILE" ]]; then
+        oh_my_openagent_recent_error_log="$OH_MY_OPENAGENT_LOG_FILE"
+    elif [[ -f /tmp/oh-my-opencode.log ]]; then
+        oh_my_openagent_recent_error_log="/tmp/oh-my-opencode.log"
+    fi
+    if [[ -n "$oh_my_openagent_recent_error_log" ]]; then
+        while IFS='=' read -r key value; do
+            case "$key" in
+                error) oh_my_openagent_recent_error="$value" ;;
+                detail) oh_my_openagent_recent_error_detail="$value" ;;
+                guidance) oh_my_openagent_recent_error_guidance="$value" ;;
+            esac
+        done < <(python3 - "$oh_my_openagent_recent_error_log" <<'PY' 2>/dev/null || printf 'error=unknown\nguidance=Unable to scan oh-my-openagent log.\n'
+import re
+import sys
+from pathlib import Path
+
+log_path = Path(sys.argv[1])
+try:
+    text = log_path.read_text(encoding="utf-8", errors="replace")
+except Exception:
+    print("error=unreadable")
+    print("guidance=Could not read oh-my-openagent log file.")
+    raise SystemExit(0)
+
+error = ""
+detail = ""
+guidance = ""
+
+# ProviderModelNotFoundError
+pmatch = re.search(r"ProviderModelNotFoundError.*?glyphos[_-]", text)
+if pmatch:
+    error = "ProviderModelNotFoundError"
+    detail = pmatch.group(0).strip()[:200]
+    guidance = "Run llama-model sync-opencode to replace stale glyphos/glyphos-fast provider IDs."
+
+# #3883 required-parameter error
+if not error:
+    rmatch = re.search(r"(?:Invalid arguments|parameter is REQUIRED).*?(?:run_in_background|load_skills)", text)
+    if rmatch:
+        error = "RequiredParameterError"
+        detail = rmatch.group(0).strip()[:200]
+        guidance = "The task() defaulting patch for omitted run_in_background/load_skills is missing. Reapply the oh-my-openagent hot patch."
+
+# auto-update overwrite detection
+if not error:
+    umatch = re.search(r"auto.?update.*?(?:overwr|replac|new version|\d+\.\d+\.\d+)", text, re.I)
+    if umatch:
+        error = "AutoUpdateOverwrite"
+        detail = umatch.group(0).strip()[:200]
+        guidance = "oh-my-openagent was auto-updated and may have overwritten local hot patches. Pin auto_update: false and reapply patches."
+
+# uncaught session/plugin errors
+if not error:
+    smatch = re.search(r"(?:session\.error|uncaught|plugin crash|fatal.*plugin)", text, re.I)
+    if smatch:
+        error = "PluginError"
+        detail = smatch.group(0).strip()[:200]
+        guidance = "Check oh-my-openagent log for details. If OpenCode is unusable, run 'llama-model opencode-plugin disable-oh-my-openagent'."
+
+print(f"error={error}")
+print(f"detail={detail}")
+print(f"guidance={guidance}")
+PY
+        )
+        if [[ -n "$oh_my_openagent_recent_error_guidance" ]]; then
+            oh_my_openagent_guidance="${oh_my_openagent_guidance:+$oh_my_openagent_guidance }$oh_my_openagent_recent_error_guidance"
+        fi
+    fi
+    # Check opencode.json plugin status (safe-mode awareness)
+    if [[ -f "$OPENCODE_CONFIG_FILE" ]]; then
+        oh_my_openagent_plugin_enabled="$(python3 - "$OPENCODE_CONFIG_FILE" <<'PY' 2>/dev/null || printf 'unknown\n'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    print("unknown")
+    raise SystemExit(0)
+
+plugins = data.get("plugin") if isinstance(data, dict) else []
+if not isinstance(plugins, list):
+    print("unknown")
+    raise SystemExit(0)
+
+for p in plugins:
+    if isinstance(p, str) and "oh-my-openagent" in p:
+        print("yes")
+        raise SystemExit(0)
+    if isinstance(p, dict) and "oh-my-openagent" in str(p.get("name", "") or p.get("path", "")):
+        print("yes")
+        raise SystemExit(0)
+print("no")
+PY
+        )"
     fi
     if [[ "$legacy_opencode_gateway_default" == "yes" || -n "$stale_opencode_providers" ]]; then
         route_state="mixed-legacy"
@@ -4022,7 +4251,15 @@ print("glyphos_config=" + ("yes" if data.get("glyphos_config_exists") else "no")
     printf 'oh_my_openagent_package: %s\n' "$oh_my_openagent_package_dir"
     printf 'oh_my_openagent_version: %s\n' "$oh_my_openagent_version"
     printf 'oh_my_openagent_wake_patch: %s\n' "$oh_my_openagent_wake_patch"
+    printf 'oh_my_openagent_task_defaults_patch: %s\n' "$oh_my_openagent_task_defaults_patch"
+    printf 'oh_my_openagent_auto_update: %s\n' "$oh_my_openagent_auto_update"
+    printf 'oh_my_openagent_config_stale_models: %s\n' "$oh_my_openagent_config_stale_models"
     printf 'oh_my_openagent_guidance: %s\n' "$oh_my_openagent_guidance"
+    printf 'oh_my_openagent_recent_error: %s\n' "$oh_my_openagent_recent_error"
+    printf 'oh_my_openagent_recent_error_detail: %s\n' "$oh_my_openagent_recent_error_detail"
+    printf 'oh_my_openagent_recent_error_log: %s\n' "$oh_my_openagent_recent_error_log"
+    printf 'oh_my_openagent_recent_error_guidance: %s\n' "$oh_my_openagent_recent_error_guidance"
+    printf 'oh_my_openagent_plugin_enabled: %s\n' "$oh_my_openagent_plugin_enabled"
     printf 'binary_ok: %s\n' "$binary_ok"
     printf 'binary: %s\n' "${SELECTED_LLAMA_SERVER_BIN:-}"
     printf 'binary_source: %s\n' "${SELECTED_LLAMA_SERVER_SOURCE:-none}"
@@ -4884,7 +5121,7 @@ opencode_preset_values() {
     local preset="${1:-balanced}"
     case "$preset" in
         balanced)
-            printf '1800000\t60000\n'
+            printf '1800000\t180000\n'
             ;;
         long-run|longrun)
             printf '7200000\t300000\n'
@@ -4985,9 +5222,9 @@ sync_opencode() {
     available_models="$(opencode_available_models || true)"
     openagent_available_models="$available_models"
     if [[ -n "$openagent_available_models" ]]; then
-        openagent_available_models+=",glyphos/$SYNC_TARGET_MODEL_NAME,glyphos-fast/$SYNC_TARGET_MODEL_NAME"
+        openagent_available_models+=",llamacpp/$SYNC_TARGET_MODEL_NAME,llamacpp_fast/$SYNC_TARGET_MODEL_NAME"
     else
-        openagent_available_models="glyphos/$SYNC_TARGET_MODEL_NAME,glyphos-fast/$SYNC_TARGET_MODEL_NAME"
+        openagent_available_models="llamacpp/$SYNC_TARGET_MODEL_NAME,llamacpp_fast/$SYNC_TARGET_MODEL_NAME"
     fi
     [[ -f "$OPENCODE_CONFIG_FILE" ]] && config_exists_before="yes"
     [[ -f "$OPENCODE_MODEL_STATE_FILE" ]] && state_exists_before="yes"
@@ -5016,8 +5253,8 @@ sync_opencode() {
             python3 "$APP_ROOT/scripts/integration_sync.py" oh-my-openagent \
                 --config-file "$OH_MY_OPENAGENT_CONFIG_FILE" \
                 --model-name "$SYNC_TARGET_MODEL_NAME" \
-                --full-provider-name glyphos \
-                --fast-provider-name glyphos-fast \
+                --full-provider-name llamacpp \
+                --fast-provider-name llamacpp_fast \
                 --available-models "$openagent_available_models" || return $?
             openagent_status="synced"
         else
@@ -5933,6 +6170,163 @@ dashboard_service_uninstall() {
     printf 'removed %s\n' "$DASHBOARD_SERVICE_UNIT_FILE"
 }
 
+opencode_plugin_command() {
+    local action="${1:-status}"
+    shift || true
+
+    case "$action" in
+        status)
+            if [[ -f "$OPENCODE_CONFIG_FILE" ]]; then
+                python3 - "$OPENCODE_CONFIG_FILE" <<'PY'
+import json, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception as e:
+    print(f"error: unreadable config: {e}")
+    sys.exit(1)
+
+plugins = data.get("plugin", [])
+if not isinstance(plugins, list):
+    print("plugin: [] (missing or invalid)")
+    print("oh-my-openagent: unknown")
+    sys.exit(0)
+
+enabled = False
+for p in plugins:
+    name = ""
+    if isinstance(p, str):
+        name = p
+    elif isinstance(p, dict):
+        name = str(p.get("name", "") or p.get("path", ""))
+    if "oh-my-openagent" in name:
+        enabled = True
+        print(f"oh-my-openagent: enabled ({name})")
+if not enabled:
+    print("oh-my-openagent: disabled or not configured")
+PY
+            else
+                printf 'error: OpenCode config not found at %s\n' "$OPENCODE_CONFIG_FILE"
+                return 1
+            fi
+            ;;
+        disable)
+            if [[ ! -f "$OPENCODE_CONFIG_FILE" ]]; then
+                printf 'error: OpenCode config not found at %s\n' "$OPENCODE_CONFIG_FILE"
+                return 1
+            fi
+            python3 - "$OPENCODE_CONFIG_FILE" <<'PY'
+import json, shutil, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+backup = path.with_suffix(path.suffix + ".lmm-plugin-backup")
+
+if backup.exists():
+    print(f"warning: backup already exists at {backup}; overwriting")
+shutil.copy2(str(path), str(backup))
+
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception as e:
+    print(f"error: unreadable config: {e}")
+    sys.exit(1)
+
+plugins = data.get("plugin", [])
+if not isinstance(plugins, list):
+    print("plugin: not a list, nothing to disable")
+    sys.exit(0)
+
+original_count = len(plugins)
+filtered = []
+removed = []
+for p in plugins:
+    name = ""
+    if isinstance(p, str):
+        name = p
+    elif isinstance(p, dict):
+        name = str(p.get("name", "") or p.get("path", ""))
+    if "oh-my-openagent" in name:
+        removed.append(name)
+    else:
+        filtered.append(p)
+
+if not removed:
+    print("oh-my-openagent plugin not found; nothing to disable")
+    sys.exit(0)
+
+data["plugin"] = filtered
+path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+print(f"disabled oh-my-openagent plugin entries: {removed}")
+print(f"backup saved to: {backup}")
+print("")
+print("Restart OpenCode for the change to take effect.")
+PY
+            ;;
+        enable)
+            if [[ ! -f "$OPENCODE_CONFIG_FILE" ]]; then
+                printf 'error: OpenCode config not found at %s\n' "$OPENCODE_CONFIG_FILE"
+                return 1
+            fi
+            python3 - "$OPENCODE_CONFIG_FILE" <<'PY'
+import json, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception as e:
+    print(f"error: unreadable config: {e}")
+    sys.exit(1)
+
+plugins = data.get("plugin", [])
+if not isinstance(plugins, list):
+    print("plugin: not a list, cannot enable")
+    sys.exit(1)
+
+# Check if already present
+for p in plugins:
+    name = ""
+    if isinstance(p, str):
+        name = p
+    elif isinstance(p, dict):
+        name = str(p.get("name", "") or p.get("path", ""))
+    if "oh-my-openagent" in name:
+        print(f"oh-my-openagent already enabled: {name}")
+        sys.exit(0)
+
+# Restore from backup if available
+backup = path.with_suffix(path.suffix + ".lmm-plugin-backup")
+if backup.exists():
+    try:
+        bak_data = json.loads(backup.read_text(encoding="utf-8"))
+        bak_plugins = bak_data.get("plugin", [])
+        restored = [p for p in bak_plugins if isinstance(p, str) and "oh-my-openagent" in p or (isinstance(p, dict) and "oh-my-openagent" in str(p.get("name", "") or p.get("path", "")))]
+        if restored:
+            plugins.append(restored[0])
+            data["plugin"] = plugins
+            path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            print(f"restored oh-my-openagent plugin from backup: {restored[0]}")
+            print("Restart OpenCode for the change to take effect.")
+            sys.exit(0)
+    except Exception:
+        pass
+
+print("error: no backup found and oh-my-openagent is not in the current config.")
+print("Reinstall oh-my-openagent manually or use the backup at: oh-my-openagent.json")
+sys.exit(1)
+PY
+            ;;
+        *)
+            printf 'Usage: llama-model opencode-plugin status|disable|enable\n'
+            return 1
+            ;;
+    esac
+}
+
 lmm_handoff_command() {
     local action="${1:-status}"
     shift || true
@@ -6120,6 +6514,10 @@ main() {
         dashboard-service)
             shift
             dashboard_service_command "$@"
+            ;;
+        opencode-plugin)
+            shift
+            opencode_plugin_command "$@"
             ;;
         handoff)
             shift

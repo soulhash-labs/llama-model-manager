@@ -1,17 +1,26 @@
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable, Iterator
 from typing import Any
 
 from lmm_errors import GatewayError
 
+_client_cache: dict[str, Any] | None = None
+_client_cache_lock = threading.Lock()
+
 
 def create_router(*, cloud_routing_config_fn: Callable[[], tuple[list[str], str]]):
     from glyphos_ai.ai_compute.api_client import create_configured_clients  # type: ignore
     from glyphos_ai.ai_compute.router import AdaptiveRouter, RoutingConfig  # type: ignore
 
-    clients = create_configured_clients()
+    global _client_cache
+    if _client_cache is None:
+        with _client_cache_lock:
+            if _client_cache is None:
+                _client_cache = create_configured_clients()
+    clients = _client_cache
     cloud_fallback_order, preferred_cloud = cloud_routing_config_fn()
     return AdaptiveRouter(
         llamacpp_client=clients.get("llamacpp"),

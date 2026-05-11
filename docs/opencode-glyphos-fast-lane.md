@@ -35,15 +35,14 @@ The fast lane keeps protocol normalization, explicit upstream context, GlyphOS p
 
 `llama-model sync-opencode` writes:
 
-- `llamacpp` provider for the selected route mode
-- `glyphos` provider for the full lane
-- `glyphos-fast` provider for the fast lane
+- GlyphOS full lane provider on `4010`, registered as `llamacpp`
+- GlyphOS fast lane provider on `4011`, registered as `llamacpp_fast`
 
-The selected OpenCode model remains local-first. The extra GlyphOS provider entries make fast/full routing explicit for operator or harness selection without making raw llama.cpp the default fallback.
+The selected OpenCode model remains local-first. The LMM provider entries make GlyphOS fast/full routing explicit for operator or harness selection without making raw llama.cpp the default fallback.
 
-When the OpenCode CLI is available, sync reads the live model catalog and validates the selected local model against it before writing config. The generated `glyphos` and `glyphos-fast` provider IDs are also written into sync diagnostics so operators can confirm what this run introduced.
+When the OpenCode CLI is available, sync reads the live model catalog and validates the selected local model against it before writing config. The generated `llamacpp` and `llamacpp_fast` provider IDs are also written into sync diagnostics so operators can confirm what this run introduced.
 
-If `~/.config/opencode/oh-my-openagent.json` exists, `sync-opencode` also updates the known oh-my-openagent agent entries to prefer `glyphos-fast/<model>` with `glyphos/<model>` as fallback. Set `LLAMA_MODEL_SYNC_OH_MY_OPENAGENT=0` to skip that agent-layer sync.
+If `~/.config/opencode/oh-my-openagent.json` exists, `sync-opencode` also updates the known oh-my-openagent agent entries to use `llamacpp_fast/<model>` for fast-lane agents and `llamacpp/<model>` for full-lane agents. It also pins `auto_update: false` so locally patched plugin bundles are not overwritten. Set `LLAMA_MODEL_SYNC_OH_MY_OPENAGENT=0` to skip that agent-layer sync.
 
 ## Runtime Policy Source
 

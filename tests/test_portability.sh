@@ -1444,6 +1444,58 @@ EOF
     assert_contains "$output" "session.prompt wake-up patch"
 }
 
+test_doctor_reports_oh_my_openagent_task_defaults_patch_status() {
+    local tmp
+    local package_dir
+    local output
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+    package_dir="$tmp/home/.cache/opencode/packages/oh-my-openagent@latest/node_modules/oh-my-openagent"
+    mkdir -p "$package_dir/dist"
+    cat >"$package_dir/package.json" <<'EOF'
+{"version":"4.0.0"}
+EOF
+    cat >"$package_dir/dist/index.js" <<'EOF'
+async function prepareDelegateTaskArgs(args, ctx) {
+  const runInBackground = args.run_in_background;
+  if (runInBackground === undefined) {
+    throw new Error("Invalid arguments: 'run_in_background' parameter is REQUIRED.");
+  }
+  let loadSkills = args.load_skills;
+  if (loadSkills === undefined) {
+    throw new Error("Invalid arguments: 'load_skills' parameter is REQUIRED.");
+  }
+}
+// src/tools/delegate-task/tool-description.ts
+EOF
+
+    output="$(LLAMA_MODEL_WEB_PORT=9 run_doctor "$tmp")"
+
+    assert_contains "$output" "oh_my_openagent_task_defaults_patch: no"
+    assert_contains "$output" "task() defaulting patch"
+
+    cat >"$package_dir/dist/index.js" <<'EOF'
+async function prepareDelegateTaskArgs(args, ctx) {
+  const runInBackground = args.run_in_background === undefined ? false : args.run_in_background;
+  let loadSkills = args.load_skills;
+  if (typeof loadSkills === "string") {
+    loadSkills = [];
+  }
+  if (loadSkills === undefined) {
+    loadSkills = [];
+  }
+  args.run_in_background = runInBackground;
+  args.load_skills = loadSkills;
+}
+// src/tools/delegate-task/tool-description.ts
+EOF
+
+    output="$(LLAMA_MODEL_WEB_PORT=9 run_doctor "$tmp")"
+
+    assert_contains "$output" "oh_my_openagent_task_defaults_patch: yes"
+}
+
 test_dashboard_service_unit_rendering() {
     local unit
 
@@ -1591,8 +1643,8 @@ EOF
     openagent_config="$(cat "$tmp/config/opencode/oh-my-openagent.json")"
     state_json="$(cat "$tmp/state/opencode/model.json")"
     assert_contains "$config" '"model": "llamacpp/Qwen3.5-9B-Q8_0.gguf"'
-    assert_contains "$config" '"glyphos"'
-    assert_contains "$config" '"glyphos-fast"'
+    assert_contains "$config" '"llamacpp"'
+    assert_contains "$config" '"llamacpp_fast"'
     assert_contains "$config" '"baseURL": "http://127.0.0.1:4010/v1"'
     assert_contains "$config" '"baseURL": "http://127.0.0.1:4011/v1"'
     assert_contains "$config" '"timeout": 1800000'
@@ -1612,11 +1664,13 @@ EOF
     assert_contains "$state_json" '"sessionTimeoutObservedMs": 1800000'
     assert_contains "$state_json" '"pendingToolAbortGuidance"'
     assert_contains "$state_json" '"favorite"'
-    assert_contains "$openagent_config" '"model": "glyphos-fast/Qwen3.5-9B-Q8_0.gguf"'
-    assert_contains "$openagent_config" '"fallback": "glyphos/Qwen3.5-9B-Q8_0.gguf"'
-    assert_contains "$openagent_config" '"legacy/model"'
+    assert_contains "$openagent_config" '"auto_update": false'
+    assert_contains "$openagent_config" '"model": "llamacpp/Qwen3.5-9B-Q8_0.gguf"'
+    assert_contains "$openagent_config" '"fallback_models": ['
+    assert_contains "$openagent_config" '"llamacpp_fast/Qwen3.5-9B-Q8_0.gguf"'
     assert_contains "$openagent_config" '"model": "keep/model"'
     assert_contains "$openagent_config" '"openagentSync"'
+    assert_contains "$openagent_config" '"autoUpdatePinned": true'
 }
 
 test_sync_opencode_removes_stale_local_provider_blocks() {
@@ -2261,6 +2315,7 @@ main() {
     test_context_mcp_build_repairs_missing_dist
     test_doctor_reports_legacy_route_state
     test_doctor_reports_oh_my_openagent_wake_patch_status
+    test_doctor_reports_oh_my_openagent_task_defaults_patch_status
     test_dashboard_service_unit_rendering
     test_dashboard_service_status_reports_unsupported_without_systemctl
     test_doctor_reports_external_systemd_owner
@@ -2282,7 +2337,105 @@ main() {
     test_claude_gateway_detects_existing_listener
     test_claude_gateway_timeout_default_visible
     test_claude_gateway_status_without_runtime_is_clean
+    test_opencode_plugin_disable_enable_safe_mode
+    test_doctor_log_scanner_detects_plugin_error
     printf 'All portability tests passed.\n'
+}
+
+test_opencode_plugin_disable_enable_safe_mode() {
+    local tmp
+    local output
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+
+    # Create a synthetic opencode.json with oh-my-openagent plugin
+    mkdir -p "$tmp/config/opencode"
+    cat >"$tmp/config/opencode/opencode.json" <<'EOF'
+{
+  "provider": {},
+  "plugin": ["oh-my-openagent@latest", "some-other-plugin"],
+  "model": "llamacpp/test"
+}
+EOF
+
+    # Test: status shows enabled
+    output="$(HOME="$tmp/home" XDG_CONFIG_HOME="$tmp/config" "$BIN" opencode-plugin status)"
+    assert_contains "$output" "oh-my-openagent: enabled"
+
+    # Test: disable removes plugin, preserves other plugins
+    output="$(HOME="$tmp/home" XDG_CONFIG_HOME="$tmp/config" "$BIN" opencode-plugin disable)"
+    assert_contains "$output" "disabled oh-my-openagent plugin"
+    assert_contains "$output" "backup saved"
+    config=$(cat "$tmp/config/opencode/opencode.json")
+    assert_not_contains "$config" "oh-my-openagent"
+    assert_contains "$config" "some-other-plugin"
+    # Backup must exist
+    test -f "$tmp/config/opencode/opencode.json.lmm-plugin-backup" || {
+        printf 'FAIL: backup not created\n'
+        return 1
+    }
+
+    # Test: status shows disabled
+    output="$(HOME="$tmp/home" XDG_CONFIG_HOME="$tmp/config" "$BIN" opencode-plugin status)"
+    assert_contains "$output" "oh-my-openagent: disabled"
+
+    # Test: enable restores from backup
+    output="$(HOME="$tmp/home" XDG_CONFIG_HOME="$tmp/config" "$BIN" opencode-plugin enable)"
+    assert_contains "$output" "restored oh-my-openagent plugin from backup"
+    config=$(cat "$tmp/config/opencode/opencode.json")
+    assert_contains "$config" "oh-my-openagent"
+    assert_contains "$config" "some-other-plugin"
+
+    # Test: re-enable is idempotent
+    output="$(HOME="$tmp/home" XDG_CONFIG_HOME="$tmp/config" "$BIN" opencode-plugin enable)"
+    assert_contains "$output" "already enabled"
+
+    rm -rf "$tmp"
+}
+
+test_doctor_log_scanner_detects_plugin_error() {
+    local tmp
+    local output
+
+    tmp="$(mktemp -d)"
+    make_env "$tmp"
+
+    # Create a synthetic oh-my-opencode log with a ProviderModelNotFoundError
+    mkdir -p "$tmp/config/opencode"
+    cat >"$tmp/tmp/oh-my-opencode.log" <<'EOF'
+[2026-05-09 12:34:56] [error] ProviderModelNotFoundError: Model not found: glyphos-fast/Qwen3.5-4B.gguf
+[2026-05-09 12:34:56] [info] Retrying with fallback model...
+EOF
+
+    # Create a stub oh-my-openagent package so doctor reaches the log scanner
+    local package_dir="$tmp/home/.cache/opencode/packages/oh-my-openagent@latest/node_modules/oh-my-openagent"
+    mkdir -p "$package_dir/dist"
+    cat >"$package_dir/package.json" <<'EOF'
+{"version":"3.17.13"}
+EOF
+    # Write a wake-patched dist so log scan diagnostics proceed
+    cat >"$package_dir/dist/index.js" <<'EOF'
+async function notifyParentSession(task) {
+  this.client.session.prompt({...}).then(() => {}).catch(() => {});
+}
+function prepareDelegateTaskArgs(args, ctx) {
+  const runInBackground = args.run_in_background === undefined ? false : args.run_in_background;
+  let loadSkills = args.load_skills;
+  if (loadSkills === undefined) { loadSkills = []; }
+  args.run_in_background = runInBackground;
+  args.load_skills = loadSkills;
+}
+EOF
+
+    # Use OH_MY_OPENAGENT_LOG_FILE to point at our synthetic log
+    output="$(HOME="$tmp/home" XDG_CONFIG_HOME="$tmp/config" XDG_STATE_HOME="$tmp/state" LLAMA_SERVER_RUNTIME_DIR="$tmp/runtime" LLAMA_MODEL_WEB_PORT=9 OH_MY_OPENAGENT_LOG_FILE="$tmp/tmp/oh-my-opencode.log" "$BIN" doctor 2>/dev/null || true)"
+
+    assert_contains "$output" "oh_my_openagent_recent_error: ProviderModelNotFoundError"
+    assert_contains "$output" "oh_my_openagent_recent_error_detail: ProviderModelNotFoundError"
+    assert_contains "$output" "oh_my_openagent_recent_error_guidance: Run llama-model sync-opencode"
+
+    rm -rf "$tmp"
 }
 
 main "$@"

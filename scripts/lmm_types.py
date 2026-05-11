@@ -67,6 +67,14 @@ class RunRecord:
     session_id: str = ""
     upstream_session_ref: str = ""
     handoff_summary: str = ""
+    request_fingerprint: str = ""
+    tool_invocation_mode: str = ""
+    tool_name: str = ""
+    lane: str = ""
+    repair_attempted: bool = False
+    repair_succeeded: bool = False
+    stream_tool_call_detected: bool = False
+    stream_tool_call_name: str = ""
     artifacts: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
 
@@ -120,6 +128,22 @@ class RunRecord:
             result["upstream_session_ref"] = self.upstream_session_ref
         if self.handoff_summary:
             result["handoff_summary"] = self.handoff_summary
+        if self.request_fingerprint:
+            result["request_fingerprint"] = self.request_fingerprint
+        if self.tool_invocation_mode:
+            result["tool_invocation_mode"] = self.tool_invocation_mode
+        if self.tool_name:
+            result["tool_name"] = self.tool_name
+        if self.lane:
+            result["lane"] = self.lane
+        if self.repair_attempted:
+            result["repair_attempted"] = self.repair_attempted
+        if self.repair_succeeded:
+            result["repair_succeeded"] = self.repair_succeeded
+        if self.stream_tool_call_detected:
+            result["stream_tool_call_detected"] = self.stream_tool_call_detected
+        if self.stream_tool_call_name:
+            result["stream_tool_call_name"] = self.stream_tool_call_name
         if self.artifacts:
             result["artifacts"] = list(self.artifacts)
         if self.tags:
@@ -164,6 +188,14 @@ class RunRecord:
             session_id=str(data.get("session_id", "")),
             upstream_session_ref=str(data.get("upstream_session_ref", "")),
             handoff_summary=str(data.get("handoff_summary", "")),
+            request_fingerprint=str(data.get("request_fingerprint", "")),
+            tool_invocation_mode=str(data.get("tool_invocation_mode", "")),
+            tool_name=str(data.get("tool_name", "")),
+            lane=str(data.get("lane", "")),
+            repair_attempted=bool(data.get("repair_attempted", False)),
+            repair_succeeded=bool(data.get("repair_succeeded", False)),
+            stream_tool_call_detected=bool(data.get("stream_tool_call_detected", False)),
+            stream_tool_call_name=str(data.get("stream_tool_call_name", "")),
             artifacts=list(data.get("artifacts", [])),
             tags=list(data.get("tags", [])),
         )

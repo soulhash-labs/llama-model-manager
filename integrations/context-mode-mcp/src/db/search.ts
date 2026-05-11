@@ -153,7 +153,7 @@ function substringFallback(
   terms: string[],
   safeLimit: number,
   debug: Record<string, unknown>,
-): { strategy: string; degraded: boolean; rows: SearchDoc[]; debug: Record<string, unknown> } {
+): { strategy: "substring_fallback"; degraded: boolean; rows: SearchDoc[]; debug: Record<string, unknown> } {
   const like = `%${query.toLowerCase()}%`;
   const rows = db.all<{
     chunk_id: string;

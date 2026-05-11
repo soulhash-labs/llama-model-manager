@@ -939,6 +939,16 @@ function latestGatewayRequest(gatewayRequests) {
   return Array.isArray(recent) && recent.length && typeof recent[0] === "object" ? recent[0] : {};
 }
 
+function glyphEncodingTraceLabel(trace) {
+  if (trace.glyph_encoding_used) return "Glyph encoded";
+  const status = String(trace.glyph_encoding_status || "").trim();
+  if (status === "disabled") return "Encoding disabled";
+  if (status === "no_context" || (!trace.context_used && trace.context_status === "empty")) return "Waiting for context";
+  if (trace.context_status === "disabled") return "Encoding disabled";
+  if (status) return `Encoding ${status}`;
+  return "Encoding not observed";
+}
+
 function renderContextPipelineTrace(gatewayRequests) {
   const trace = latestGatewayRequest(gatewayRequests);
   if (!Object.keys(trace).length) {
@@ -954,7 +964,7 @@ function renderContextPipelineTrace(gatewayRequests) {
   }
   const success = trace.success === true;
   const contextLabel = trace.context_used ? "Context enriched" : `Context ${trace.context_status || "skipped"}`;
-  const encodingLabel = trace.glyph_encoding_used ? "Glyph encoded" : `Encoding ${trace.glyph_encoding_status || "skipped"}`;
+  const encodingLabel = glyphEncodingTraceLabel(trace);
   const routeLabel = trace.route_target ? `Glyph-routed ${trace.route_target}` : "Not routed";
   setText("#context-trace-status", success ? "Backend completed" : "Backend error");
   setText("#context-trace-latency", joinNotes([
@@ -1044,7 +1054,7 @@ function deriveContextGlyphosPipeline(data) {
   if (Object.keys(provided).length) return provided;
 
   const defaults = data.defaults || {};
-  const enabled = isTruthySetting(defaults.LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE) || contextGlyphosLocallyActivated();
+  const enabled = isTruthySetting(defaults.LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE);
   const glyphosReady = Boolean(data.glyphos_config_exists);
   const glyphosTelemetry = data.glyphos_telemetry || {};
   const glyphosIntegrationReady = Boolean(glyphosTelemetry.available);
@@ -1537,7 +1547,7 @@ function renderGlyphosTelemetry(glyphosTelemetry, data = {}) {
     const components = [];
     components.push({ label: "Ψ Encoding", active: available });
     components.push({ label: "Adaptive Routing", active: available });
-    const contextEnriched = Boolean(data.context_glyphos_pipeline?.enabled || contextGlyphosLocallyActivated());
+    const contextEnriched = Boolean(data.context_glyphos_pipeline?.enabled);
     components.push({ label: "Context Injection", active: contextEnriched });
     pipelineComponents.innerHTML = components.map((c) => {
       const cls = c.active ? "chip chip-success" : "chip chip-neutral";
@@ -2032,7 +2042,7 @@ function renderDefaults(defaults) {
   $("#default-gateway-fast-stream-context-timeout").value = defaults.LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS || "250";
   $("#default-gateway-log").value = defaults.LLAMA_MODEL_GATEWAY_LOG || "$HOME/models/lmm-gateway.log";
   $("#default-gateway-fast-log").value = defaults.LLAMA_MODEL_GATEWAY_FAST_LOG || "$HOME/models/lmm-gateway-fast.log";
-  $("#default-context-glyphos-pipeline").checked = isTruthySetting(defaults.LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE) || contextGlyphosLocallyActivated();
+  $("#default-context-glyphos-pipeline").checked = isTruthySetting(defaults.LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE);
   $("#default-update-watcher-enabled").checked = isTruthySetting(defaults.LMM_UPDATE_WATCHER_ENABLED);
   $("#default-update-interval").value = defaults.LMM_UPDATE_CHECK_INTERVAL_HOURS || "12";
   $("#default-update-timeout").value = defaults.LMM_UPDATE_TIMEOUT_SECONDS || "5";

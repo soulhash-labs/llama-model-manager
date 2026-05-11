@@ -1,19 +1,67 @@
 from __future__ import annotations
 
 import os
+import sys
+import traceback
+from collections.abc import Callable, Iterator, Mapping
 from http.server import BaseHTTPRequestHandler
-from typing import Any
+from typing import Any, TypedDict, cast
 
 from lmm_errors import GatewayError, InvalidRequestError
 from lmm_types import ExitResult, RunStatus
 
+JsonDict = dict[str, Any]
+Headers = dict[str, str]
+RoutedResult = dict[str, Any]
+ContextPayload = Any
+ToolCallInfo = dict[str, Any] | None
 
-def handle_messages_count_tokens(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> None:
-    read_json = api["read_json"]
-    anthropic_messages_to_text = api["anthropic_messages_to_text"]
-    append_tool_contract_to_prompt = api["append_tool_contract_to_prompt"]
-    http_json = api["http_json"]
-    json_response = api["json_response"]
+RoutePromptFn = Callable[..., tuple[RoutedResult, Headers]]
+RoutePromptStreamFn = Callable[..., tuple[RoutedResult, Headers, Iterator[str]]]
+
+
+def _log_unexpected_handler_error(exc: BaseException) -> None:
+    sys.stderr.write(f"error: unexpected Anthropic gateway handler failure: {exc}\n")
+    sys.stderr.write(traceback.format_exc())
+
+
+class AnthropicCountTokensAPI(TypedDict):
+    read_json: Callable[[BaseHTTPRequestHandler], JsonDict]
+    anthropic_messages_to_text: Callable[[Any, Any], str]
+    append_tool_contract_to_prompt: Callable[..., str]
+    http_json: Callable[..., tuple[int, JsonDict]]
+    json_response: Callable[..., None]
+
+
+class AnthropicHandlerAPI(AnthropicCountTokensAPI):
+    now: Callable[[], float]
+    request_int: Callable[[JsonDict, str, int], int]
+    request_float: Callable[[JsonDict, str, float], float]
+    _current_iso_timestamp: Callable[[], str]
+    prepare_gateway_pipeline: Callable[..., tuple[Any, JsonDict]]
+    _build_context_payload: Callable[..., ContextPayload]
+    _invoke_route_prompt: Callable[..., tuple[RoutedResult, Headers]]
+    _invoke_route_prompt_stream: Callable[..., tuple[RoutedResult, Headers, Iterator[str]]]
+    route_prompt: RoutePromptFn
+    route_prompt_stream: RoutePromptStreamFn
+    _fallback_prompt_for_legacy_route: Callable[[str, JsonDict, ContextPayload], str]
+    build_anthropic_response: Callable[..., JsonDict]
+    classify_tool_invocation: Callable[[str, JsonDict], JsonDict]
+    apply_anthropic_tool_use_response: Callable[[JsonDict, str, JsonDict], JsonDict]
+    stream_anthropic_completion: Callable[..., tuple[str, bool, str, int, ToolCallInfo]]
+    _generate_handoff_summary: Callable[[JsonDict, int], None]
+    safe_record_run_record: Callable[[Any], None]
+    _run_record_from_dict: Callable[[JsonDict], Any]
+    safe_record_gateway_request: Callable[[JsonDict], None]
+
+
+def handle_messages_count_tokens(handler: BaseHTTPRequestHandler, api: Mapping[str, Any]) -> None:
+    typed_api = cast(AnthropicCountTokensAPI, api)
+    read_json = typed_api["read_json"]
+    anthropic_messages_to_text = typed_api["anthropic_messages_to_text"]
+    append_tool_contract_to_prompt = typed_api["append_tool_contract_to_prompt"]
+    http_json = typed_api["http_json"]
+    json_response = typed_api["json_response"]
 
     try:
         payload = read_json(handler)
@@ -37,29 +85,31 @@ def handle_messages_count_tokens(handler: BaseHTTPRequestHandler, api: dict[str,
         json_response(handler, 500, {"error": {"message": str(exc), "type": "internal_error"}})
 
 
-def handle_messages(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> None:
-    now = api["now"]
-    read_json = api["read_json"]
-    anthropic_messages_to_text = api["anthropic_messages_to_text"]
-    append_tool_contract_to_prompt = api["append_tool_contract_to_prompt"]
-    json_response = api["json_response"]
-    request_int = api["request_int"]
-    request_float = api["request_float"]
-    current_iso_timestamp = api["_current_iso_timestamp"]
-    prepare_gateway_pipeline = api["prepare_gateway_pipeline"]
-    build_context_payload = api["_build_context_payload"]
-    invoke_route_prompt = api["_invoke_route_prompt"]
-    invoke_route_prompt_stream = api["_invoke_route_prompt_stream"]
-    route_prompt = api["route_prompt"]
-    route_prompt_stream = api["route_prompt_stream"]
-    fallback_prompt_for_legacy_route = api["_fallback_prompt_for_legacy_route"]
-    build_anthropic_response = api["build_anthropic_response"]
-    apply_anthropic_tool_use_response = api["apply_anthropic_tool_use_response"]
-    stream_anthropic_completion = api["stream_anthropic_completion"]
-    generate_handoff_summary = api["_generate_handoff_summary"]
-    safe_record_run_record = api["safe_record_run_record"]
-    run_record_from_dict = api["_run_record_from_dict"]
-    safe_record_gateway_request = api["safe_record_gateway_request"]
+def handle_messages(handler: BaseHTTPRequestHandler, api: Mapping[str, Any]) -> None:
+    typed_api = cast(AnthropicHandlerAPI, api)
+    now = typed_api["now"]
+    read_json = typed_api["read_json"]
+    anthropic_messages_to_text = typed_api["anthropic_messages_to_text"]
+    append_tool_contract_to_prompt = typed_api["append_tool_contract_to_prompt"]
+    json_response = typed_api["json_response"]
+    request_int = typed_api["request_int"]
+    request_float = typed_api["request_float"]
+    current_iso_timestamp = typed_api["_current_iso_timestamp"]
+    prepare_gateway_pipeline = typed_api["prepare_gateway_pipeline"]
+    build_context_payload = typed_api["_build_context_payload"]
+    invoke_route_prompt = typed_api["_invoke_route_prompt"]
+    invoke_route_prompt_stream = typed_api["_invoke_route_prompt_stream"]
+    route_prompt = typed_api["route_prompt"]
+    route_prompt_stream = typed_api["route_prompt_stream"]
+    fallback_prompt_for_legacy_route = typed_api["_fallback_prompt_for_legacy_route"]
+    build_anthropic_response = typed_api["build_anthropic_response"]
+    classify_tool_invocation = typed_api["classify_tool_invocation"]
+    apply_anthropic_tool_use_response = typed_api["apply_anthropic_tool_use_response"]
+    stream_anthropic_completion = typed_api["stream_anthropic_completion"]
+    generate_handoff_summary = typed_api["_generate_handoff_summary"]
+    safe_record_run_record = typed_api["safe_record_run_record"]
+    run_record_from_dict = typed_api["_run_record_from_dict"]
+    safe_record_gateway_request = typed_api["safe_record_gateway_request"]
 
     started = now()
     try:
@@ -94,6 +144,7 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> Non
             "provider": "unknown",
             "prompt": prompt,
             "model": model,
+            "stream": stream,
             "timing": {"request_received_ms": 0, "prompt_normalized_ms": prompt_normalized_ms},
         }
 
@@ -166,6 +217,7 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> Non
                 headers=headers,
                 payload=payload,
             )
+            tool_report = classify_tool_invocation(text, payload)
             record.update(
                 {
                     "success": success,
@@ -177,7 +229,13 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> Non
                     "status": RunStatus.COMPLETED.value if success else RunStatus.CANCELLED.value,
                     "exit_result": ExitResult.SUCCESS.value if success else ExitResult.USER_CANCELLED.value,
                     "stream_tool_call_detected": bool(tool_call_info),
-                    "stream_tool_call_name": (tool_call_info or {}).get("name", ""),
+                    "stream_tool_call_name": str(tool_call_info.get("name", "")) if isinstance(tool_call_info, dict) else "",
+                    "tool_invocation_mode": tool_report["tool_invocation_mode"],
+                    "tool_name": tool_report["tool_name"],
+                    "lane": "4011" if record.get("gateway_mode") == "fast" else "4010",
+                    "session_id": record.get("session_id", ""),
+                    "repair_attempted": tool_report["repair_attempted"],
+                    "repair_succeeded": tool_report["repair_succeeded"],
                 }
             )
             if error_message:
@@ -200,34 +258,59 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> Non
 
         record.update(
             {
-                "route_target": routed["target"],
-                "reason_code": routed["reason_code"],
+                "route_target": routed.get("target", "unknown"),
+                "reason_code": routed.get("reason_code", "unknown"),
                 "success": True,
-                "latency_ms": routed["latency_ms"],
+                "latency_ms": routed.get("latency_ms", 0),
                 "route_latency_ms": routed.get("route_duration_ms", routed.get("latency_ms", 0)),
-                "provider": routed["target"],
+                "provider": routed.get("target", "unknown"),
                 "status": RunStatus.COMPLETED.value,
                 "exit_result": ExitResult.SUCCESS.value,
                 "completed_at": current_iso_timestamp(),
+                "encoding_status": context_payload.encoding_status,
+                "encoding_format": context_payload.encoding_format,
+                "encoding_ratio": context_payload.encoding_ratio,
+                "encoding_aware_routing": True,
             }
         )
+        tool_report = classify_tool_invocation(routed.get("text", ""), payload)
+        record.update(
+            {
+                "tool_invocation_mode": tool_report["tool_invocation_mode"],
+                "tool_name": tool_report["tool_name"],
+                "lane": "4011" if record.get("gateway_mode") == "fast" else "4010",
+                "session_id": record.get("session_id", ""),
+                "repair_attempted": tool_report["repair_attempted"],
+                "repair_succeeded": tool_report["repair_succeeded"],
+            }
+        )
+        if tool_report["tool_invocation_mode"] == "textual_pseudo_call" and not tool_report["repair_succeeded"]:
+            raise GatewayError(
+                "task tool invocation formation failed",
+                provider=record.get("provider", ""),
+                lane=record.get("lane", ""),
+                session_id=record.get("session_id", ""),
+                repair_attempted=tool_report["repair_attempted"],
+                repair_succeeded=tool_report["repair_succeeded"],
+            )
 
         response = build_anthropic_response(
-            text=routed["text"],
+            text=routed.get("text", ""),
             model=model,
             started=started,
             routed=routed,
             pipeline=pipeline,
         )
-        response = apply_anthropic_tool_use_response(response, routed["text"], payload)
+        response = apply_anthropic_tool_use_response(response, routed.get("text", ""), payload)
 
         safe_record_gateway_request(record)
         json_response(handler, 200, response)
     except InvalidRequestError as exc:
         json_response(handler, 400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
     except GatewayError as exc:
-        json_response(handler, 502, {"error": {"message": str(exc), "type": "gateway_error"}})
+        json_response(handler, 502, {"error": exc.to_dict()})
     except Exception as exc:
+        _log_unexpected_handler_error(exc)
         json_response(handler, 500, {"error": {"message": str(exc), "type": "internal_error"}})
 
 

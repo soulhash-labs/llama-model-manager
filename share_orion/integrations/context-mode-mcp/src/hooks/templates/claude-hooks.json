@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "events": [
+    { "name": "PreToolUse", "command": "claude-pre-tool-use.sh" },
+    { "name": "PostToolUse", "command": "claude-post-tool-use.sh" },
+    { "name": "PreCompact", "command": "claude-pre-compact.sh" },
+    { "name": "SessionStart", "command": "claude-session-start.sh" }
+  ],
+  "not_yet_supported": [
+    { "name": "tool-result", "command": "not-yet-supported.sh" }
+  ]
+}

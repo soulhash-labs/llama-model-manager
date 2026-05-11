@@ -1,11 +1,56 @@
 from __future__ import annotations
 
 import os
+import sys
+import traceback
+from collections.abc import Callable, Iterator, Mapping
 from http.server import BaseHTTPRequestHandler
-from typing import Any
+from typing import Any, TypedDict, cast
 
 from lmm_errors import GatewayError, InvalidRequestError
 from lmm_types import ExitResult, RunStatus
+
+JsonDict = dict[str, Any]
+Headers = dict[str, str]
+RoutedResult = dict[str, Any]
+ContextPayload = Any
+ToolCallInfo = dict[str, Any] | None
+
+RoutePromptFn = Callable[..., tuple[RoutedResult, Headers]]
+RoutePromptStreamFn = Callable[..., tuple[RoutedResult, Headers, Iterator[str]]]
+
+
+def _log_unexpected_handler_error(exc: BaseException) -> None:
+    sys.stderr.write(f"error: unexpected OpenAI gateway handler failure: {exc}\n")
+    sys.stderr.write(traceback.format_exc())
+
+
+class OpenAIHandlerAPI(TypedDict):
+    now: Callable[[], float]
+    context_status: Callable[[], tuple[str, bool]]
+    _current_iso_timestamp: Callable[[], str]
+    read_json: Callable[[BaseHTTPRequestHandler], JsonDict]
+    messages_to_prompt: Callable[[Any], str]
+    append_tool_contract_to_prompt: Callable[..., str]
+    classify_tool_invocation: Callable[[str, JsonDict], JsonDict]
+    apply_openai_tool_call_response: Callable[[JsonDict, str, JsonDict], JsonDict]
+    _extract_session_metadata: Callable[[JsonDict], JsonDict]
+    request_int: Callable[[JsonDict, str, int], int]
+    request_float: Callable[[JsonDict, str, float], float]
+    prepare_gateway_pipeline: Callable[..., tuple[Any, JsonDict]]
+    _build_context_payload: Callable[..., ContextPayload]
+    _invoke_route_prompt: Callable[..., tuple[RoutedResult, Headers]]
+    _invoke_route_prompt_stream: Callable[..., tuple[RoutedResult, Headers, Iterator[str]]]
+    route_prompt: RoutePromptFn
+    route_prompt_stream: RoutePromptStreamFn
+    _fallback_prompt_for_legacy_route: Callable[[str, JsonDict, ContextPayload], str]
+    stream_completion: Callable[..., tuple[str, bool, str, int, ToolCallInfo]]
+    _generate_handoff_summary: Callable[[JsonDict, int], None]
+    safe_record_run_record: Callable[[Any], None]
+    _run_record_from_dict: Callable[[JsonDict], Any]
+    safe_record_gateway_request: Callable[[JsonDict], None]
+    completion_payload: Callable[..., JsonDict]
+    json_response: Callable[..., None]
 
 
 def _build_openai_record(
@@ -14,7 +59,7 @@ def _build_openai_record(
     handler: BaseHTTPRequestHandler,
     context_state: str,
     context_used: bool,
-) -> dict[str, Any]:
+) -> JsonDict:
     return {
         "time": started,
         "started_at": "",
@@ -37,31 +82,33 @@ def _build_openai_record(
     }
 
 
-def handle_chat_completions(handler: BaseHTTPRequestHandler, api: dict[str, Any]) -> None:
-    now = api["now"]
-    context_status = api["context_status"]
-    current_iso_timestamp = api["_current_iso_timestamp"]
-    read_json = api["read_json"]
-    messages_to_prompt = api["messages_to_prompt"]
-    append_tool_contract_to_prompt = api["append_tool_contract_to_prompt"]
-    apply_openai_tool_call_response = api["apply_openai_tool_call_response"]
-    extract_session_metadata = api["_extract_session_metadata"]
-    request_int = api["request_int"]
-    request_float = api["request_float"]
-    prepare_gateway_pipeline = api["prepare_gateway_pipeline"]
-    build_context_payload = api["_build_context_payload"]
-    invoke_route_prompt = api["_invoke_route_prompt"]
-    invoke_route_prompt_stream = api["_invoke_route_prompt_stream"]
-    route_prompt = api["route_prompt"]
-    route_prompt_stream = api["route_prompt_stream"]
-    fallback_prompt_for_legacy_route = api["_fallback_prompt_for_legacy_route"]
-    stream_completion = api["stream_completion"]
-    generate_handoff_summary = api["_generate_handoff_summary"]
-    safe_record_run_record = api["safe_record_run_record"]
-    run_record_from_dict = api["_run_record_from_dict"]
-    safe_record_gateway_request = api["safe_record_gateway_request"]
-    completion_payload = api["completion_payload"]
-    json_response = api["json_response"]
+def handle_chat_completions(handler: BaseHTTPRequestHandler, api: Mapping[str, Any]) -> None:
+    typed_api = cast(OpenAIHandlerAPI, api)
+    now = typed_api["now"]
+    context_status = typed_api["context_status"]
+    current_iso_timestamp = typed_api["_current_iso_timestamp"]
+    read_json = typed_api["read_json"]
+    messages_to_prompt = typed_api["messages_to_prompt"]
+    append_tool_contract_to_prompt = typed_api["append_tool_contract_to_prompt"]
+    classify_tool_invocation = typed_api["classify_tool_invocation"]
+    apply_openai_tool_call_response = typed_api["apply_openai_tool_call_response"]
+    extract_session_metadata = typed_api["_extract_session_metadata"]
+    request_int = typed_api["request_int"]
+    request_float = typed_api["request_float"]
+    prepare_gateway_pipeline = typed_api["prepare_gateway_pipeline"]
+    build_context_payload = typed_api["_build_context_payload"]
+    invoke_route_prompt = typed_api["_invoke_route_prompt"]
+    invoke_route_prompt_stream = typed_api["_invoke_route_prompt_stream"]
+    route_prompt = typed_api["route_prompt"]
+    route_prompt_stream = typed_api["route_prompt_stream"]
+    fallback_prompt_for_legacy_route = typed_api["_fallback_prompt_for_legacy_route"]
+    stream_completion = typed_api["stream_completion"]
+    generate_handoff_summary = typed_api["_generate_handoff_summary"]
+    safe_record_run_record = typed_api["safe_record_run_record"]
+    run_record_from_dict = typed_api["_run_record_from_dict"]
+    safe_record_gateway_request = typed_api["safe_record_gateway_request"]
+    completion_payload = typed_api["completion_payload"]
+    json_response = typed_api["json_response"]
 
     started = now()
     context_state, context_used = context_status()
@@ -88,6 +135,7 @@ def handle_chat_completions(handler: BaseHTTPRequestHandler, api: dict[str, Any]
         max_tokens = request_int(payload, "max_tokens", int(os.environ.get("LMM_DEFAULT_MAX_TOKENS", "32768")))
         temperature = request_float(payload, "temperature", 0.7)
         stream = payload.get("stream") is True
+        record["stream"] = stream
         if not prompt.strip():
             raise InvalidRequestError("messages must contain text content")
 
@@ -167,6 +215,7 @@ def handle_chat_completions(handler: BaseHTTPRequestHandler, api: dict[str, Any]
                 headers=headers,
                 payload=payload,
             )
+            tool_report = classify_tool_invocation(text, payload)
             record.update(
                 {
                     "success": success,
@@ -175,7 +224,13 @@ def handle_chat_completions(handler: BaseHTTPRequestHandler, api: dict[str, Any]
                     "completion_chars": len(text),
                     "completed_at": current_iso_timestamp(),
                     "stream_tool_call_detected": bool(tool_call_info),
-                    "stream_tool_call_name": (tool_call_info or {}).get("name", ""),
+                    "stream_tool_call_name": str(tool_call_info.get("name", "")) if isinstance(tool_call_info, dict) else "",
+                    "tool_invocation_mode": tool_report["tool_invocation_mode"],
+                    "tool_name": tool_report["tool_name"],
+                    "lane": "4011" if record.get("gateway_mode") == "fast" else "4010",
+                    "session_id": record.get("session_id", ""),
+                    "repair_attempted": tool_report["repair_attempted"],
+                    "repair_succeeded": tool_report["repair_succeeded"],
                 }
             )
             if error_message:
@@ -210,12 +265,12 @@ def handle_chat_completions(handler: BaseHTTPRequestHandler, api: dict[str, Any]
         headers["X-LMM-Search-Degraded"] = str(bool(pipeline.get("search_degraded", False)))
         record.update(
             {
-                "route_target": routed["target"],
-                "reason_code": routed["reason_code"],
+                "route_target": routed.get("target", "unknown"),
+                "reason_code": routed.get("reason_code", "unknown"),
                 "success": True,
-                "latency_ms": routed["latency_ms"],
+                "latency_ms": routed.get("latency_ms", 0),
                 "route_latency_ms": routed.get("route_duration_ms", routed.get("latency_ms", 0)),
-                "provider": routed["target"],
+                "provider": routed.get("target", "unknown"),
                 "status": RunStatus.COMPLETED.value,
                 "exit_result": ExitResult.SUCCESS.value,
                 "completed_at": current_iso_timestamp(),
@@ -225,13 +280,33 @@ def handle_chat_completions(handler: BaseHTTPRequestHandler, api: dict[str, Any]
                 "encoding_aware_routing": True,
             }
         )
+        tool_report = classify_tool_invocation(routed.get("text", ""), payload)
+        record.update(
+            {
+                "tool_invocation_mode": tool_report["tool_invocation_mode"],
+                "tool_name": tool_report["tool_name"],
+                "lane": "4011" if record.get("gateway_mode") == "fast" else "4010",
+                "session_id": record.get("session_id", ""),
+                "repair_attempted": tool_report["repair_attempted"],
+                "repair_succeeded": tool_report["repair_succeeded"],
+            }
+        )
+        if tool_report["tool_invocation_mode"] == "textual_pseudo_call" and not tool_report["repair_succeeded"]:
+            raise GatewayError(
+                "task tool invocation formation failed",
+                provider=record.get("provider", ""),
+                lane=record.get("lane", ""),
+                session_id=record.get("session_id", ""),
+                repair_attempted=tool_report["repair_attempted"],
+                repair_succeeded=tool_report["repair_succeeded"],
+            )
         response_payload = completion_payload(
             started=started,
             model=model,
             routed=routed,
             pipeline=pipeline,
         )
-        response_payload = apply_openai_tool_call_response(response_payload, routed["text"], payload)
+        response_payload = apply_openai_tool_call_response(response_payload, routed.get("text", ""), payload)
         generate_handoff_summary(record, routed.get("latency_ms", 0))
         safe_record_run_record(run_record_from_dict(record))
         safe_record_gateway_request(record)
@@ -250,7 +325,7 @@ def handle_chat_completions(handler: BaseHTTPRequestHandler, api: dict[str, Any]
             400,
             {"error": {"message": str(exc), "type": "invalid_request_error"}, "lmm": record},
         )
-    except Exception as exc:
+    except GatewayError as exc:
         record["error"] = str(exc)
         record["status"] = RunStatus.FAILED.value
         record["exit_result"] = ExitResult.PROVIDER_ERROR.value
@@ -259,9 +334,18 @@ def handle_chat_completions(handler: BaseHTTPRequestHandler, api: dict[str, Any]
         generate_handoff_summary(record, record["latency_ms"])
         safe_record_gateway_request(record)
         safe_record_run_record(run_record_from_dict(record))
-        error_payload = (
-            exc.to_dict() if isinstance(exc, GatewayError) else {"message": str(exc), "type": "lmm_gateway_error"}
-        )
+        json_response(handler, 503, {"error": exc.to_dict(), "lmm": record})
+    except Exception as exc:
+        _log_unexpected_handler_error(exc)
+        record["error"] = str(exc)
+        record["status"] = RunStatus.FAILED.value
+        record["exit_result"] = ExitResult.PROVIDER_ERROR.value
+        record["latency_ms"] = round((now() - started) * 1000)
+        record["completed_at"] = current_iso_timestamp()
+        generate_handoff_summary(record, record["latency_ms"])
+        safe_record_gateway_request(record)
+        safe_record_run_record(run_record_from_dict(record))
+        error_payload = {"message": str(exc), "type": "lmm_gateway_error"}
         json_response(handler, 503, {"error": error_payload, "lmm": record})
 
 

@@ -1546,7 +1546,7 @@ class Manager:
         *,
         size_bytes_override: int = 0,
     ) -> dict[str, Any] | None:
-        repo_id = str(raw.get("id", "")).strip()
+        repo_id = str(raw.get("id") or "").strip()
         if not repo_id:
             return None
         siblings = raw.get("siblings", [])
@@ -1791,18 +1791,27 @@ class Manager:
             self.download_threads.pop(job_id, None)
             self.download_cancel_events.pop(job_id, None)
 
+    @staticmethod
+    def _download_worker_is_active(worker: threading.Thread | None) -> bool:
+        if worker is None:
+            return False
+        # Registered workers are started just after releasing download_lock.
+        # Treat not-yet-started workers as active so recovery cannot race that handoff.
+        return worker.ident is None or worker.is_alive()
+
+    def _prune_stopped_download_controls_locked(self) -> None:
+        stale = [
+            job_id
+            for job_id, worker in self.download_threads.items()
+            if worker.ident is not None and not worker.is_alive()
+        ]
+        for job_id in stale:
+            self.download_threads.pop(job_id, None)
+            self.download_cancel_events.pop(job_id, None)
+
     def _alive_download_thread_count(self) -> int:
         with self.download_lock:
-            # A Thread is not "alive" until it has been started. We register workers under the lock and
-            # start them after releasing it, so avoid evicting not-yet-started threads here.
-            stale = [
-                job_id
-                for job_id, worker in self.download_threads.items()
-                if worker.ident is not None and not worker.is_alive()
-            ]
-            for job_id in stale:
-                self.download_threads.pop(job_id, None)
-                self.download_cancel_events.pop(job_id, None)
+            self._prune_stopped_download_controls_locked()
             return len(self.download_threads)
 
     def _schedule_downloads(self) -> None:
@@ -2106,7 +2115,7 @@ class Manager:
                 job_id = str(job.get("id", "")).strip()
                 status = str(job.get("status", "")).strip()
                 worker = self.download_threads.get(job_id)
-                if status == "running" and (worker is None or not worker.is_alive()):
+                if status == "running" and not self._download_worker_is_active(worker):
                     job.update(
                         {
                             "status": "failed",

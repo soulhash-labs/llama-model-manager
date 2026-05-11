@@ -1,4 +1,6 @@
 import sys
+import threading
+import time
 import unittest
 import warnings
 from pathlib import Path
@@ -18,6 +20,7 @@ from glyphos_ai import (  # noqa: E402
     glyph_to_prompt,
     route_with_configured_clients,
 )
+from glyphos_ai.ai_compute.api_client import LlamaCppClient  # noqa: E402
 from glyphos_ai.ai_compute.router import reset_routing_telemetry, routing_telemetry_snapshot  # noqa: E402
 from glyphos_ai.glyph.encoder import encode_intent  # noqa: E402
 from glyphos_ai.glyph.types import GlyphPacket, Intent  # noqa: E402
@@ -155,6 +158,37 @@ class GlyphosPublicFlowTests(unittest.TestCase):
         messages = "\n".join(str(item.message) for item in caught)
         self.assertIn("GLYPHOS_OLLAMA_URL", messages)
         self.assertIn("GLYPHOS_PREFERRED_LOCAL_BACKEND", messages)
+
+    def test_llamacpp_availability_probe_is_thread_safe(self):
+        calls = 0
+        started = threading.Barrier(5)
+
+        def fake_http_json(method, url, *, timeout=30, **kwargs):
+            nonlocal calls
+            time.sleep(0.02)
+            calls += 1
+
+            class Response:
+                status_code = 200
+
+            return Response()
+
+        client = LlamaCppClient(base_url="http://127.0.0.1:8081/v1")
+        results: list[bool] = []
+
+        def check_available() -> None:
+            started.wait(timeout=2)
+            results.append(client.is_available())
+
+        with patch("glyphos_ai.ai_compute.api_client._http_json", side_effect=fake_http_json):
+            threads = [threading.Thread(target=check_available) for _ in range(5)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=2)
+
+        self.assertEqual(results, [True] * 5)
+        self.assertEqual(calls, 1)
 
     def test_build_router_from_env_is_llamacpp_only(self):
         local = DummyClient("llamacpp-local-ok")

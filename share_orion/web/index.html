@@ -1,0 +1,1081 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LLM Model Manager</title>
+    <meta
+      name="description"
+      content="Browser-first control surface for local llama.cpp models with registry switching, GGUF discovery, and runtime tuning."
+    >
+    <meta name="theme-color" content="#2763FF">
+    <link rel="icon" href="/branding/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#dashboard-main">Skip to dashboard</a>
+    <div class="page-shell">
+      <header class="operator-shell-header">
+        <div class="shell-title-row">
+          <div class="shell-brand-wrap">
+            <h1 class="shell-title">LLM Model Manager</h1>
+            <p id="status-subtitle" class="shell-status-copy">Loading live server state...</p>
+          </div>
+          <div class="shell-routing-row">
+            <span class="panel-tag shell-live-label">Live Signal</span>
+            <span id="hero-routing-mode" class="shell-routing-value">-</span>
+          </div>
+        </div>
+
+        <div class="shell-actions-row">
+          <div class="hero-actions">
+            <button
+              id="refresh-all"
+              class="button button-primary"
+              title="Reload live server status, registry entries, defaults, and the current discovery root."
+            >Refresh State</button>
+            <button
+              id="toggle-mode"
+              class="button"
+              title="Switch between safer single-client mode and higher-concurrency multi-client mode."
+            >Switch to Multi Client</button>
+          </div>
+          <div class="shell-kpi-row">
+            <article class="shell-kpi-card">
+              <span class="shell-kpi-label">Active Model</span>
+              <strong id="hero-current-model">-</strong>
+              <span id="hero-current-path" class="shell-kpi-note">-</span>
+            </article>
+            <article class="shell-kpi-card">
+              <span class="shell-kpi-label">Client Mode</span>
+              <strong id="hero-current-mode">-</strong>
+              <span id="hero-lanes" class="shell-kpi-note">-</span>
+            </article>
+            <article class="shell-kpi-card">
+              <span class="shell-kpi-label">Endpoint</span>
+              <strong id="hero-endpoint">-</strong>
+              <span id="hero-build" class="shell-kpi-note">-</span>
+            </article>
+            <article class="shell-kpi-card">
+              <span class="shell-kpi-label">Registry</span>
+              <strong id="hero-registry-count">-</strong>
+              <span id="hero-health" class="shell-kpi-note">-</span>
+            </article>
+          </div>
+        </div>
+      </header>
+
+      <section id="top-notice" class="notice-banner hidden" aria-live="polite"></section>
+      <section id="update-notice" class="notice-banner hidden" aria-live="polite"></section>
+
+      <div class="operator-workspace">
+        <nav class="side-nav" aria-label="Dashboard sections">
+          <div class="side-nav-head">
+            <span class="panel-tag">Operator Map</span>
+            <strong>LLM Manager</strong>
+            <span>Jump between pages from one map.</span>
+          </div>
+          <a href="#runtime-live" data-page="runtime-live">Overview</a>
+          <a href="#dashboard-service-panel" data-page="dashboard-service-panel">Service</a>
+          <a href="#transfers-remote" data-page="transfers-remote">Remote Models (huggingface)</a>
+          <a href="#models-registry" data-page="models-registry">Model Registry</a>
+          <a href="#models-editor" data-page="models-editor">Model Editor</a>
+          <a href="#models-discovery" data-page="models-discovery">Discovery (add new models)</a>
+          <a href="#settings-defaults" data-page="settings-defaults">Settings</a>
+          <a href="#integrations-panel" data-page="integrations-panel">Integrations</a>
+          <a href="#gateways-panel" data-page="gateways-panel">Gateways (harness / LLM)</a>
+          <a href="#pipelines-panel" data-page="pipelines-panel">Pipelines</a>
+          <a href="#cloud-providers-panel" data-page="cloud-providers-panel">Cloud providers</a>
+        </nav>
+
+      <main id="dashboard-main" class="operator-main">
+        <section id="runtime-live" class="panel status-panel dashboard-page is-active">
+          <div class="panel-head panel-head-anchored">
+            <div>
+              <span class="panel-tag">Engine Room</span>
+              <h2>Live Server</h2>
+              <p>Focused runtime view of the active model, binary compatibility posture, endpoint wiring, and operator controls.</p>
+            </div>
+            <div class="inline-actions">
+              <button
+                id="restart-server"
+                class="button"
+                title="Restart llama-server with the current model and saved settings. Use this after changing defaults."
+              >Restart</button>
+              <button
+                id="stop-server"
+                class="button button-danger"
+                title="Stop llama-server. The local API goes offline until you serve or restart a model."
+              >Stop</button>
+              <button
+                id="load-logs"
+                class="button"
+                title="Show the latest llama-server logs for warmup progress, load failures, and troubleshooting."
+              >Logs</button>
+            </div>
+          </div>
+
+          <div class="status-layout">
+            <article class="live-stage">
+              <span class="metric-label">Current Model</span>
+              <strong id="metric-model">-</strong>
+              <span id="metric-model-path" class="metric-note"></span>
+            </article>
+
+            <div class="status-side">
+              <article class="metric-card">
+                <span class="metric-label">Health</span>
+                <strong id="metric-health">-</strong>
+                <span id="metric-mode" class="metric-note"></span>
+              </article>
+              <article class="metric-card">
+                <span class="metric-label">Offload Status</span>
+                <strong id="metric-offload">-</strong>
+                <span id="metric-kv" class="metric-note"></span>
+              </article>
+              <article class="metric-card">
+                <span class="metric-label">Memory Posture</span>
+                <strong id="metric-gpu-memory">-</strong>
+                <span id="metric-gpu-processes" class="metric-note"></span>
+              </article>
+              <article class="metric-card">
+                <span class="metric-label">Endpoint</span>
+                <strong id="metric-endpoint">-</strong>
+                <span id="metric-build" class="metric-note"></span>
+              </article>
+              <article id="ownership-conflict-card" class="metric-card conflict-card hidden">
+                <span class="metric-label">Ownership Conflict</span>
+                <strong id="ownership-conflict-status">-</strong>
+                <span id="ownership-conflict-unit" class="metric-note">-</span>
+                <span id="ownership-conflict-message" class="metric-note">-</span>
+              </article>
+            </div>
+          </div>
+
+          <pre id="logs-output" class="log-box hidden"></pre>
+        </section>
+
+        <section id="dashboard-service-panel" class="panel dashboard-page">
+          <div class="panel-head panel-head-anchored">
+            <div>
+              <span class="panel-tag">Optional</span>
+              <h2>Dashboard Service</h2>
+              <p>Optional background service for users who want the dashboard available without launching it manually.</p>
+            </div>
+            <div class="inline-actions service-actions-primary">
+              <button id="dashboard-service-install" class="button button-primary" title="Install the optional background dashboard service for this user account.">Install Service</button>
+              <button id="dashboard-service-enable" class="button" title="Start the dashboard service automatically when you sign in.">Enable At Login</button>
+              <button id="dashboard-service-restart" class="button" title="Reload the dashboard backend if the service has been updated or stopped responding.">Restart Service</button>
+            </div>
+          </div>
+          <div class="service-grid">
+            <article class="metric-card">
+              <span class="metric-label">Status</span>
+              <strong id="dashboard-service-status">-</strong>
+              <span id="dashboard-service-message" class="metric-note">-</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">Lifecycle</span>
+              <strong id="dashboard-service-lifecycle">-</strong>
+              <span id="dashboard-service-login" class="metric-note">-</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">Persistent URL</span>
+              <strong id="dashboard-service-url">-</strong>
+              <span id="dashboard-service-unit" class="metric-note">-</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">Support</span>
+              <strong id="dashboard-service-support">-</strong>
+              <span id="dashboard-service-path" class="metric-note">-</span>
+            </article>
+          </div>
+          <div class="inline-actions service-actions-secondary">
+            <button id="dashboard-service-stop" class="button button-danger" title="Stop the optional dashboard service. The current page may disconnect if it is being served by that service.">Stop Service</button>
+            <button id="dashboard-service-disable" class="button" title="Disable the dashboard service from starting automatically at login.">Disable At Login</button>
+            <button id="dashboard-service-remove" class="button" title="Remove the installed dashboard service unit from this user account.">Remove Service</button>
+            <button id="dashboard-service-logs" class="button" title="Show recent logs from the dashboard background service.">View Service Logs</button>
+          </div>
+          <pre id="service-logs-output" class="log-box hidden"></pre>
+        </section>
+
+        <section id="transfers-remote" class="panel dashboard-page">
+          <div class="panel-head panel-head-anchored">
+            <div>
+              <span class="panel-tag">Transfers</span>
+              <h2>Remote Models (huggingface)</h2>
+              <p>
+                <span id="remote-count">0</span> cached artifacts from Hugging Face.
+                <span id="remote-fetched-at"></span>
+              </p>
+              <p id="remote-guidance" class="panel-guidance hidden"></p>
+            </div>
+            <div class="inline-actions remote-controls">
+              <label class="inline-field" title="Search term for Hugging Face model discovery. GGUF is a good default.">
+                Query
+                <input id="remote-query" class="wide-input" value="gguf" aria-label="Remote model query">
+              </label>
+              <label class="inline-field" title="How many model records to request from Hugging Face for each search.">
+                Limit
+                <input id="remote-limit" type="number" min="1" step="1" value="30" aria-label="Remote search limit">
+              </label>
+              <label class="inline-field" title="Where downloads will be written on disk. Each repo is stored under huggingface/<author>/<name>.">
+                Root
+                <input id="remote-destination-root" class="wider-input" placeholder="~/models" aria-label="Remote download destination root">
+              </label>
+              <label class="inline-field" title="Hide repos that require authentication or are not publicly accessible.">
+                Hide gated/private
+                <input id="remote-hide-gated" type="checkbox" aria-label="Hide gated or private models">
+              </label>
+              <button
+                id="remote-search"
+                class="button button-primary"
+                title="Fetch and cache remote GGUF artifacts from Hugging Face, then allow one-click download starts."
+              >Search Remote</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="remote-models-table">
+              <thead>
+                <tr>
+                  <th>Repo</th>
+                  <th>Artifact</th>
+                  <th>Size</th>
+                  <th>Fit</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+
+          <div class="panel-subpanel">
+            <div class="panel-head panel-head-anchored">
+              <div>
+                <span class="panel-tag">Transfers</span>
+                <h3>Download Jobs</h3>
+                <p>
+                  <span id="download-count">0</span> persisted remote jobs with resume-aware lifecycle controls.
+                  <span id="download-storage-summary"></span>
+                </p>
+                <p id="download-duplicate-guidance" class="panel-guidance hidden"></p>
+              </div>
+              <div class="inline-actions">
+                <label
+                  class="inline-field"
+                  title="Partial files newer than this many days are kept when cleaning old interrupted downloads."
+                >
+                  Keep
+                  <input id="cleanup-retention-days" type="number" min="0" step="1" value="7" aria-label="Partial cleanup retention days">
+                  days
+                </label>
+                <label
+                  class="inline-field"
+                  title="Maximum number of download workers that may run at the same time."
+                >
+                  Slots
+                  <input id="download-slot-limit" type="number" min="1" step="1" value="2" aria-label="Maximum running download slots">
+                </label>
+                <button
+                  id="save-download-policy"
+                  class="button"
+                  title="Save the maximum running download slots for future web-manager starts."
+                >Save Slots</button>
+                <button
+                  id="recover-downloads"
+                  class="button"
+                  title="Mark stale running jobs from an old web-manager process as failed so they can be resumed or retried."
+                >Recover Stale</button>
+                <button
+                  id="pause-download-queue"
+                  class="button"
+                  title="Pause starting queued downloads. Running jobs continue."
+                >Pause Queue</button>
+                <button
+                  id="resume-download-queue"
+                  class="button button-primary"
+                  title="Resume starting queued downloads up to the running slot limit."
+                >Resume Queue</button>
+                <button
+                  id="clear-download-queue"
+                  class="button"
+                  title="Remove all queued jobs. Running jobs and files are not touched."
+                >Clear Queue</button>
+                <button
+                  id="cleanup-downloads"
+                  class="button"
+                  title="Remove stale partial files from old cancelled or failed jobs. Active and fresh partials are kept."
+                >Clean Old Partials</button>
+                <button
+                  id="cleanup-duplicate-downloads"
+                  class="button"
+                  title="Remove redundant completed job records that point at the same artifact path. Model files are kept."
+                >Clean Duplicate Records</button>
+                <button
+                  id="delete-orphaned-artifacts"
+                  class="button button-danger"
+                  title="Delete orphaned GGUF files under known download roots. Registry and completed-job artifacts are kept."
+                >Delete Orphaned Files</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table" id="downloads-table">
+                <thead>
+                  <tr>
+                    <th>Artifact</th>
+                    <th>Status</th>
+                    <th>Progress</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section id="models-registry" class="panel dashboard-page">
+          <div class="panel-head">
+            <div>
+              <span class="panel-tag">Registry</span>
+              <h2>Model Registry</h2>
+              <p><span id="registry-count">0</span> entries with per-model overrides and multimodal sidecars.</p>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="models-table">
+              <thead>
+                <tr>
+                  <th>Alias</th>
+                  <th>Model</th>
+                  <th>Preset</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="models-editor" class="panel dashboard-page">
+          <div class="panel-head">
+            <div>
+              <span class="panel-tag">Tune Bay</span>
+              <h2>Model Editor</h2>
+              <p>Stage a clean registry entry with runtime overrides instead of hand-editing TSV lines.</p>
+            </div>
+          </div>
+          <form id="model-form" class="form-grid">
+            <label title="Short name shown in the registry and used by commands like llama-model switch alias.">
+              Alias
+              <input name="alias" id="model-alias" required>
+            </label>
+            <label class="span-2" title="Absolute path to the GGUF model file you want this entry to serve.">
+              Model Path
+              <input name="path" id="model-path" required placeholder="/absolute/path/to/model.gguf">
+            </label>
+            <label
+              class="span-2"
+              title="Projector file for multimodal models. Leave blank for text-only models."
+            >
+              mmproj Path
+              <input name="mmproj" id="model-mmproj" placeholder="/absolute/path/to/mmproj.gguf">
+            </label>
+            <label
+              class="span-2"
+              title="Extra llama-server flags for this model only. These are added after the standard settings."
+            >
+              Extra Args
+              <input name="extra_args" id="model-extra" placeholder="--no-warmup --jinja">
+            </label>
+            <label title="Maximum context window in tokens. Higher values use more memory.">
+              Context
+              <input name="context" id="model-context" placeholder="128000">
+            </label>
+            <label title="GPU layer offload count. 999 usually means offload as much of the model as possible. CPU fallback forces this to 0.">
+              NGL
+              <input name="ngl" id="model-ngl" placeholder="999">
+            </label>
+            <label title="Prompt processing batch size. Higher can improve throughput but increases memory use.">
+              Batch
+              <input name="batch" id="model-batch" placeholder="128">
+            </label>
+            <label title="CPU threads for work that is not running on the GPU.">
+              Threads
+              <input name="threads" id="model-threads" placeholder="16">
+            </label>
+            <label title="Concurrent client slots. Use 1 for safest single-client operation; leave blank for defaults or auto.">
+              Parallel
+              <input name="parallel" id="model-parallel" placeholder="1 or auto">
+            </label>
+            <label title="Optional target accelerator such as cuda0 or vulkan0. Leave blank unless you have a matching backend-specific runtime.">
+              Device
+              <input name="device" id="model-device" placeholder="cuda0">
+            </label>
+            <label class="span-2" title="Optional note about the model's purpose, strengths, or caution points.">
+              Notes
+              <input name="notes" id="model-notes" placeholder="Operator note or use-case cue">
+            </label>
+            <div class="form-actions span-2">
+              <button
+                type="submit"
+                class="button button-primary"
+                title="Save or update this registry entry. This does not switch the live model by itself."
+              >Save Model</button>
+              <button
+                type="button"
+                id="clear-model-form"
+                class="button"
+                title="Clear the editor fields so you can stage a different model entry."
+              >Clear</button>
+            </div>
+          </form>
+        </section>
+
+        <section id="models-discovery" class="panel dashboard-page">
+          <div class="panel-head">
+            <div>
+              <span class="panel-tag">Intake</span>
+              <h2>Discovery</h2>
+              <p><span id="discovery-count">0</span> candidates in the current scan root.</p>
+            </div>
+          </div>
+          <div class="discovery-controls">
+            <input
+              id="discovery-root"
+              placeholder="~/models"
+              title="Folder to scan recursively for .gguf models and matching mmproj files."
+            >
+            <button
+              id="scan-models"
+              class="button button-primary"
+              title="Scan the chosen folder for model files you may want to add to the registry."
+            >Scan Root</button>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="discovery-table">
+              <thead>
+                <tr>
+                  <th>Alias</th>
+                  <th>Model</th>
+                  <th>mmproj</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="settings-defaults" class="panel dashboard-page">
+          <div class="panel-head">
+            <div>
+              <span class="panel-tag">Baseline</span>
+              <h2>Global Defaults</h2>
+              <p>Room posture, gateway streaming knobs, and harness sync defaults. These become the baseline unless a model or client overrides them.</p>
+            </div>
+          </div>
+          <form id="defaults-form" class="form-grid">
+            <label class="span-2" title="Default LMM gateway output token budget. Controls max_tokens sent to llama.cpp when clients do not specify. Increase this for long reasoning or coding sessions.">
+              Gateway Max Tokens
+              <input name="LMM_DEFAULT_MAX_TOKENS" id="default-max-tokens" placeholder="32768">
+              <span class="field-note">Output token budget for the LMM gateway when clients do not set max_tokens. Default 32768; raise for long sessions.</span>
+            </label>
+            <label title="LMM gateway HTTP stream timeout in seconds. How long the gateway waits for the llama.cpp backend before aborting a streaming response.">
+              Gateway Stream Timeout (s)
+              <input name="LLAMA_CPP_STREAM_TIMEOUT" id="default-stream-timeout" placeholder="3600">
+              <span class="field-note">Max wait for a streaming response from llama.cpp before the gateway aborts. Default 3600 (1 hour).</span>
+            </label>
+            <label title="SSE keepalive interval in seconds. How often the gateway sends heartbeat comments to prevent client disconnects on idle streams.">
+              SSE Heartbeat (s)
+              <input name="LMM_GATEWAY_SSE_HEARTBEAT_SECONDS" id="default-sse-heartbeat" placeholder="5">
+              <span class="field-note">Interval for SSE keepalive comments. Default 5s. Lower values prevent reverse-proxy timeouts.</span>
+            </label>
+            <label title="LMM gateway provider timeout in seconds. Maximum time the gateway waits for llama.cpp before aborting. Must be at least as large as your expected reasoning duration.">
+              Gateway Timeout (s)
+              <input name="LMM_GATEWAY_TIMEOUT_SECONDS" id="default-gateway-timeout" placeholder="3600">
+              <span class="field-note">Max time gateway waits for llama.cpp before aborting. Default 3600 (1 hour); raise for long sessions.</span>
+            </label>
+            <label title="Network host for llama-server. 127.0.0.1 keeps it local to this machine.">
+              Host
+              <input name="LLAMA_SERVER_HOST" id="default-host">
+            </label>
+            <label title="Port used by llama-server for its local API.">
+              Port
+              <input name="LLAMA_SERVER_PORT" id="default-port">
+            </label>
+            <label title="Optional default accelerator such as cuda0 or vulkan0. Leave blank to let the validated runtime choose its own default or to allow CPU fallback.">
+              Device
+              <input name="LLAMA_SERVER_DEVICE" id="default-device">
+            </label>
+            <label title="Default context window in tokens when a model does not override it.">
+              Context
+              <input name="LLAMA_SERVER_CONTEXT" id="default-context">
+            </label>
+            <label title="Default GPU layer offload count. 999 usually means use as much GPU as the model can fit. CPU fallback forces this to 0.">
+              NGL
+              <input name="LLAMA_SERVER_NGL" id="default-ngl">
+            </label>
+            <label title="Default prompt processing batch size for models that do not override it.">
+              Batch
+              <input name="LLAMA_SERVER_BATCH" id="default-batch">
+            </label>
+            <label title="Default CPU thread count for work not handled on the GPU.">
+              Threads
+              <input name="LLAMA_SERVER_THREADS" id="default-threads">
+            </label>
+            <label title="Default concurrent client slots. Use 1 to queue requests instead of serving many at once.">
+              Parallel
+              <input name="LLAMA_SERVER_PARALLEL" id="default-parallel" placeholder="blank for auto">
+            </label>
+            <label class="span-2 checkbox-field" title="Allows CUDA runs to fall back to system RAM when larger context, KV, or compute allocations exceed VRAM. Can enable larger contexts, but may be much slower on discrete GPUs.">
+              CUDA Unified Memory (experimental)
+              <div class="checkbox-row">
+                <input name="GGML_CUDA_ENABLE_UNIFIED_MEMORY" id="default-cuda-unified-memory" type="checkbox" aria-label="Enable experimental CUDA unified memory fallback">
+                <span class="field-note">Allows CUDA runs to fall back to system RAM when larger context, KV, or compute allocations exceed VRAM. This can enable larger contexts, but it may be much slower on discrete GPUs.</span>
+              </div>
+            </label>
+            <label class="span-2" title="Where the live llama-server log is written on disk.">
+              Log File
+              <input name="LLAMA_SERVER_LOG" id="default-log">
+            </label>
+            <label class="span-2" title="Extra llama-server flags added to every launch unless a model overrides them.">
+              Extra Args
+              <input name="LLAMA_SERVER_EXTRA_ARGS" id="default-extra">
+            </label>
+            <label title="1 keeps OpenCode aligned after each successful model switch. Use 0 if you want manual sync only.">
+              Auto Sync OpenCode
+              <input name="LLAMA_MODEL_SYNC_OPENCODE" id="default-sync-opencode" placeholder="1">
+            </label>
+            <label title="When oh-my-openagent config exists, sync-opencode can point known agents at the fast GlyphOS lane with full GlyphOS fallback.">
+              Sync oh-my-openagent
+              <input name="LLAMA_MODEL_SYNC_OH_MY_OPENAGENT" id="default-sync-oh-my-openagent" placeholder="1">
+            </label>
+            <label title="Opt-in. Set to 1 to update Claude Code settings after each successful model switch.">
+              Auto Sync Claude
+              <input name="LLAMA_MODEL_SYNC_CLAUDE" id="default-sync-claude" placeholder="0">
+            </label>
+            <label title="Opt-in. Set to 1 to update the configured OpenClaw profile after each successful model switch.">
+              Auto Sync OpenClaw
+              <input name="LLAMA_MODEL_SYNC_OPENCLAW" id="default-sync-openclaw" placeholder="0">
+            </label>
+            <label title="Opt-in. Set to 1 to update ~/.glyphos/config.yaml after each successful model switch.">
+              Auto Sync GlyphOS
+              <input name="LLAMA_MODEL_SYNC_GLYPHOS" id="default-sync-glyphos" placeholder="0">
+            </label>
+            <label class="span-2" title="Canonical GlyphOS runtime policy file used by the gateway and public AI compute package.">
+              GlyphOS Policy File
+              <input name="GLYPHOS_CONFIG_FILE" id="default-glyphos-config-file" placeholder="$HOME/.glyphos/config.yaml">
+            </label>
+            <label class="span-2" title="Optional oh-my-openagent config file updated by sync-opencode when agent sync is enabled.">
+              oh-my-openagent Config
+              <input name="OH_MY_OPENAGENT_CONFIG_FILE" id="default-oh-my-openagent-config-file" placeholder="$HOME/.config/opencode/oh-my-openagent.json">
+            </label>
+            <label title="Default harness sync path. Routed uses the LMM gateway; direct bypasses Context + GlyphOS and points clients at llama.cpp.">
+              Harness Mode
+              <input name="LLAMA_MODEL_HARNESS_MODE" id="default-harness-mode" placeholder="routed">
+            </label>
+            <label title="Host interface used by the OpenAI-compatible LMM gateway. Keep 127.0.0.1 unless you intentionally expose the gateway.">
+              Gateway Host
+              <input name="LLAMA_MODEL_GATEWAY_HOST" id="default-gateway-host" placeholder="127.0.0.1">
+            </label>
+            <label title="Port for the OpenAI-compatible LMM gateway used by routed harness sync.">
+              Gateway Port
+              <input name="LLAMA_MODEL_GATEWAY_PORT" id="default-gateway-port" placeholder="4010">
+            </label>
+            <label title="Opt-in fast GlyphOS lane for latency-sensitive harnesses. Explicit starts still work when this is 0.">
+              Fast Gateway Enabled
+              <input name="LLAMA_MODEL_GATEWAY_FAST_ENABLED" id="default-gateway-fast-enabled" placeholder="0">
+            </label>
+            <label title="Port for the bounded fast GlyphOS gateway lane.">
+              Fast Gateway Port
+              <input name="LLAMA_MODEL_GATEWAY_FAST_PORT" id="default-gateway-fast-port" placeholder="4011">
+            </label>
+            <label title="Non-stream context preflight budget for the fast lane.">
+              Fast Context Budget (ms)
+              <input name="LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS" id="default-gateway-fast-context-timeout" placeholder="500">
+            </label>
+            <label title="Streaming context preflight budget for the fast lane.">
+              Fast Stream Context Budget (ms)
+              <input name="LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS" id="default-gateway-fast-stream-context-timeout" placeholder="250">
+            </label>
+            <label class="span-2" title="Log path for the OpenAI-compatible LMM gateway.">
+              Gateway Log
+              <input name="LLAMA_MODEL_GATEWAY_LOG" id="default-gateway-log" placeholder="$HOME/models/lmm-gateway.log">
+            </label>
+            <label class="span-2" title="Log path for the fast GlyphOS gateway lane.">
+              Fast Gateway Log
+              <input name="LLAMA_MODEL_GATEWAY_FAST_LOG" id="default-gateway-fast-log" placeholder="$HOME/models/lmm-gateway-fast.log">
+            </label>
+            <label title="Operator-facing toggle for the combined Context Mode MCP + GlyphOS workflow. It does not change security boundaries; it makes the intended combined pipeline visible in the dashboard.">
+              Context + GlyphOS
+              <div class="checkbox-row">
+                <input name="LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE" id="default-context-glyphos-pipeline" type="checkbox" aria-label="Show Context Mode MCP and GlyphOS as a combined pipeline">
+              <span class="field-note">Activate the bundled combined workflow view for retrieved context plus glyph-routed local inference.</span>
+              </div>
+            </label>
+            <label class="span-2 checkbox-field" title="Opt-in. Checks GitHub release metadata periodically and shows notify-only update status. It never installs updates automatically.">
+              Update Watcher
+              <div class="checkbox-row">
+                <input name="LMM_UPDATE_WATCHER_ENABLED" id="default-update-watcher-enabled" type="checkbox" aria-label="Enable notify-only update watcher">
+                <span class="field-note">Notify-only GitHub release checks for LMM and llama.cpp. Disabled by default and safe for air-gapped hosts.</span>
+              </div>
+            </label>
+            <label title="Hours between update checks when the watcher is enabled.">
+              Update Interval (h)
+              <input name="LMM_UPDATE_CHECK_INTERVAL_HOURS" id="default-update-interval" placeholder="12">
+            </label>
+            <label title="Network timeout in seconds for update checks.">
+              Update Timeout (s)
+              <input name="LMM_UPDATE_TIMEOUT_SECONDS" id="default-update-timeout" placeholder="5">
+            </label>
+            <label title="Optional OpenClaw profile name. Leave blank to target the main profile.">
+              OpenClaw Profile
+              <input name="OPENCLAW_PROFILE" id="default-openclaw-profile" placeholder="blank for main">
+            </label>
+            <label title="API key written into the OpenClaw llamacpp provider block.">
+              OpenClaw API Key
+              <input name="OPENCLAW_API_KEY" id="default-openclaw-api-key" placeholder="llama-local">
+            </label>
+            <label title="Host used by the local Claude gateway service.">
+              Claude Gateway Host
+              <input name="CLAUDE_GATEWAY_HOST" id="default-claude-gateway-host" placeholder="127.0.0.1">
+            </label>
+            <label title="Port used by the local Claude gateway service.">
+              Claude Gateway Port
+              <input name="CLAUDE_GATEWAY_PORT" id="default-claude-gateway-port" placeholder="4000">
+            </label>
+            <label class="span-2" title="Log path for the local Claude gateway service.">
+              Claude Gateway Log
+              <input name="CLAUDE_GATEWAY_LOG" id="default-claude-gateway-log" placeholder="$HOME/models/claude-gateway.log">
+            </label>
+            <label class="span-2" title="Base URL written into Claude Code settings. Leave blank to follow the local gateway host and port.">
+              Claude Base URL
+              <input name="CLAUDE_BASE_URL" id="default-claude-base-url" placeholder="http://127.0.0.1:4000">
+            </label>
+            <label title="Maximum seconds the local Claude gateway will wait for a slow llama.cpp request before aborting it. Increase this for long local coding sessions.">
+              Claude Gateway Timeout (s)
+              <input name="CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS" id="default-claude-gateway-timeout" placeholder="1800">
+            </label>
+            <label title="Claude model id to advertise and sync. Leave blank to follow the active alias.">
+              Claude Model ID
+              <input name="CLAUDE_MODEL_ID" id="default-claude-model-id" placeholder="qwen35-9b-q8">
+            </label>
+            <label title="Optional auth token passed through to Claude Code local settings.">
+              Claude Auth Token
+              <input name="CLAUDE_AUTH_TOKEN" id="default-claude-auth-token" placeholder="local-dev-token">
+            </label>
+            <label title="Optional API key passed through to Claude Code local settings.">
+              Claude API Key
+              <input name="CLAUDE_API_KEY" id="default-claude-api-key" placeholder="local-dev-token">
+            </label>
+            <div class="form-actions span-2">
+              <button
+                type="submit"
+                class="button button-primary"
+                title="Save the global runtime defaults used when a model entry does not provide an override."
+              >Save Defaults</button>
+            </div>
+          </form>
+        </section>
+
+        <section id="integrations-panel" class="panel dashboard-page">
+          <div class="panel-head">
+            <div>
+              <span class="panel-tag">Wiring</span>
+              <h2>Integrations</h2>
+              <p>Keep editor/runtime integrations in sync with the active local llama.cpp model.</p>
+            </div>
+          </div>
+          <div class="integration-grid">
+            <article class="integration-card">
+              <span class="metric-label">LMM Gateway Endpoints</span>
+              <div class="integration-chip-row">
+                <span id="lmm-gateway-formats" class="integration-badge">-</span>
+              </div>
+              <div>
+                <span class="metric-label" style="font-size: 0.75rem; opacity: 0.7;">Full lane OpenAI</span>
+                <code id="api-base">-</code>
+              </div>
+              <div>
+                <span class="metric-label" style="font-size: 0.75rem; opacity: 0.7;">Full lane Anthropic</span>
+                <code id="anthropic-api-base">-</code>
+              </div>
+              <div>
+                <span class="metric-label" style="font-size: 0.75rem; opacity: 0.7;">Fast lane OpenAI</span>
+                <code id="fast-api-base">-</code>
+              </div>
+              <div>
+                <span class="metric-label" style="font-size: 0.75rem; opacity: 0.7;">Fast lane Anthropic</span>
+                <code id="fast-anthropic-api-base">-</code>
+              </div>
+              <span id="integration-endpoint-note" class="metric-note">-</span>
+            </article>
+            <article class="integration-card">
+              <span class="metric-label">opencode</span>
+              <div class="integration-chip-row">
+                <span id="opencode-preset-badge" class="integration-badge integration-badge-long-run hidden">Long Run</span>
+              </div>
+              <code id="opencode-model">-</code>
+              <span id="opencode-path" class="metric-note">-</span>
+              <span id="opencode-state" class="metric-note">-</span>
+              <div class="inline-actions integration-actions">
+                <button id="sync-opencode-balanced" class="button button-small button-primary" title="Sync opencode with the balanced local preset.">Balanced</button>
+                <button id="sync-opencode-long-run" class="button button-small" title="Sync opencode with the long-run local preset.">Long Run</button>
+              </div>
+            </article>
+            <article class="integration-card">
+              <span class="metric-label">OpenClaw</span>
+              <code id="openclaw-model">-</code>
+              <span id="openclaw-path" class="metric-note">-</span>
+              <span id="openclaw-state" class="metric-note">-</span>
+              <div class="inline-actions integration-actions">
+                <button id="sync-openclaw" class="button button-small button-primary" title="Sync OpenClaw to the currently served llama.cpp model.">Sync OpenClaw</button>
+              </div>
+            </article>
+            <article class="integration-card">
+              <span class="metric-label">Claude Code</span>
+              <code id="claude-model">-</code>
+              <span id="claude-path" class="metric-note">-</span>
+              <div class="inline-actions integration-actions">
+                <button id="sync-claude" class="button button-small button-primary" title="Sync Claude Code settings to the local Claude gateway.">Sync Claude</button>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section id="gateways-panel" class="panel dashboard-page">
+          <div class="panel-head">
+            <div>
+              <span class="panel-tag">Gateways</span>
+              <h2>Gateways</h2>
+              <p>Start and observe the OpenAI-compatible LMM and Anthropic-compatible Claude gateway services.</p>
+            </div>
+          </div>
+          <div class="integration-grid">
+            <article class="integration-card">
+              <span class="metric-label">Full Harness Gateway</span>
+              <div class="integration-chip-row">
+                <span id="lmm-gateway-badge" class="integration-badge integration-badge-muted">-</span>
+                <span class="integration-badge">OpenAI</span>
+                <span class="integration-badge">Anthropic</span>
+              </div>
+              <code id="gateway-status">-</code>
+              <span id="gateway-route" class="metric-note">-</span>
+              <div class="inline-actions integration-actions">
+                <button id="gateway-start" class="button button-small button-primary" title="Start the LMM OpenAI-compatible gateway.">Start Gateway</button>
+                <button id="gateway-restart" class="button button-small" title="Restart the LMM gateway.">Restart</button>
+                <button id="gateway-stop" class="button button-small button-danger" title="Stop the LMM gateway.">Stop</button>
+                <button id="gateway-logs" class="button button-small" title="Show recent LMM gateway logs.">Logs</button>
+              </div>
+            </article>
+            <article class="integration-card">
+              <span class="metric-label">Fast Harness Gateway</span>
+              <div class="integration-chip-row">
+                <span id="lmm-gateway-fast-badge" class="integration-badge integration-badge-muted">-</span>
+                <span class="integration-badge">OpenAI</span>
+                <span class="integration-badge">Anthropic</span>
+              </div>
+              <code id="gateway-fast-status">-</code>
+              <span id="gateway-fast-route" class="metric-note">-</span>
+              <div class="inline-actions integration-actions">
+                <button id="gateway-fast-start" class="button button-small button-primary" title="Start the bounded fast GlyphOS gateway.">Start Fast</button>
+                <button id="gateway-fast-restart" class="button button-small" title="Restart the fast GlyphOS gateway.">Restart</button>
+                <button id="gateway-fast-stop" class="button button-small button-danger" title="Stop the fast GlyphOS gateway.">Stop</button>
+                <button id="gateway-fast-logs" class="button button-small" title="Show recent fast gateway logs.">Logs</button>
+              </div>
+            </article>
+            <article class="integration-card">
+              <span class="metric-label">Claude Gateway</span>
+              <code id="claude-gateway-status">-</code>
+              <span id="claude-gateway-url" class="metric-note">-</span>
+              <div class="inline-actions integration-actions">
+                <button id="claude-gateway-start" class="button button-small button-primary" title="Start the local Anthropic-compatible Claude gateway.">Start</button>
+                <button id="claude-gateway-restart" class="button button-small" title="Restart the Claude gateway.">Restart</button>
+                <button id="claude-gateway-stop" class="button button-small button-danger" title="Stop the Claude gateway.">Stop</button>
+                <button id="claude-gateway-logs" class="button button-small" title="Show recent Claude gateway logs.">Logs</button>
+              </div>
+            </article>
+            <article class="integration-card">
+              <span class="metric-label">Effective Gateway Policy</span>
+              <code id="gateway-policy-status">-</code>
+              <span id="gateway-policy-route" class="metric-note">-</span>
+              <span id="gateway-policy-cloud" class="metric-note">-</span>
+            </article>
+          </div>
+
+          <pre id="gateway-logs-output" class="log-box hidden"></pre>
+          <pre id="gateway-fast-logs-output" class="log-box hidden"></pre>
+          <pre id="claude-gateway-logs-output" class="log-box hidden"></pre>
+        </section>
+
+        <section id="pipelines-panel" class="panel dashboard-page">
+          <div class="panel-head">
+            <div>
+              <span class="panel-tag">Pipelines</span>
+              <h2>Pipelines</h2>
+              <p>Inspect local-first routing, fallback policy, and routed request trace for the active pipeline.</p>
+            </div>
+          </div>
+          <div id="integration-local-first-banner" class="notice-integration-banner hidden">
+            <strong>Local-First Architecture Active</strong>
+            All local <code>llama.cpp</code> inference routes through the <strong>Unified GlyphOS Pipeline</strong> — with Ψ encoding, context awareness, and intelligent routing.
+          </div>
+          <div class="integration-grid">
+            <article id="glyphos-card" class="integration-card pipeline-card">
+              <span class="metric-label">GlyphOS AI Compute</span>
+              <div class="integration-chip-row">
+                <span id="glyphos-badge" class="integration-badge integration-badge-muted">-</span>
+                <span id="glyphos-enforced-badge" class="integration-badge integration-badge-enforced hidden">Enforced</span>
+              </div>
+              <code id="glyphos-status">-</code>
+              <code id="glyphos-model">-</code>
+              <span id="glyphos-path" class="metric-note">-</span>
+              <div id="glyphos-pipeline-components" class="chip-row"></div>
+              <span id="glyphos-telemetry-summary" class="metric-note">-</span>
+              <div id="glyphos-telemetry-reasons" class="chip-row"></div>
+              <div id="glyphos-telemetry-recent" class="telemetry-list"></div>
+              <div class="inline-actions integration-actions">
+                <button id="sync-glyphos" class="button button-small button-primary" title="Sync GlyphOS AI Compute to the active local llama.cpp runtime.">Sync GlyphOS</button>
+              </div>
+            </article>
+            <article id="context-glyphos-card" class="integration-card pipeline-card">
+              <span class="metric-label">Context + GlyphOS Pipeline</span>
+              <div class="integration-chip-row">
+                <span id="context-glyphos-badge" class="integration-badge">Off</span>
+              </div>
+              <code id="context-glyphos-status">-</code>
+              <span id="context-glyphos-path" class="metric-note">-</span>
+              <span id="context-glyphos-benefit" class="metric-note">-</span>
+              <div id="context-glyphos-quality" class="metric-note"></div>
+              <div id="context-glyphos-blockers" class="chip-row"></div>
+              <div class="inline-actions integration-actions">
+                <button id="sync-glyphos-combined" class="button button-small button-primary" title="Activate the combined Context + GlyphOS pipeline: enables the setting, syncs GlyphOS, and refreshes the readiness card.">Activate Feature</button>
+              </div>
+            </article>
+          </div>
+
+          <div class="panel-subpanel">
+            <div class="panel-head panel-head-anchored">
+              <div>
+                <span class="panel-tag">Observed Traffic</span>
+                <h3>Observed Glyph Routes</h3>
+                <p>Actual GlyphOS-routed traffic observed by this dashboard session. Sync and activation only change configuration.</p>
+              </div>
+            </div>
+            <div class="observed-grid">
+              <article class="observed-card">
+                <span class="metric-label">Last Route</span>
+                <strong id="observed-glyph-last-status">Never observed</strong>
+                <span id="observed-glyph-last-detail" class="metric-note">No glyph-routed traffic has been seen by this dashboard session yet.</span>
+              </article>
+              <article class="observed-card">
+                <span class="metric-label">Observed This Session</span>
+                <strong id="observed-glyph-total">0</strong>
+                <span id="observed-glyph-total-detail" class="metric-note">No glyph route attempts observed in this dashboard session.</span>
+              </article>
+              <article class="observed-card">
+                <span class="metric-label">Recent Targets</span>
+                <strong id="observed-glyph-targets">None yet</strong>
+                <span id="observed-glyph-targets-detail" class="metric-note">Targets will appear here after the first observed glyph route.</span>
+              </article>
+            </div>
+
+            <div id="observed-glyph-feed" class="telemetry-list observed-feed" aria-live="polite"></div>
+          </div>
+
+          <div class="panel-subpanel">
+            <div class="panel-head panel-head-anchored">
+              <div>
+                <span class="panel-tag">Gateway Trace</span>
+                <h3>Context + Glyph Encoding + GlyphOS</h3>
+                <p>Latest routed gateway request stages: context enrichment, glyph compression, GlyphOS routing, and backend completion.</p>
+              </div>
+            </div>
+            <div class="observed-grid">
+              <article class="observed-card">
+                <span class="metric-label">Gateway Request</span>
+                <strong id="context-trace-status">Not observed</strong>
+                <span id="context-trace-latency" class="metric-note">No LMM gateway request observed yet.</span>
+              </article>
+              <article class="observed-card">
+                <span class="metric-label">Context MCP</span>
+                <strong id="context-trace-context">Skipped</strong>
+                <span id="context-trace-context-detail" class="metric-note">Context status appears after the next routed request.</span>
+              </article>
+              <article class="observed-card">
+                <span class="metric-label">Glyph Encoding</span>
+                <strong id="context-trace-encoding">Skipped</strong>
+                <span id="context-trace-encoding-detail" class="metric-note">Compression ratio appears when structured context is encoded.</span>
+              </article>
+              <article class="observed-card">
+                <span class="metric-label">Route + Backend</span>
+                <strong id="context-trace-route">Not routed</strong>
+                <span id="context-trace-route-detail" class="metric-note">GlyphOS target and backend result appear here.</span>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section id="cloud-providers-panel" class="panel dashboard-page">
+          <div class="panel-head">
+            <div>
+              <span class="panel-tag">Cloud</span>
+              <h2>Cloud Providers</h2>
+              <p>Inspect cloud fallback providers and active preference chain for resiliency.</p>
+            </div>
+          </div>
+          <div class="integration-grid">
+            <article id="cloud-providers-card" class="integration-card">
+              <span class="metric-label">Cloud Providers</span>
+              <div class="integration-chip-row">
+                <span id="cloud-master-badge" class="integration-badge integration-badge-muted">-</span>
+              </div>
+              <code id="cloud-master-status">-</code>
+              <span id="cloud-preferred" class="metric-note">-</span>
+              <span id="cloud-fallback-order" class="metric-note">-</span>
+              <div id="cloud-provider-list" class="telemetry-list"></div>
+            </article>
+          </div>
+        </section>
+
+        <section id="audit-panel" class="panel activity-panel is-collapsed dashboard-page">
+          <div class="panel-head panel-head-anchored">
+            <div>
+              <span class="panel-tag">Audit</span>
+              <h2>Recent Activity</h2>
+              <p>Control-plane actions only: downloads, mode toggles, sync calls, and feature activation. This does not prove model inference or glyph-routed traffic.</p>
+              <p id="activity-session-note" class="panel-guidance"></p>
+            </div>
+            <div class="inline-actions">
+              <button id="toggle-activity-panel" class="button" type="button">Show Audit</button>
+            </div>
+          </div>
+          <div id="activity-panel-body">
+            <div id="activity-feed" class="activity-feed" aria-live="polite"></div>
+          </div>
+        </section>
+
+        <!-- Phase 06: Session handoff panel -->
+        <section id="session-handoffs-panel" class="panel session-panel is-collapsed dashboard-page">
+          <div class="panel-head panel-head-anchored">
+            <div>
+              <span class="panel-tag">Session Handoffs</span>
+              <h2>Completed Sessions</h2>
+              <p>Recent long-running sessions that completed, failed, or were cancelled.</p>
+            </div>
+            <div class="inline-actions">
+              <button id="toggle-session-handoffs-panel" class="button" type="button">Show Sessions</button>
+            </div>
+          </div>
+          <div id="session-handoffs-body">
+            <div id="session-handoffs-list" class="handoff-list" aria-live="polite"></div>
+          </div>
+        </section>
+      </main>
+      </div>
+
+      <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+    </div>
+
+    <template id="model-row-template">
+      <tr>
+        <td class="alias-cell"></td>
+        <td class="path-cell"></td>
+        <td class="preset-cell"></td>
+        <td class="row-actions">
+          <button
+            data-action="switch"
+            class="button button-small"
+            title="Start serving this model now using its saved presets and the global defaults."
+          >Serve</button>
+          <button
+            data-action="edit"
+            class="button button-small"
+            title="Load this model into the editor so you can inspect or change settings. This does not switch the live server."
+          >Tune</button>
+          <button
+            data-action="remove"
+            class="button button-small button-danger"
+            title="Remove this registry entry. The model file stays on disk."
+          >Remove</button>
+        </td>
+      </tr>
+    </template>
+
+    <template id="discovery-row-template">
+      <tr>
+        <td class="alias-cell"></td>
+        <td class="path-cell"></td>
+        <td class="path-cell mmproj-cell"></td>
+        <td class="status-cell"></td>
+        <td class="row-actions">
+          <button
+            data-action="import"
+            class="button button-small button-primary"
+            title="Copy this discovered model into the editor so you can save it into the registry."
+          >Stage</button>
+        </td>
+      </tr>
+    </template>
+
+    <template id="remote-row-template">
+      <tr>
+        <td class="path-cell repo-cell"></td>
+        <td class="path-cell remote-artifact-cell"></td>
+        <td class="size-cell"></td>
+        <td class="fit-cell"></td>
+        <td class="row-actions">
+          <button
+            data-action="download-remote"
+            class="button button-small button-primary"
+            title="Queue a remote download job for this artifact."
+          >Download</button>
+        </td>
+      </tr>
+    </template>
+
+    <template id="download-row-template">
+      <tr>
+        <td class="artifact-cell"></td>
+        <td class="download-status-cell"></td>
+        <td class="download-progress-cell"></td>
+        <td class="row-actions">
+          <button
+            data-action="cancel"
+            class="button button-small button-danger"
+            title="Request cancellation for a queued or running download."
+          >Cancel</button>
+          <button
+            data-action="resume"
+            class="button button-small button-primary"
+            title="Continue this interrupted download from its preserved partial file."
+          >Resume</button>
+          <button
+            data-action="retry"
+            class="button button-small"
+            title="Start a fresh retry using the persisted remote metadata."
+          >Retry</button>
+          <button
+            data-action="remove-queued"
+            class="button button-small"
+            title="Remove this queued job without touching any running downloads."
+          >Remove</button>
+          <button
+            data-action="prioritize-queued"
+            class="button button-small button-primary"
+            title="Move this queued job ahead of other queued jobs. Running downloads are not interrupted."
+          >Run Next</button>
+          <button
+            data-action="deprioritize-queued"
+            class="button button-small"
+            title="Move this queued job one slot later. Running downloads are not interrupted."
+          >Later</button>
+        </td>
+      </tr>
+    </template>
+
+    <script src="/app.js"></script>
+  </body>
+  </html>

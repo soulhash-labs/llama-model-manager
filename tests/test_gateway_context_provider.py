@@ -109,6 +109,78 @@ class GatewayContextProviderTests(unittest.TestCase):
         self.assertIsNone(context_payload)
         self.assertIsNone(upstream_context)
 
+    def test_prepare_gateway_pipeline_reports_encoding_disabled_when_context_pipeline_disabled(self) -> None:
+        payload = {"messages": [{"role": "user", "content": "find context"}]}
+
+        with mock.patch.dict(os.environ, {"LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": ""}, clear=False):
+            _, pipeline = context_provider.prepare_gateway_pipeline(
+                payload,
+                "user: find context",
+                model="ctx-model",
+                stream=False,
+            )
+
+        self.assertEqual(pipeline["context_status"], "disabled")
+        self.assertFalse(pipeline["context_used"])
+        self.assertEqual(pipeline["glyph_encoding_status"], "disabled")
+        self.assertFalse(pipeline["glyph_encoding_used"])
+
+    def test_prepare_gateway_pipeline_reports_no_context_when_retrieval_is_empty(self) -> None:
+        payload = {"messages": [{"role": "user", "content": "find context"}]}
+
+        def command_runner(command: list[str], *, input_text: str, timeout_seconds: float, cwd: str):
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
+                "LMM_CONTEXT_MCP_COMMAND": "ctx-search",
+            },
+            clear=False,
+        ):
+            with mock.patch.object(context_provider, "_maybe_run_indexer", return_value={}):
+                _, pipeline = context_provider.prepare_gateway_pipeline(
+                    payload,
+                    "user: find context",
+                    model="ctx-model",
+                    stream=False,
+                    command_runner=command_runner,
+                )
+
+        self.assertEqual(pipeline["context_status"], "empty")
+        self.assertFalse(pipeline["context_used"])
+        self.assertEqual(pipeline["glyph_encoding_status"], "no_context")
+        self.assertFalse(pipeline["glyph_encoding_used"])
+
+    def test_prepare_gateway_pipeline_reports_context_unavailable_when_retrieval_fails(self) -> None:
+        payload = {"messages": [{"role": "user", "content": "find context"}]}
+
+        def command_runner(command: list[str], *, input_text: str, timeout_seconds: float, cwd: str):
+            return subprocess.CompletedProcess(command, 1, "", "failed")
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": "1",
+                "LMM_CONTEXT_MCP_COMMAND": "ctx-search",
+            },
+            clear=False,
+        ):
+            with mock.patch.object(context_provider, "_maybe_run_indexer", return_value={}):
+                _, pipeline = context_provider.prepare_gateway_pipeline(
+                    payload,
+                    "user: find context",
+                    model="ctx-model",
+                    stream=False,
+                    command_runner=command_runner,
+                )
+
+        self.assertEqual(pipeline["context_status"], "error")
+        self.assertFalse(pipeline["context_used"])
+        self.assertEqual(pipeline["glyph_encoding_status"], "context_unavailable")
+        self.assertFalse(pipeline["glyph_encoding_used"])
+
     def test_context_payload_reflects_encoding_state(self) -> None:
         payload = {
             "messages": [{"role": "user", "content": "answer"}],

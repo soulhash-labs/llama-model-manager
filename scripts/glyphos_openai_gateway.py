@@ -61,6 +61,7 @@ from gateway.protocol_normalizers import (  # noqa: E402
     apply_anthropic_tool_use_response,  # noqa: E402,F401 - compatibility export for extracted handlers
     apply_openai_tool_call_response,  # noqa: E402,F401 - compatibility export for extracted handlers
     build_anthropic_response,  # noqa: E402,F401 - compatibility export for extracted handlers
+    classify_tool_invocation,  # noqa: E402,F401 - compatibility export for extracted handlers
     compact_json,  # noqa: E402,F401 - compatibility export
     format_tool_contract,  # noqa: E402,F401 - compatibility export
     messages_to_prompt,  # noqa: E402,F401 - compatibility export for extracted handlers

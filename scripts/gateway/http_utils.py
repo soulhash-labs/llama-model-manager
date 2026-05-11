@@ -88,7 +88,7 @@ def http_json(
         raw = exc.read().decode("utf-8", errors="replace")
         try:
             parsed = json.loads(raw) if raw else {}
-        except Exception:
+        except json.JSONDecodeError:
             parsed = {"error": raw}
         return int(exc.code), parsed if isinstance(parsed, dict) else {"error": raw}
     except URLError as exc:
