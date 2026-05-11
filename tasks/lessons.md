@@ -191,7 +191,7 @@
 | 1 | `sse.py` | Anthropic SSE: emit proper `tool_use` content block sequence after detection (was missing entirely) | Medium |
 | 2 | `context_provider.py` | Include `completed.stderr` in subprocess error message instead of generic `"context_command_failed"` | Low |
 | 3 | `handlers_openai.py` + `handlers_anthropic.py` | All `routed["key"]` → `routed.get("key", default)` (8 sites across both files) | Low/defensive |
-| 4 | `integrations/context-mode-mcp/src/index.ts` | `asToolResponse` type: `Record<string, unknown>` → `unknown` | Low |
+| 4 | `integrations/context-mode-mcp/src/index.ts` | `asToolResponse` parameter `Record<string, unknown>` → `unknown` (kept as `unknown` param + cast on assignment to `structuredContent`) | Low |
 | 5 | `context_provider.py` | Added `"timeout_ms": timeout_ms` as structured field in `except TimeoutExpired` | Low/observability |
 | 6 | `handlers_anthropic.py` | Added missing `encoding_status`/`encoding_format`/`encoding_ratio` to non-streaming record.update() (was present in OpenAI path but not Anthropic) | Low/consistency |
 
@@ -374,3 +374,29 @@
 - **Removing oh-my-openagent from `opencode.json` is a safe recovery path** that restores OpenCode functionality without deleting the user's plugin config. The plugin config remains intact in `oh-my-openagent.json` — only the registration in `opencode.json` is modified.
 - **Backups at `{path}.lmm-plugin-backup`** provide a recovery path that's independent of the plugin's own backup mechanism. The enable command checks this backup before failing with a reinstall message.
 - **Embedded Python print() calls in bash heredocs** that reference user-controlled paths (`path`, `name`, `removed`) must use `json.dumps()` for safe escaping. Without this, a config file path containing special characters (`"`, `\`, backtick) would produce broken output or syntax errors in the embedded Python.
+
+# Session 2026-05-11 (continued): api_client Bug Fixes & MCP Type Correction
+
+## What we did
+
+- **Triaged 5 bug claims in `api_client.py`**: Bugs 1–4 were false positives; Bug 5 (unhandled `socket.timeout` during `response.read()`) was semi-valid — low-impact but fixable.
+- **Fixed 2 bugs in `api_client.py`**:
+  - **Bug 5**: Added `except OSError` handler in `_http_json` to catch `socket.timeout` (and other OSError subclasses) during `response.read()`. Placed AFTER `except URLError` since `URLError` is a subclass of `OSError` and must match first.
+  - **Bug 3 improvement**: Removed `raise_for_status()` barrier in `_resolve_model` so model list can be parsed regardless of HTTP status; added raw `urlopen` fallback to retry `/models` with a shorter timeout if the `_http_json` wrapper fails entirely.
+- **Corrected MCP `asToolResponse` type fix**: The previous "fix" changed `Record<string, unknown>` → `unknown` for the parameter, which broke TypeScript (TS2322: `unknown` not assignable to `Record<string, unknown>`). Correct fix: keep `response: unknown` as parameter (accepts any shape) + `as Record<string, unknown>` cast on `structuredContent` assignment.
+
+## What we learned
+
+### Exception handler ordering (Python)
+- **`URLError` is a subclass of `OSError`** in Python 3. If you put `except OSError` before `except URLError`, the `URLError` handler is dead code. Always order from specific → general: `HTTPError` → `URLError` → `OSError`.
+- **`socket.timeout` inherits from `OSError`**, not `URLError`. When `urlopen` returns a response object and subsequent `response.read()` blocks past the socket timeout, the exception is a bare `socket.timeout` — NOT wrapped in `URLError`. The `except OSError` handler catches this.
+- **`except Exception` should not be the first line of defense** for socket-level errors. Be specific: `socket.timeout`, `OSError`, `ConnectionError`, etc.
+
+### Fallback design
+- **`raise_for_status()` gates parsing prematurely.** When the `/models` endpoint returns a non-200 status, the body may still contain valid JSON with model data. Skip `raise_for_status()` — just try to parse, and let the parser fail if the body is genuinely unusable.
+- **Two code paths are better than one for fallback.** The `_http_json` wrapper handles structured error responses but can fail for many reasons. A raw `urlopen` bypass is a genuinely different code path that may succeed where the wrapper failed. Mirror comments explaining WHY the second path exists are justified.
+
+### MCP TypeScript patterns
+- **`structuredContent` in MCP `CallToolResult` expects `Record<string, unknown>`**, not `unknown`. The `as unknown as Record<string, unknown>` pattern (or simply `as Record<string, unknown>`) is the correct way to assign an `unknown` response to it. Changing the parameter to a narrower type loses flexibility; casting on assignment preserves flexibility without losing type safety.
+- **Always run `npm run typecheck` after MCP type changes.** The previous fix silently broke type safety because only the function signature was changed — the assignment mismatch was only caught by the type checker. TypeScript errors show up immediately when you run `tsc --noEmit`.
+- **The `share_orion/` copies of MCP files must stay in sync** with the primary `integrations/context-mode-mcp/` copies. Apply the same fix to both.

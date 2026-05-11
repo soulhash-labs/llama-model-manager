@@ -55,6 +55,8 @@ def _http_json(
         return _HttpJsonResponse(int(exc.code), parsed if isinstance(parsed, dict) else {"error": raw})
     except URLError as exc:
         raise RuntimeError(str(exc)) from exc
+    except OSError as exc:
+        raise RuntimeError(f"connection error: {exc}") from exc
 
 
 def _env_first(*names: str, default: str = "") -> str:
@@ -234,14 +236,26 @@ class LlamaCppClient(BaseChatClient):
     def _resolve_model(self) -> str:
         if self.model:
             return self.model
+        # First attempt: parse whatever /models returns, status-agnostic
         try:
             response = _http_json("GET", self._models_url(), timeout=5)
-            response.raise_for_status()
             payload = response.json()
             models = payload.get("data", []) if isinstance(payload, dict) else []
             for item in models:
                 if isinstance(item, dict) and item.get("id"):
                     return str(item["id"])
+        except Exception:
+            pass
+        # Fallback: raw /models GET as a last attempt before giving up
+        try:
+            req = urlrequest.Request(self._models_url())
+            with urlrequest.urlopen(req, timeout=3) as resp:
+                raw = resp.read().decode("utf-8")
+                payload = json.loads(raw)
+                models = payload.get("data", []) if isinstance(payload, dict) else []
+                for item in models:
+                    if isinstance(item, dict) and item.get("id"):
+                        return str(item["id"])
         except Exception:
             pass
         return "local-llama"

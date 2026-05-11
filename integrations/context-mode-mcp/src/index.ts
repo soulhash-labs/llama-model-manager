@@ -107,7 +107,7 @@ function asToolResponse(response: unknown): CallToolResult {
         text: JSON.stringify(response),
       },
     ],
-    structuredContent: response,
+    structuredContent: response as Record<string, unknown>,
   };
 }
 

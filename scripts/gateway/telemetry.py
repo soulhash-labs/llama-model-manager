@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -100,8 +101,8 @@ def record_gateway_request(record: dict[str, Any]) -> None:
     """Record gateway request with full error propagation."""
     try:
         telemetry_store().append_event(redact_gateway_telemetry_record(with_request_fingerprint(record)))
-    except Exception as exc:
-        sys.stderr.write(f"warning: failed to record gateway telemetry: {exc}\n")
+    except Exception:
+        sys.stderr.write(f"warning: failed to record gateway telemetry: {traceback.format_exc()}\n")
 
 
 def safe_record_gateway_request(record: dict[str, Any]) -> None:
