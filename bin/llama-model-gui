@@ -79,12 +79,9 @@ menu_status_text() {
 
 show_list() {
     if [[ ! -f "$MODELS_FILE" ]]; then
-        show_text "Registered Models" "No registry file exists yet at:
-
-$MODELS_FILE
-
-Save a model from the web dashboard or create entries with:
-  llama-model add <alias> <path>"
+        local _msg
+        printf -v _msg 'No registry file exists yet at:\n\n%s\n\nSave a model from the web dashboard or create entries with:\n  llama-model add <alias> <path>' "$MODELS_FILE"
+        show_text "Registered Models" "$_msg"
         return 0
     fi
     show_text "Registered Models" "$("$LLAMA_MODEL_BIN" list)"

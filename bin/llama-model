@@ -896,7 +896,7 @@ port_is_listening() {
 raw_cmd_arg_from_pid() {
     local pid="$1"
     local key="$2"
-    local -a args=()
+    local args=()
     local i
     local cmdline
 
@@ -3061,6 +3061,7 @@ set_default_value() {
 
     ensure_defaults_file
     tmp="$(mktemp)"
+    trap 'rm -f "$tmp"' EXIT
     awk -v key="$key" -v value="$value" '
         BEGIN { updated = 0 }
         $0 ~ ("^" key "=") {
@@ -3076,6 +3077,7 @@ set_default_value() {
         }
     ' "$DEFAULTS_FILE" >"$tmp"
     mv "$tmp" "$DEFAULTS_FILE"
+    trap - EXIT
 }
 
 persist_selected_runtime() {
@@ -3793,11 +3795,11 @@ show_doctor() {
     fi
 
     if [[ -f "$LLAMA_SERVER_LOG" ]]; then
-        build_info="$(grep -F 'build_info:' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*build_info: //' || true)"
-        offload="$(grep -E 'offloaded [0-9]+/[0-9]+ layers to GPU' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*offloaded /offloaded /' || true)"
-        kv_buffer="$(grep -E 'KV buffer size = ' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*KV buffer size = //' || true)"
-        graph_splits="$(grep -E 'graph splits = ' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*graph splits = //' || true)"
-        listening="$(grep -F 'server is listening on' "$LLAMA_SERVER_LOG" | tail -n 1 | sed 's/^.*server is listening on //' || true)"
+        build_info="$(tail -n 10000 "$LLAMA_SERVER_LOG" | grep -F 'build_info:' | tail -n 1 | sed 's/^.*build_info: //' || true)"
+        offload="$(tail -n 10000 "$LLAMA_SERVER_LOG" | grep -E 'offloaded [0-9]+/[0-9]+ layers to GPU' | tail -n 1 | sed 's/^.*offloaded /offloaded /' || true)"
+        kv_buffer="$(tail -n 10000 "$LLAMA_SERVER_LOG" | grep -E 'KV buffer size = ' | tail -n 1 | sed 's/^.*KV buffer size = //' || true)"
+        graph_splits="$(tail -n 10000 "$LLAMA_SERVER_LOG" | grep -E 'graph splits = ' | tail -n 1 | sed 's/^.*graph splits = //' || true)"
+        listening="$(tail -n 10000 "$LLAMA_SERVER_LOG" | grep -F 'server is listening on' | tail -n 1 | sed 's/^.*server is listening on //' || true)"
         classify_startup_log_file "$LLAMA_SERVER_LOG"
         if [[ "$STARTUP_FAILURE_CATEGORY" != "unknown" ]]; then
             startup_category="$STARTUP_FAILURE_CATEGORY"
@@ -4417,7 +4419,17 @@ restart_model() {
 
 show_logs() {
     local lines="${1:-40}"
-    tail -n "$lines" "$LLAMA_SERVER_LOG"
+    local target="${2:-server}"
+    case "$target" in
+        server)   tail -n "$lines" "$LLAMA_SERVER_LOG" ;;
+        claude)   tail -n "$lines" "$CLAUDE_GATEWAY_LOG" ;;
+        gateway)  tail -n "$lines" "$LLAMA_MODEL_GATEWAY_LOG" ;;
+        gateway-fast) tail -n "$lines" "$LLAMA_MODEL_GATEWAY_FAST_LOG" ;;
+        *)
+            printf 'error: unknown log target "%s". Valid: server, claude, gateway, gateway-fast\n' "$target" >&2
+            return 1
+            ;;
+    esac
 }
 
 parse_add_options() {
@@ -4514,7 +4526,8 @@ write_registry_line() {
     local -a fields=("$alias" "$model_path" "$extra" "$context" "$ngl" "$batch" "$threads" "$parallel" "$device" "$notes")
 
     while ((${#fields[@]} > 3)); do
-        local last_index=$(( ${#fields[@]} - 1 ))
+        local last_index
+        last_index=$(( ${#fields[@]} - 1 ))
         if [[ -n "${fields[$last_index]}" ]]; then
             break
         fi
@@ -4592,6 +4605,7 @@ add_model() {
 
     ensure_models_file
     tmp="$(mktemp)"
+    trap 'rm -f "$tmp"' EXIT
 
     while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
         if [[ -z "$raw_line" ]] || [[ "${raw_line:0:1}" == "#" ]]; then
@@ -4623,6 +4637,7 @@ add_model() {
     fi
 
     mv "$tmp" "$MODELS_FILE"
+    trap - EXIT
     if [[ "$replaced" -eq 1 ]]; then
         printf 'updated %s in %s\n' "$alias" "$MODELS_FILE"
     else
@@ -4639,6 +4654,7 @@ remove_model() {
 
     ensure_models_file
     tmp="$(mktemp)"
+    trap 'rm -f "$tmp"' EXIT
 
     while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ -z "$line" ]] || [[ "${line:0:1}" == "#" ]]; then
@@ -4656,6 +4672,7 @@ remove_model() {
 
     [[ "$found" -eq 1 ]] || die "unknown model alias: $alias"
     mv "$tmp" "$MODELS_FILE"
+    trap - EXIT
     printf 'removed %s from %s\n' "$alias" "$MODELS_FILE"
 }
 
@@ -5086,7 +5103,6 @@ sync_glyphos() {
     api_base="$(upstream_api_base)"
     timeout_seconds="$(trim_whitespace "${GLYPHOS_LLAMACPP_TIMEOUT_SECONDS:-3600}")"
     [[ "$timeout_seconds" =~ ^[0-9]+$ ]] || die "GLYPHOS_LLAMACPP_TIMEOUT_SECONDS must be a positive integer"
-    (( timeout_seconds >= 1 )) || die "GLYPHOS_LLAMACPP_TIMEOUT_SECONDS must be at least 1"
     [[ -f "$GLYPHOS_CONFIG_FILE" ]] && config_exists_before="yes"
 
     require_python3
@@ -5480,7 +5496,7 @@ sync_claude() {
     printf 'settings_file: %s\n' "$CLAUDE_SETTINGS_FILE"
     printf 'settings_exists_before: %s\n' "$settings_exists_before"
     printf 'claude_auth: %s\n' "$([[ -n "$auth_token" ]] && printf configured || printf unchanged)"
-    printf 'claude_api_key: %s\n' "$api_key_source"
+    printf 'claude_api_key: %s\n' "$([[ -n "$api_key_source" ]] && printf configured || printf none)"
 }
 
 lmm_gateway_script() {
@@ -5811,12 +5827,14 @@ claude_gateway_wait_ready() {
         fi
         if ! kill -0 "$pid" 2>/dev/null; then
             tail -n 60 "$CLAUDE_GATEWAY_LOG" >&2 || true
-            die "claude gateway exited during startup"
+            printf 'error: claude gateway exited during startup\n' >&2
+            return 1
         fi
         sleep 1
     done
     tail -n 60 "$CLAUDE_GATEWAY_LOG" >&2 || true
-    die "timed out waiting for $(claude_gateway_url)/healthz"
+    printf 'error: timed out waiting for %s/healthz\n' "$(claude_gateway_url)" >&2
+    return 1
 }
 
 claude_gateway_start() {
@@ -5864,15 +5882,21 @@ claude_gateway_start() {
     setsid "${cmd[@]}" >"$CLAUDE_GATEWAY_LOG" 2>&1 < /dev/null &
     pid=$!
     disown "$pid" 2>/dev/null || true
-    printf '%s\n' "$pid" > "$CLAUDE_GATEWAY_PID_FILE"
-    claude_gateway_wait_ready "$pid"
-
-    printf 'status: running\n'
-    printf 'pid: %s\n' "$pid"
-    printf 'url: %s\n' "$(claude_gateway_url)"
-    printf 'upstream_base: %s\n' "$upstream_base"
-    printf 'model_id: %s\n' "$model_id"
-    printf 'log: %s\n' "$CLAUDE_GATEWAY_LOG"
+    if claude_gateway_wait_ready "$pid"; then
+        printf '%s\n' "$pid" > "$CLAUDE_GATEWAY_PID_FILE"
+        printf 'status: running\n'
+        printf 'pid: %s\n' "$pid"
+        printf 'url: %s\n' "$(claude_gateway_url)"
+        printf 'upstream_base: %s\n' "$upstream_base"
+        printf 'model_id: %s\n' "$model_id"
+        printf 'log: %s\n' "$CLAUDE_GATEWAY_LOG"
+    else
+        rm -f "$CLAUDE_GATEWAY_PID_FILE"
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+        fi
+        return 1
+    fi
 }
 
 claude_gateway_stop() {
@@ -5882,6 +5906,12 @@ claude_gateway_stop() {
         pid="$(claude_gateway_listener_pid 2>/dev/null || true)"
     fi
     if [[ -z "$pid" ]]; then
+        rm -f "$CLAUDE_GATEWAY_PID_FILE"
+        printf 'status: stopped\n'
+        return 0
+    fi
+    # Verify PID is still the gateway process before killing (TOCTOU guard)
+    if ! kill -0 "$pid" 2>/dev/null || ! pid_matches_claude_gateway "$pid"; then
         rm -f "$CLAUDE_GATEWAY_PID_FILE"
         printf 'status: stopped\n'
         return 0
@@ -6158,11 +6188,10 @@ dashboard_service_logs() {
 }
 
 dashboard_service_uninstall() {
-    if dashboard_service_manager_reachable && dashboard_service_installed; then
+    if dashboard_service_manager_reachable; then
         dashboard_systemctl disable --now "$DASHBOARD_SERVICE_NAME" >/dev/null 2>&1 || true
         dashboard_systemctl reset-failed "$DASHBOARD_SERVICE_NAME" >/dev/null 2>&1 || true
     fi
-    dashboard_service_installed || die "dashboard service is not installed"
     rm -f "$DASHBOARD_SERVICE_UNIT_FILE"
     if dashboard_service_manager_reachable; then
         dashboard_systemctl daemon-reload
@@ -6203,7 +6232,7 @@ for p in plugins:
         name = str(p.get("name", "") or p.get("path", ""))
     if "oh-my-openagent" in name:
         enabled = True
-        print(f"oh-my-openagent: enabled ({name})")
+        print(f"oh-my-openagent: enabled ({json.dumps(name, ensure_ascii=False)})")
 if not enabled:
     print("oh-my-openagent: disabled or not configured")
 PY
@@ -6259,7 +6288,7 @@ if not removed:
 
 data["plugin"] = filtered
 path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-print(f"disabled oh-my-openagent plugin entries: {removed}")
+print(f"disabled oh-my-openagent plugin entries: {json.dumps(removed, ensure_ascii=False)}")
 print(f"backup saved to: {backup}")
 print("")
 print("Restart OpenCode for the change to take effect.")
@@ -6295,7 +6324,7 @@ for p in plugins:
     elif isinstance(p, dict):
         name = str(p.get("name", "") or p.get("path", ""))
     if "oh-my-openagent" in name:
-        print(f"oh-my-openagent already enabled: {name}")
+        print(f"oh-my-openagent already enabled: {json.dumps(name, ensure_ascii=False)}")
         sys.exit(0)
 
 # Restore from backup if available
@@ -6309,14 +6338,14 @@ if backup.exists():
             plugins.append(restored[0])
             data["plugin"] = plugins
             path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-            print(f"restored oh-my-openagent plugin from backup: {restored[0]}")
+            print(f"restored oh-my-openagent plugin from backup: {json.dumps(restored[0], ensure_ascii=False)}")
             print("Restart OpenCode for the change to take effect.")
             sys.exit(0)
     except Exception:
         pass
 
 print("error: no backup found and oh-my-openagent is not in the current config.")
-print("Reinstall oh-my-openagent manually or use the backup at: oh-my-openagent.json")
+print(f"Reinstall oh-my-openagent manually or check for a backup at: {path}.lmm-plugin-backup")
 sys.exit(1)
 PY
             ;;
