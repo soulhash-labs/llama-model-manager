@@ -3765,9 +3765,10 @@ show_doctor() {
     local route_guidance=""
     local stale_opencode_providers=""
     local oh_my_openagent_package_dir=""
-    local oh_my_openagent_version="not-installed"
-    local oh_my_openagent_wake_patch="not-installed"
-    local oh_my_openagent_task_defaults_patch="not-installed"
+    local oh_my_openagent_package_status="optional-not-installed"
+    local oh_my_openagent_version="optional-not-installed"
+    local oh_my_openagent_wake_patch="optional-not-installed"
+    local oh_my_openagent_task_defaults_patch="optional-not-installed"
     local oh_my_openagent_auto_update="unknown"
     local oh_my_openagent_config_stale_models=""
     local oh_my_openagent_guidance=""
@@ -3908,6 +3909,9 @@ PY
         fi
     done
     if [[ -n "$oh_my_openagent_package_dir" ]]; then
+        oh_my_openagent_package_status="installed"
+        oh_my_openagent_wake_patch="unknown"
+        oh_my_openagent_task_defaults_patch="unknown"
         while IFS='=' read -r key value; do
             case "$key" in
                 version) oh_my_openagent_version="$value" ;;
@@ -4107,6 +4111,11 @@ PY
             oh_my_openagent_guidance="${oh_my_openagent_guidance:+$oh_my_openagent_guidance }$oh_my_openagent_recent_error_guidance"
         fi
     fi
+    # When oh-my-openagent is deliberately not installed, set guidance instead of showing "not-installed" as an error.
+    # The package_status field distinguishes "optional-not-installed" from "installed" or "unknown".
+    if [[ "$oh_my_openagent_package_status" == "optional-not-installed" && -z "$oh_my_openagent_guidance" ]]; then
+        oh_my_openagent_guidance="Not installed (optional — enables background subagents, task() delegation, model fallback). Install with: bunx oh-my-openagent install"
+    fi
     # Check opencode.json plugin status (safe-mode awareness)
     if [[ -f "$OPENCODE_CONFIG_FILE" ]]; then
         oh_my_openagent_plugin_enabled="$(python3 - "$OPENCODE_CONFIG_FILE" <<'PY' 2>/dev/null || printf 'unknown\n'
@@ -4251,6 +4260,7 @@ print("glyphos_config=" + ("yes" if data.get("glyphos_config_exists") else "no")
     printf 'harness_mode_configured: %s\n' "$harness_mode_configured"
     printf 'stale_opencode_providers: %s\n' "$stale_opencode_providers"
     printf 'oh_my_openagent_package: %s\n' "$oh_my_openagent_package_dir"
+    printf 'oh_my_openagent_package_status: %s\n' "$oh_my_openagent_package_status"
     printf 'oh_my_openagent_version: %s\n' "$oh_my_openagent_version"
     printf 'oh_my_openagent_wake_patch: %s\n' "$oh_my_openagent_wake_patch"
     printf 'oh_my_openagent_task_defaults_patch: %s\n' "$oh_my_openagent_task_defaults_patch"

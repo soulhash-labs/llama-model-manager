@@ -285,7 +285,7 @@ interactive_harness_setup_wizard() {
         printf '  %s\n' "$openagent_recommendation"
         printf 'Other supported oh-my-openagent install option:\n'
         printf '  npx oh-my-openagent install\n'
-        printf 'Install oh-my-openagent now with the recommended command? [Y/n] '
+        printf 'Install oh-my-openagent (enables background subagents, task() delegation, model fallback)? [Y/n] '
         read -r reply || reply=""
         reply="${reply,,}"
         if [[ "$reply" != "n" && "$reply" != "no" ]]; then
