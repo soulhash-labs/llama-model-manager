@@ -1,5 +1,17 @@
 #!/usr/bin/env bash
+# Minimum bash version: 4.0+ for pipefail and lowercase expansion.
+# macOS users: brew install bash
+if (( ${BASH_VERSINFO[0]} < 4 )); then
+    printf 'error: bash 4.0 or newer is required (current: %s)\n' "$BASH_VERSION" >&2
+    printf '  On macOS: install with: brew install bash\n' >&2
+    exit 1
+fi
 set -euo pipefail
+
+# Portable lowercase helper — avoids bash 4+ ${var,,} syntax
+to_lower() {
+    printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]'
+}
 
 # Main installer for Llama Model Manager.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -75,7 +87,7 @@ install_basedpyright_during_install() {
     printf 'Install basedpyright for local Python type diagnostics? [Y/n] '
     local reply
     read -r reply || reply=""
-    reply="${reply,,}"
+    reply="$(to_lower "$reply")"
     if [[ "$reply" == "n" || "$reply" == "no" ]]; then
         printf 'post-install: basedpyright install skipped by user\n'
         return 0
@@ -156,7 +168,7 @@ recommended_oh_my_openagent_install_command() {
     elif command -v npx >/dev/null 2>&1; then
         printf 'npx oh-my-openagent install\n'
     elif command -v npm >/dev/null 2>&1; then
-        printf 'npx oh-my-openagent install\n'
+        printf 'npm exec oh-my-openagent install\n'
     else
         printf ''
     fi
@@ -178,6 +190,14 @@ run_oh_my_openagent_install_command() {
                 npx oh-my-openagent install
             else
                 printf 'post-install: npx is unavailable\n' >&2
+                return 1
+            fi
+            ;;
+        "npm exec oh-my-openagent install")
+            if command -v npm >/dev/null 2>&1; then
+                npm exec oh-my-openagent install
+            else
+                printf 'post-install: npm is unavailable\n' >&2
                 return 1
             fi
             ;;
@@ -253,7 +273,7 @@ interactive_harness_setup_wizard() {
         printf '  paru -S opencode\n'
         printf 'Install OpenCode now with the recommended command? [Y/n] '
         read -r reply || reply=""
-        reply="${reply,,}"
+        reply="$(to_lower "$reply")"
         if [[ "$reply" != "n" && "$reply" != "no" ]]; then
             if run_opencode_install_command "$recommendation"; then
                 printf 'post-install: OpenCode install command completed\n'
@@ -269,7 +289,7 @@ interactive_harness_setup_wizard() {
         printf 'post-install: oh-my-openagent config missing: %s\n' "$openagent_config"
         printf 'Fetch the oh-my-openagent installation guide now? [Y/n] '
         read -r reply || reply=""
-        reply="${reply,,}"
+        reply="$(to_lower "$reply")"
         if [[ "$reply" != "n" && "$reply" != "no" ]]; then
             fetch_oh_my_openagent_guide "$guide_url" "$guide_path" || true
         fi
@@ -287,7 +307,7 @@ interactive_harness_setup_wizard() {
         printf '  npx oh-my-openagent install\n'
         printf 'Install oh-my-openagent (enables background subagents, task() delegation, model fallback)? [Y/n] '
         read -r reply || reply=""
-        reply="${reply,,}"
+        reply="$(to_lower "$reply")"
         if [[ "$reply" != "n" && "$reply" != "no" ]]; then
             if run_oh_my_openagent_install_command "$openagent_recommendation"; then
                 printf 'post-install: oh-my-openagent installer completed\n'
@@ -359,7 +379,7 @@ build_runtime_during_install() {
         printf 'Would you like to check/install build dependencies and compile a local llama.cpp runtime now? [Y/n] '
         local reply
         read -r reply || reply=""
-        reply="${reply,,}"
+        reply="$(to_lower "$reply")"
         if [[ "$reply" == "n" || "$reply" == "no" ]]; then
             printf 'post-install: runtime build skipped by user\n'
             return 0
@@ -374,8 +394,15 @@ build_runtime_during_install() {
             printf 'note: set LMM_AUTO_BUILD_RUNTIME=1 to force, or run manually after installing CUDA toolkit\n'
             primary_backend="cpu"
             printf 'post-install: falling back to CPU-only runtime\n'
+        elif command -v nvcc >/dev/null 2>&1; then
+            # nvcc is available - proceed with GPU build
+            printf 'post-install: CUDA host with nvcc available; building CUDA runtime\n'
         elif [[ "$primary_backend" == "cuda" ]] && ! command -v nvcc >/dev/null 2>&1; then
-            printf 'post-install: CUDA host detected but nvcc not in PATH; LMM_AUTO_BUILD_RUNTIME is set, so attempting CUDA toolkit install\n'
+            # LMM_AUTO_BUILD_RUNTIME is set but nvcc still missing — cannot build CUDA
+            printf 'post-install: CUDA host, nvcc not in PATH, but LMM_AUTO_BUILD_RUNTIME is set; forcing CPU fallback\n'
+            printf 'note: install CUDA toolkit and ensure nvcc is on PATH, then run: llama-model build-runtime --backend cuda\n'
+            primary_backend="cpu"
+            printf 'post-install: falling back to CPU-only runtime\n'
         elif [[ "$primary_backend" == "vulkan" ]] && ! command -v glslc >/dev/null 2>&1 && ! command -v glslangValidator >/dev/null 2>&1; then
             printf 'post-install: Vulkan host detected but SDK tools not in PATH; skipping GPU build\n'
             printf 'note: set LMM_AUTO_BUILD_RUNTIME=1 to force, or run manually after installing Vulkan SDK\n'
@@ -397,8 +424,8 @@ build_runtime_during_install() {
     # Post-build validation: ldd + --version checks
     local runtime_dir="${APP_SHARE_DIR}/runtime/llama-server"
     local mark_runtime_invalid=0
-    local -a runtime_binaries=()
-    local -a valid_runtime_binaries=()
+    local runtime_binaries=()
+    local valid_runtime_binaries=()
     local b=""
     local payload_binary=""
 
@@ -634,7 +661,7 @@ migrate_routed_gateway_defaults() {
         printf 'LLAMA_MODEL_GATEWAY_PORT=4010\n' >>"$tmp"
     fi
     if ! defaults_has_key LLAMA_MODEL_GATEWAY_LOG "$tmp"; then
-        printf 'LLAMA_MODEL_GATEWAY_LOG=$HOME/models/lmm-gateway.log\n' >>"$tmp"
+        printf 'LLAMA_MODEL_GATEWAY_LOG=%s/models/lmm-gateway.log\n' "$HOME" >>"$tmp"
     fi
     if ! defaults_has_key LLAMA_MODEL_GATEWAY_FAST_ENABLED "$tmp"; then
         printf 'LLAMA_MODEL_GATEWAY_FAST_ENABLED=1\n' >>"$tmp"
@@ -643,7 +670,7 @@ migrate_routed_gateway_defaults() {
         printf 'LLAMA_MODEL_GATEWAY_FAST_PORT=4011\n' >>"$tmp"
     fi
     if ! defaults_has_key LLAMA_MODEL_GATEWAY_FAST_LOG "$tmp"; then
-        printf 'LLAMA_MODEL_GATEWAY_FAST_LOG=$HOME/models/lmm-gateway-fast.log\n' >>"$tmp"
+        printf 'LLAMA_MODEL_GATEWAY_FAST_LOG=%s/models/lmm-gateway-fast.log\n' "$HOME" >>"$tmp"
     fi
     if ! defaults_has_key LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS "$tmp"; then
         printf 'LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS=500\n' >>"$tmp"
@@ -934,7 +961,7 @@ if [[ -t 0 && -t 1 ]]; then
     if [[ "$has_runtime" != "yes" ]]; then
         printf '\nNo llama.cpp runtime was built during install. Compile one now? [Y/n] '
         read -r reply || reply=""
-        reply="${reply,,}"
+        reply="$(to_lower "$reply")"
         if [[ -z "$reply" || "$reply" == "y" || "$reply" == "yes" ]]; then
             if "$BIN_DIR/llama-model" build-runtime --backend auto; then
                 printf 'Local runtime build completed.\n'
