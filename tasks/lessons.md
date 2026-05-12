@@ -427,6 +427,15 @@
 
 - **Verified**: `bash -n` syntax check clean on all changes in all three files.
 
+- **Fixed `glyphos_ai/ai_compute/router.py`** (4 bugs):
+
+| # | Severity | Bug | Fix |
+|---|----------|-----|-----|
+| 1 | 🟡 Med | `_read_shared_state` bare `except Exception:` silently swallowed JSON parse errors and I/O failures, making telemetry corruption invisible | Split into `json.JSONDecodeError` (corrupted file) and `OSError` (I/O failure) with `sys.stderr.write` warnings |
+| 2 | 🟡 Med | `_write_shared_state` bare `except Exception:` silently swallowed write failures — callers assumed state was persisted when it wasn't | Split into `OSError` + catch-all with stderr warnings |
+| 3 | 🟡 Med | `_shared_state_lock` bare `except Exception:` silently swallowed lock failures and then **yielded without any lock** — two concurrent requests could corrupt the state file | Added `lock_held` flag, narrowed to `OSError` + catch-all with warnings; `finally` only unlocks when `lock_held` is true |
+| 4 | 🟢 Low | `_route_llamacpp_stream` called `iter(self.llamacpp.stream_generate(...))` **outside** the generator's `try/except` — if `stream_generate` raised (e.g. connection refused), the error propagated without being tracked in `_track_route(is_error=True)`, leaving telemetry counters inconsistent | Moved `iter()` call inside the `chunks()` generator's `try` block |
+
 ## What we learned
 
 ### Kill escalation chain for process lifecycles
@@ -455,3 +464,12 @@
 ### Temp file traps
 - **Every `mktemp` call must be paired with a `trap` cleanup handler** before any code that could fail. The pattern: `tmp="$(mktemp)" || die "..."` → `trap 'rm -f "$tmp"' EXIT` → use temp file → `rm -f "$tmp"` → `trap - EXIT`.
 - **`trap - EXIT` (removing the trap) must run after successful cleanup**, otherwise the handler fires again on normal function return. The `trap ... EXIT` is scoped to the process, not the function — once the cleanup is done, remove the trap so it doesn't run `rm -f` on an already-cleaned-up path.
+
+### Recovery paths must warn, not just swallow
+- **Bare `except Exception:` in recovery paths is a bug** when it silently swallows the error. Every recovery path (corrupt file, lock failure, write failure) must emit a warning via `sys.stderr.write()` so the operator can detect persistent failures. Per earlier lesson: "Recovery paths should be tolerant but not silent."
+- **Three granularity levels for file/state recovery exceptions**: `json.JSONDecodeError` (corrupt content), `OSError` (missing file, permission denied, disk full), and catch-all `Exception` (unexpected). Each gets a different warning message with the path included.
+- **When file locking fails, yielding without the lock is a data corruption risk.** The lock context manager should warn loudly and let the caller decide whether to proceed. Currently proceeds without lock (best-effort), but the warning makes the risk discoverable.
+
+### Telemetry tracking for streaming errors
+- **`iter()` on a generator that can fail must be inside the error tracking boundary.** If `stream_generate()` raises (connection refused, timeout), the error must be captured by `_track_route(is_error=True)` to keep telemetry counters consistent with actual failure counts.
+- **Generator setup code (before `yield`) belongs inside the generator function, not before it.** The pattern: define the inner generator with `try/except` wrapping everything including the `iter()` call and `yield from`, then the outer function only does pre-validation (not I/O).

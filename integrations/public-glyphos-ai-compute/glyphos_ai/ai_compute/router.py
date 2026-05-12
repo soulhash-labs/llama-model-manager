@@ -110,9 +110,20 @@ def _read_shared_state() -> dict[str, Any]:
         return _blank_shared_state()
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except json.JSONDecodeError:
+        import sys as _sys
+
+        _sys.stderr.write(f"warning: corrupted routing telemetry file, resetting: {path}\n")
+        return _blank_shared_state()
+    except OSError as exc:
+        import sys as _sys
+
+        _sys.stderr.write(f"warning: cannot read routing telemetry file: {path}: {exc}\n")
         return _blank_shared_state()
     if not isinstance(payload, dict):
+        import sys as _sys
+
+        _sys.stderr.write(f"warning: routing telemetry file has wrong type, resetting: {path}\n")
         return _blank_shared_state()
     state = _blank_shared_state()
     if isinstance(payload.get("attempts_by_target"), dict):
@@ -131,25 +142,41 @@ def _write_shared_state(state: dict[str, Any]) -> None:
         temp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
         temp.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
         temp.replace(path)
-    except Exception:
-        return
+    except OSError as exc:
+        import sys as _sys
+
+        _sys.stderr.write(f"warning: failed to write routing telemetry: {path}: {exc}\n")
+    except Exception as exc:
+        import sys as _sys
+
+        _sys.stderr.write(f"warning: unexpected error writing routing telemetry: {path}: {exc}\n")
 
 
 @contextmanager
 def _shared_state_lock():
     path = _telemetry_file()
     handle = None
+    lock_held = False
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = path.with_name(f".{path.name}.lock")
         handle = lock_path.open("a", encoding="utf-8")
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-    except Exception:
+        lock_held = True
+    except OSError as exc:
+        import sys as _sys
+
+        _sys.stderr.write(f"warning: cannot acquire file lock for routing telemetry: {exc}\n")
+        handle = None
+    except Exception as exc:
+        import sys as _sys
+
+        _sys.stderr.write(f"warning: unexpected error acquiring routing telemetry lock: {exc}\n")
         handle = None
     try:
         yield
     finally:
-        if handle is not None:
+        if handle is not None and lock_held:
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             finally:
@@ -559,10 +586,10 @@ class AdaptiveRouter:
         start = time.perf_counter()
         if not getattr(self.llamacpp, "opens_stream_before_return", False):
             raise RuntimeError("streaming client must open or fail before returning chunks")
-        source_chunks = iter(self.llamacpp.stream_generate(prompt, **generation_kwargs))
 
         def chunks() -> Iterator[str]:
             try:
+                source_chunks = iter(self.llamacpp.stream_generate(prompt, **generation_kwargs))
                 yield from source_chunks
                 self._track_route(
                     ComputeTarget.LOCAL_LLAMACPP,
