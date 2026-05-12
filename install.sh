@@ -408,6 +408,11 @@ build_runtime_during_install() {
             printf 'note: set LMM_AUTO_BUILD_RUNTIME=1 to force, or run manually after installing Vulkan SDK\n'
             primary_backend="cpu"
             printf 'post-install: falling back to CPU-only runtime\n'
+        elif [[ "$primary_backend" == "metal" ]] && ! xcode-select -p >/dev/null 2>&1; then
+            printf 'post-install: macOS Metal host detected but Xcode CLT not installed; skipping GPU build\n'
+            printf 'note: install Xcode CLT with: xcode-select --install\n'
+            primary_backend="cpu"
+            printf 'post-install: falling back to CPU-only runtime\n'
         else
             printf 'post-install: non-interactive install with %s build tools available; building %s runtime\n' "$primary_backend" "$primary_backend"
         fi
@@ -776,6 +781,14 @@ require_source_tree() {
     }
     [[ -f "$ROOT_DIR/integrations/context-mode-mcp/package.json" ]] || {
         printf 'error: installer payload is missing integrations/context-mode-mcp/package.json\n' >&2
+        missing=1
+    }
+    [[ -f "$ROOT_DIR/bin/llama-model" ]] || {
+        printf 'error: installer payload is missing bin/llama-model\n' >&2
+        missing=1
+    }
+    [[ -f "$ROOT_DIR/config/defaults.env.example" ]] || {
+        printf 'error: installer payload is missing config/defaults.env.example\n' >&2
         missing=1
     }
 
