@@ -32,18 +32,28 @@ async function buildHooks() {
 }
 
 function buildDashboard() {
-  execSync("npx vite build --config dashboard/vite.config.ts", {
-    stdio: "inherit",
-    cwd: process.cwd(),
-  });
+  try {
+    execSync("npx vite build --config dashboard/vite.config.ts", {
+      stdio: "inherit",
+      cwd: process.cwd(),
+    });
+  } catch (err) {
+    console.error("Dashboard build failed:", err.message);
+    process.exit(1);
+  }
 }
 
 (async () => {
-  if (mode === "mcp" || mode === "all") {
-    await buildMcp();
-    await buildHooks();
-  }
-  if (mode === "dashboard" || mode === "all") {
-    buildDashboard();
+  try {
+    if (mode === "mcp" || mode === "all") {
+      await buildMcp();
+      await buildHooks();
+    }
+    if (mode === "dashboard" || mode === "all") {
+      buildDashboard();
+    }
+  } catch (err) {
+    console.error("Build failed:", err);
+    process.exit(1);
   }
 })();

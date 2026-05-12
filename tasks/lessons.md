@@ -400,3 +400,58 @@
 - **`structuredContent` in MCP `CallToolResult` expects `Record<string, unknown>`**, not `unknown`. The `as unknown as Record<string, unknown>` pattern (or simply `as Record<string, unknown>`) is the correct way to assign an `unknown` response to it. Changing the parameter to a narrower type loses flexibility; casting on assignment preserves flexibility without losing type safety.
 - **Always run `npm run typecheck` after MCP type changes.** The previous fix silently broke type safety because only the function signature was changed — the assignment mismatch was only caught by the type checker. TypeScript errors show up immediately when you run `tsc --noEmit`.
 - **The `share_orion/` copies of MCP files must stay in sync** with the primary `integrations/context-mode-mcp/` copies. Apply the same fix to both.
+
+# Session 2026-05-12: bin/llama-model Process Lifecycle SIGKILL Fallback & Stop Confirmation
+
+## What we did
+
+- **Triaged explore-agent findings against actual source**: An explore agent claimed `bin/llama-server` existed (it doesn't — all lifecycle lives in `bin/llama-model`), fabricated file paths like `src/server/process_manager.py` and `bin/start_server.sh`, and hallucinated an `&&`/`||` bug that doesn't exist. All false positives — confirmed pattern from earlier sessions.
+
+- **Fixed `integrations/context-mode-mcp/scripts/build.js`** (2 bugs):
+  - **Bug 1**: Async IIFE at bottom had no `.catch()` — unhandled promise rejection if esbuild or execSync failed. Wrapped in try/catch + `process.exit(1)`.
+  - **Bug 2**: `buildDashboard()` called `execSync` without error handling — if vite build failed, error propagated as unhandled rejection. Added try/catch + `process.exit(1)`.
+
+- **Fixed `bin/llama-model`** (5 bugs in process lifecycle):
+
+| # | File | Bug | Fix |
+|---|------|-----|-----|
+| 1 | `bin/llama-model` | **`lmm_gateway_stop` fire-and-forget**: sent SIGTERM, immediately removed PID file, returned success without verifying process died. Most likely root cause of orphaned processes holding GPU memory. | Added TOCTOU guard (verify PID matches gateway via cmdline), 10s wait loop after SIGTERM, SIGKILL fallback with 5s wait, warn-but-continue if even SIGKILL fails. |
+| 2 | `bin/llama-model` | **`lmm_gateway_stop` no PID verification**: could kill a recycled PID belonging to an unrelated process. | Added `pid_matches_lmm_gateway()` checking cmdline for gateway script + port. |
+| 3 | `bin/llama-model` | **`stop_server` no SIGKILL fallback**: 30s SIGINT + 10s SIGTERM then `die` — if llama-server hung during GPU context teardown, process became an orphan holding GPU memory. | Added SIGKILL fallback with 5s wait after SIGTERM timeout. |
+| 4 | `bin/llama-model` | **`claude_gateway_stop` no SIGKILL fallback**: 15s SIGTERM then `die`. Same orphan risk. | Added SIGKILL fallback with 5s wait after SIGTERM timeout. |
+| 5 | `bin/llama-model` | **`lmm_gateway_start` PID file before health check**: PID written to file immediately after background, then health check ran. Race window where stale PID existed in file before failure cleanup. | Moved `printf '%s\n' "$pid" >"$PID_FILE"` into the success branch after health check passes. |
+
+- **Fixed `bin/llama-model-gui`** (2 bugs):
+  - **Bug 1 (HIGH — command injection)**: `open_terminal_cmd()` interpolated `$title` directly into a double-quoted `bash -lc` string. User-chosen model alias from `select_model()` flowed into `$title` at call sites `"Switching To $selected"` and `"Applying ${selected^} Client Mode"`, enabling injection via `$()`, backticks, `;`, or `"` in the alias name. Fix: escape `$title` with `printf -v escaped_title '%q' "$title"` and use the escaped form in the `bash -lc` argument.
+  - **Bug 2 (MEDIUM — temp file leak)**: `show_text()` called `mktemp` without a `trap` cleanup handler. If `zenity` crashed or the script received SIGTERM between `mktemp` and `rm`, the temp file leaked in `/tmp`. Fix: added `trap 'rm -f "$tmp"' EXIT` after `mktemp`, and `trap - EXIT` after cleanup.
+
+- **Verified**: `bash -n` syntax check clean on all changes in all three files.
+
+## What we learned
+
+### Kill escalation chain for process lifecycles
+- **Every stop function needs a three-phase escalation**: SIGINT (graceful shutdown, 30s) → SIGTERM (polite kill, 10-15s) → SIGKILL (force kill, 5s). GPU processes (llama-server with CUDA context) are particularly likely to hang during teardown — SIGKILL is essential for cleaning them up.
+- **fire-and-forget `kill` is a bug**. `lmm_gateway_stop` sent SIGTERM and immediately returned success. The process could still be alive, holding GPU memory or a port. A stop function is not done until the process is confirmed dead via `kill -0` polling.
+- **`SIGKILL` can fail too** (e.g., zombie processes, processes in D state). After SIGKILL + wait cycle, if the process is still alive, the function should still clean up its PID file and report the issue — an error message is better than leaving stale PID files that prevent future starts.
+
+### TOCTOU guards in process management
+- **Always verify PID still matches the expected process before killing**. `pid_matches_claude_gateway()` (cmdline check for script name + port) prevents killing a recycled PID. `lmm_gateway_stop` lacked this guard — fixed by adding `pid_matches_lmm_gateway()`.
+- **PID files are advisory, not authoritative**. A PID file can be stale (process already died), reused (new process got the same PID), or wrong (written before readiness check passed). Always verify with `kill -0` + process-specific cmdline matching before acting on a PID file.
+
+### PID file write timing
+- **PID files must be written AFTER the readiness check, not before.** Writing the PID file immediately after `&` creates a race window: another invocation reads the PID, thinks the process is running, but the health check might fail and clean up the PID file. The pattern: `background &` → `pid=$!` → `wait_for_health` → `printf '%s' "$pid" > pidfile` (only on success).
+- **`claude_gateway_start` already had the correct pattern** (PID written after `wait_ready`). `lmm_gateway_start` was wrong — it wrote PID before the health check. This was a consistency bug between the two gateway start functions.
+
+### Explore agent hallucination patterns
+- **Explore agents consistently fabricate file paths and code patterns.** This session: `bin/llama-server` (doesn't exist), `src/server/process_manager.py` (doesn't exist), `bin/start_server.sh` (doesn't exist), `scripts/monitor_processes.sh` (doesn't exist), `web/admin/api_routes.py` (doesn't exist), `options.mode === 'build' && options.mode === 'deploy'` (doesn't exist in repo).
+- **The ratio of hallucination is consistent with earlier sessions**. Across all sessions, roughly 2/3 of AI-generated bug reports are false positives. The pattern: plausible-sounding file paths, correct-looking but wrong line numbers, and code patterns that appear correct at first glance but reference non-existent code.
+- **The defensible workflow**: Use explore agent output as hypotheses, always verify each finding against actual source code before acting, record false positives with evidence in lessons.md.
+
+### Command injection in bash GUI scripts
+- **`open_terminal_cmd()` patterns with `bash -lc "..."` are injection-prone**: any user-controlled variable (`$title` containing model alias, file path) interpolated into the double-quoted string enables command injection via `$()`, backticks, `;`, or embedded `"`. The fix: always escape interpolated variables with `printf -v escaped '%q' "$var"` before embedding them.
+- **`printf '%q'` produces shell-safe output** that can be safely interpolated into `bash -c "..."` strings without surrounding quotes. `%q` handles spaces, quotes, `$`, backticks, and all other special characters by producing escaped/quoted output that the inner shell correctly parses as a single literal word.
+- **Model aliases from the registry (`MODELS_FILE`) are user-controlled strings** and must be treated as untrusted input in any shell execution context. Even though they come from a config file, the user (or another process) can write arbitrary values to it.
+
+### Temp file traps
+- **Every `mktemp` call must be paired with a `trap` cleanup handler** before any code that could fail. The pattern: `tmp="$(mktemp)" || die "..."` → `trap 'rm -f "$tmp"' EXIT` → use temp file → `rm -f "$tmp"` → `trap - EXIT`.
+- **`trap - EXIT` (removing the trap) must run after successful cleanup**, otherwise the handler fires again on normal function return. The `trap ... EXIT` is scoped to the process, not the function — once the cleanup is done, remove the trap so it doesn't run `rm -f` on an already-cleaned-up path.

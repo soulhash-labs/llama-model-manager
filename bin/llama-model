@@ -3161,7 +3161,19 @@ stop_server() {
         sleep 1
     done
 
-    die "server pid $pid did not stop"
+    # SIGKILL fallback — process is stuck (e.g. GPU context teardown hang)
+    printf 'warning: server pid %s did not respond to SIGINT/SIGTERM; sending SIGKILL\n' "$pid" >&2
+    kill -KILL "$pid" 2>/dev/null || true
+    for waited in $(seq 1 5); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            wait_for_port_release
+            clear_state_file
+            return 0
+        fi
+        sleep 1
+    done
+
+    die "server pid $pid did not stop (even after SIGKILL)"
 }
 
 wait_for_port_release() {
@@ -5595,17 +5607,16 @@ lmm_gateway_start() {
         --mode "$gateway_mode" \
         >>"$LLAMA_MODEL_GATEWAY_LOG" 2>&1 &
     pid="$!"
-    printf '%s\n' "$pid" >"$LLAMA_MODEL_GATEWAY_PID_FILE"
     if lmm_gateway_wait_for_health "$pid" 40; then
+        printf '%s\n' "$pid" >"$LLAMA_MODEL_GATEWAY_PID_FILE"
         printf 'running: yes\n'
-        printf 'pid: %s\n' "$(lmm_gateway_pid)"
+        printf 'pid: %s\n' "$pid"
         printf 'url: %s\n' "$(lmm_gateway_api_base)"
         printf 'gateway_mode: %s\n' "$gateway_mode"
         printf 'backend_api_base: %s\n' "$(upstream_api_base)"
         printf 'model_id: %s\n' "$model_id"
         printf 'log: %s\n' "$LLAMA_MODEL_GATEWAY_LOG"
     else
-        rm -f "$LLAMA_MODEL_GATEWAY_PID_FILE"
         if kill -0 "$pid" >/dev/null 2>&1; then
             kill "$pid" >/dev/null 2>&1 || true
         fi
@@ -5618,15 +5629,63 @@ lmm_gateway_start() {
     fi
 }
 
+pid_matches_lmm_gateway() {
+    local pid="$1"
+    local cmdline
+    local script
+
+    script="$(lmm_gateway_script 2>/dev/null || true)"
+    [[ -n "$script" ]] || return 1
+    cmdline="$(pid_command_line "$pid")"
+    [[ -n "$cmdline" ]] || return 1
+    [[ "$cmdline" == *"$script"* ]] || return 1
+    [[ "$cmdline" == *"--port ${LLAMA_MODEL_GATEWAY_PORT}"* ]] || return 1
+    return 0
+}
+
 lmm_gateway_stop() {
     local gateway_mode="${1:-full}"
     local pid
+    local waited
     pid="$(lmm_gateway_pid 2>/dev/null || true)"
-    if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" >/dev/null 2>&1; then
-        kill "$pid" >/dev/null 2>&1 || true
+    if [[ -z "$pid" || ! "$pid" =~ ^[0-9]+$ ]]; then
+        rm -f "$LLAMA_MODEL_GATEWAY_PID_FILE"
+        printf 'stopped LMM %s gateway on port %s\n' "$gateway_mode" "$LLAMA_MODEL_GATEWAY_PORT"
+        return 0
     fi
+
+    # Verify PID is still the gateway process before killing (TOCTOU guard)
+    if ! kill -0 "$pid" 2>/dev/null || ! pid_matches_lmm_gateway "$pid"; then
+        rm -f "$LLAMA_MODEL_GATEWAY_PID_FILE"
+        printf 'stopped LMM %s gateway on port %s\n' "$gateway_mode" "$LLAMA_MODEL_GATEWAY_PORT"
+        return 0
+    fi
+
+    kill -TERM "$pid" 2>/dev/null || true
+    for waited in $(seq 1 10); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            rm -f "$LLAMA_MODEL_GATEWAY_PID_FILE"
+            printf 'stopped LMM %s gateway on port %s\n' "$gateway_mode" "$LLAMA_MODEL_GATEWAY_PORT"
+            return 0
+        fi
+        sleep 1
+    done
+
+    # SIGKILL fallback
+    printf 'warning: LMM gateway pid %s did not respond to SIGTERM; sending SIGKILL\n' "$pid" >&2
+    kill -KILL "$pid" 2>/dev/null || true
+    for waited in $(seq 1 5); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            rm -f "$LLAMA_MODEL_GATEWAY_PID_FILE"
+            printf 'stopped LMM %s gateway on port %s\n' "$gateway_mode" "$LLAMA_MODEL_GATEWAY_PORT"
+            return 0
+        fi
+        sleep 1
+    done
+
+    printf 'warning: LMM gateway pid %s did not stop (even after SIGKILL)\n' "$pid" >&2
     rm -f "$LLAMA_MODEL_GATEWAY_PID_FILE"
-    printf 'stopped LMM %s gateway on port %s\n' "$gateway_mode" "$LLAMA_MODEL_GATEWAY_PORT"
+    printf 'stopped LMM %s gateway on port %s (pid %s may still be running)\n' "$gateway_mode" "$LLAMA_MODEL_GATEWAY_PORT" "$pid"
 }
 
 lmm_gateway_status() {
@@ -5935,7 +5994,20 @@ claude_gateway_stop() {
         fi
         sleep 1
     done
-    die "claude gateway pid $pid did not stop"
+
+    # SIGKILL fallback
+    printf 'warning: claude gateway pid %s did not respond to SIGTERM; sending SIGKILL\n' "$pid" >&2
+    kill -KILL "$pid" 2>/dev/null || true
+    for _ in $(seq 1 5); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            rm -f "$CLAUDE_GATEWAY_PID_FILE"
+            printf 'status: stopped\n'
+            return 0
+        fi
+        sleep 1
+    done
+
+    die "claude gateway pid $pid did not stop (even after SIGKILL)"
 }
 
 claude_gateway_restart() {

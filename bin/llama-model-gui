@@ -40,19 +40,23 @@ show_text() {
     local body="$2"
     local tmp
 
-    tmp="$(mktemp)"
+    tmp="$(mktemp)" || die "Failed to create temp file"
+    trap 'rm -f "$tmp"' EXIT
     printf '%s\n' "$body" >"$tmp"
     zenity --text-info --title="$title" --width=980 --height=720 --filename="$tmp"
     rm -f "$tmp"
+    trap - EXIT
 }
 
 open_terminal_cmd() {
     local title="$1"
     local cmd="$2"
+    local escaped_title
 
     [[ -n "$TERMINAL_BIN" ]] || die "No terminal emulator found"
 
-    "$TERMINAL_BIN" -e bash -lc "printf '%s\n\n' \"$title\"; $cmd; status=\$?; printf '\nExit status: %s\n' \"\$status\"; printf 'Press Enter to close...'; read -r; exit \$status"
+    printf -v escaped_title '%q' "$title"
+    "$TERMINAL_BIN" -e bash -lc "printf '%s\n\n' $escaped_title; $cmd; status=\$?; printf '\nExit status: %s\n' \"\$status\"; printf 'Press Enter to close...'; read -r; exit \$status"
 }
 
 show_current() {
