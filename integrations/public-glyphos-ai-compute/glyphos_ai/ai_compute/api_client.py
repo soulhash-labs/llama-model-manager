@@ -14,6 +14,11 @@ from typing import Any
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
+try:
+    import yaml as _yaml  # type: ignore[import-untyped]
+except ImportError:
+    _yaml = None  # type: ignore[assignment]
+
 
 class _HttpJsonResponse:
     def __init__(self, status_code: int, payload: dict[str, Any]):
@@ -68,16 +73,19 @@ def _env_first(*names: str, default: str = "") -> str:
 
 
 def _load_glyphos_config() -> dict[str, Any]:
+    if _yaml is None:
+        return {}
     config_path = Path(os.environ.get("GLYPHOS_CONFIG_FILE", "~/.glyphos/config.yaml")).expanduser()
     if not config_path.exists():
         return {}
     try:
-        import yaml  # type: ignore
-    except Exception:
-        return {}
-    try:
-        data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except Exception:
+        data = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        warnings.warn(
+            f"failed to parse GlyphOS config at {config_path}: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -196,10 +204,12 @@ class LlamaCppClient(BaseChatClient):
         self,
         base_url: str = "http://127.0.0.1:8081/v1",
         model: str = "",
-        max_tokens: int = int(os.environ.get("LMM_DEFAULT_MAX_TOKENS", "32768")),
-        timeout: int = int(os.environ.get("LLAMA_CPP_STREAM_TIMEOUT", "3600")),
+        max_tokens: int | None = None,
+        timeout: int | None = None,
     ):
-        super().__init__(model=model, max_tokens=max_tokens, timeout=timeout)
+        _max_tokens = max_tokens if max_tokens is not None else int(os.environ.get("LMM_DEFAULT_MAX_TOKENS", "32768"))
+        _timeout = timeout if timeout is not None else int(os.environ.get("LLAMA_CPP_STREAM_TIMEOUT", "3600"))
+        super().__init__(model=model, max_tokens=_max_tokens, timeout=_timeout)
         self.base_url = base_url.rstrip("/")
         self._available: bool | None = None
         self._availability_lock = threading.Lock()
@@ -209,14 +219,6 @@ class LlamaCppClient(BaseChatClient):
 
     def _chat_url(self) -> str:
         return f"{self.base_url}/chat/completions"
-
-    def _check_availability(self) -> None:
-        with self._availability_lock:
-            try:
-                response = _http_json("GET", self._models_url(), timeout=2)
-                self._available = response.status_code == 200
-            except Exception:
-                self._available = False
 
     def is_available(self) -> bool:
         if self._available is None:
@@ -228,10 +230,6 @@ class LlamaCppClient(BaseChatClient):
                     except Exception:
                         self._available = False
         return self._available
-
-    def _reset_availability(self) -> None:
-        with self._availability_lock:
-            self._available = None
 
     def _resolve_model(self) -> str:
         if self.model:
@@ -245,7 +243,11 @@ class LlamaCppClient(BaseChatClient):
                 if isinstance(item, dict) and item.get("id"):
                     return str(item["id"])
         except Exception:
-            pass
+            warnings.warn(
+                "llama.cpp /models API call failed; falling back to hardcoded model name",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         # Fallback: raw /models GET as a last attempt before giving up
         try:
             req = urlrequest.Request(self._models_url())
@@ -257,7 +259,11 @@ class LlamaCppClient(BaseChatClient):
                     if isinstance(item, dict) and item.get("id"):
                         return str(item["id"])
         except Exception:
-            pass
+            warnings.warn(
+                "llama.cpp /models raw GET failed; falling back to hardcoded model name",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         return "local-llama"
 
     def _chat_payload(self, prompt: str, **kwargs) -> dict[str, Any]:
@@ -457,16 +463,18 @@ def create_configured_clients() -> dict[str, Any]:
         )
         or "3600"
     )
-    if (
+    llamacpp_enabled = _coerce_bool(
         _env_first(
-            "GLYPHOS_LLAMACPP_ENABLED", default=_config_value(config, "ai_compute.llamacpp.enabled", default="true")
-        ).lower()
-        != "false"
-    ):
+            "GLYPHOS_LLAMACPP_ENABLED",
+            default=_config_value(config, "ai_compute.llamacpp.enabled", default="true"),
+        ),
+        default=True,
+    )
+    if llamacpp_enabled:
         llamacpp = LlamaCppClient(base_url=llama_url, model=llama_model, timeout=llama_timeout)
         if llamacpp.is_available():
             clients["llamacpp"] = llamacpp
-        elif _env_first("GLYPHOS_LLAMACPP_ENABLED", default="true").lower() != "false":
+        else:
             warnings.warn(
                 f"llama.cpp backend at {llama_url} is not reachable; check that the server is running",
                 RuntimeWarning,

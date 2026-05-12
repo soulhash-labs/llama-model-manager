@@ -473,3 +473,53 @@
 ### Telemetry tracking for streaming errors
 - **`iter()` on a generator that can fail must be inside the error tracking boundary.** If `stream_generate()` raises (connection refused, timeout), the error must be captured by `_track_route(is_error=True)` to keep telemetry counters consistent with actual failure counts.
 - **Generator setup code (before `yield`) belongs inside the generator function, not before it.** The pattern: define the inner generator with `try/except` wrapping everything including the `iter()` call and `yield from`, then the outer function only does pre-validation (not I/O).
+
+# Session 2026-05-12: api_client.py Bug Fixes (2 MEDIUM + 6 LOW)
+
+## What we did
+
+- **Fixed 8 bugs in `api_client.py`** across 3 functional areas:
+
+### Config parsing (MEDIUM + 3 LOW)
+
+| # | Severity | Bug | Fix |
+|---|----------|-----|-----|
+| 1 | 🟡 Med | **`GLYPHOS_LLAMACPP_ENABLED` used `.lower() != "false"`** instead of `_coerce_bool()`. Values like `"disabled"`, `"no"`, `"0"` were all treated as enabled. The env var was also read twice redundantly — once for the gate, once for the `elif`. | Extracted to `llamacpp_enabled = _coerce_bool(...)` evaluated once, used for both gate and warning. |
+| 2 | 🟢 Low | **`int(os.environ.get(...))` defaults in `__init__` evaluated at class definition time**, not instance creation time. Env var changes after import were ignored. | Changed `max_tokens: int | None = None`, `timeout: int | None = None`, resolved at call time in the constructor body. |
+| 3 | 🟢 Low | **`import yaml` inside `_load_glyphos_config`** ran on every call. | Moved to module-level `import yaml as _yaml` with `except ImportError: _yaml = None`. |
+| 4 | 🟢 Low | **`yaml.safe_load` error silently swallowed** — malformed config resulted in empty dict with no warning. | Added `except Exception as exc:` with `warnings.warn(...)` including the path and error. |
+
+### Dead code removal (MEDIUM)
+
+| # | Severity | Bug | Fix |
+|---|----------|-----|-----|
+| 5 | 🟡 Med | **`_check_availability()` dead code**: duplicate of `is_available()` logic, never called anywhere. Also `_reset_availability()` dead code. | Removed both methods. The inlined `is_available()` lazy-init pattern with the per-instance lock is the canonical path. |
+
+### Silent error handling (2 LOW)
+
+| # | Severity | Bug | Fix |
+|---|----------|-----|-----|
+| 6 | 🟢 Low | **`_resolve_model()` first `except Exception: pass`** — `/models` API call failure silently swallowed with no visibility. | Added `warnings.warn(...)` with descriptive message. |
+| 7 | 🟢 Low | **`_resolve_model()` second `except Exception: pass`** — raw `/models` fallback failure silently swallowed. | Added `warnings.warn(...)` with descriptive message. |
+
+- **Cleaned up type-checker noise**: Changed `_HAVE_YAML` → `_have_yaml` to avoid `reportConstantRedefinition`; used `_yaml is None` guard pattern instead of a separate boolean flag to satisfy the LSP (reportsPossiblyUnboundVariable).
+- **Verified**: `python3 -m py_compile` passes clean; only pre-existing LSP errors (`openai`/`anthropic` not installed locally).
+
+## What we learned
+
+### Env var bool parsing using project patterns
+- **`_coerce_bool()` exists for a reason.** It recognizes `"1"`, `"true"`, `"yes"`, `"on"`, `"enabled"`, `"y"` as truthy and `"0"`, `"false"`, `"no"`, `"off"`, `"disabled"`, `"n"` as falsy. The old code used `.lower() != "false"` which treated everything except `"false"` as truthy — a value of `"disabled"` or `"0"` would enable the feature. Always use `_coerce_bool()` for env vars that already have a parsing helper.
+- **When the same env var is read twice (gate + warning), extract to a variable.** The old `elif` re-read `GLYPHOS_LLAMACPP_ENABLED` with a different default (`default="true"` vs `default="true"` — same but duplicated). A single `llamacpp_enabled` variable used for both the `if` and the warning `else` avoids inconsistency.
+
+### Default parameter evaluation timing
+- **Python evaluates default parameter values once at `def` time**, not at each call. `int(os.environ.get(...))` in a function signature means the env var is read when the module loads, not when the function is called. This is a known Python gotcha.
+- **The fix: use `None` as the default and resolve in the function body** `_max_tokens = max_tokens if max_tokens is not None else int(os.environ.get(...))`. This respects the explicit intent of "read at call time."
+- **`None` as a sentinel is the standard Python idiom** for "I need to differ default resolution to call time."
+
+### Module-level lazy imports
+- **`import yaml` inside a function is not just a style issue — it hides import failures.** If PyYAML is installed but corrupted, the `try/except Exception: return {}` silently returns an empty config instead of reporting the failure. Prefer module-level `import yaml as _yaml` with `except ImportError: _yaml = None`, then guard with `if _yaml is None: return {}` at call time.
+- **`ImportError` is the only exception to catch for optional imports.** `except Exception:` is too broad — it would catch `SyntaxError`, `MemoryError`, etc. and mask real problems.
+
+### Type checker patterns for optional imports
+- **The LSP (pyright/basedpyright) cannot track variable guards across function boundaries.** Using a `_have_yaml` boolean with `if not _have_yaml: return {}` at the function start does not convince pyright that `yaml` is bound inside the function. The pattern `_yaml is None` at the function start + using `_yaml` (not `yaml`) throughout satisfies the type checker because the guard is directly testing the variable.
+- **The `# type: ignore[assignment]` comment on `_yaml = None` is needed** because importing `yaml` (which has type info) and assigning `None` to it in the except branch would normally be a type violation. The ignore comment documents that this is intentional — the type is effectively `Any` when yaml is absent.
