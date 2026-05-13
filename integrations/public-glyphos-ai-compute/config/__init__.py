@@ -17,6 +17,7 @@ Non-goals:
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from copy import deepcopy
 from functools import lru_cache
@@ -122,7 +123,7 @@ def load_explicit_config(config_file: str | Path | None = None) -> dict[str, Any
     if config_file is not None:
         return load_yaml_file(config_file)
 
-    env_path = __import__("os").environ.get(DEFAULT_CONFIG_ENV, "").strip()
+    env_path = os.environ.get(DEFAULT_CONFIG_ENV, "").strip()
     if env_path:
         return load_yaml_file(Path(env_path).expanduser())
 
