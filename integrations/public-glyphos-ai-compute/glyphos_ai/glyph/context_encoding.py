@@ -84,6 +84,8 @@ def encode_context(raw: str, *, disabled: bool = False) -> ContextPayload:
     - encoded_context only if compression is effective
     - encoding_status indicating result
     """
+    if raw is None:
+        raise TypeError("encode_context requires a string, got None")
     raw_context = raw  # preserve original per docstring contract
     working = raw.strip()
     raw_chars = len(working)

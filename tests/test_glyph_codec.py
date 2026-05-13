@@ -1,4 +1,6 @@
+import os
 import unittest
+from pathlib import Path
 
 # test_glyph_codec.py
 from glyphos_ai.glyph import (
@@ -153,6 +155,118 @@ class GlyphCodecTests(unittest.TestCase):
         """tokenize_glyph_stream calls str() on input so ints are safe."""
         tokens = tokenize_glyph_stream("⊕ 🌍", registry=self.registry)
         self.assertEqual(len(tokens), 2)
+
+
+# ------------------------------------------------------------------
+# Byte-level encoder/decoder integration tests
+# ------------------------------------------------------------------
+
+
+class EncoderDecoderTests(unittest.TestCase):
+    """Tests for the byte-level glyph encoder/decoder (encoder.py / decoder.py)."""
+
+    def test_decoder_does_not_import_encoder(self) -> None:
+        """decoder.py must NOT import encoder.py — decoder owns its imports."""
+        import subprocess
+        import sys
+
+        # Point the subprocess at the glyph source with an absolute path so the
+        # import test works regardless of how the parent process set PYTHONPATH.
+        _glyph_root = str(Path(__file__).resolve().parents[1] / "integrations/public-glyphos-ai-compute")
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from glyphos_ai.glyph.decoder import decode_text, decode_to_bytes, GlyphDecoder",
+            ],
+            capture_output=True,
+            text=True,
+            env={
+                **{k: v for k, v in os.environ.items() if not k.startswith("PYTHON")},
+                "PYTHONPATH": _glyph_root,
+            },
+            cwd=str(Path(__file__).resolve().parents[0]),
+        )
+        if result.returncode != 0:
+            self.fail(f"import decoder failed:\n{result.stderr}")
+
+        import ast
+
+        decoder_path = (
+            Path(__file__).resolve().parents[1] / "integrations/public-glyphos-ai-compute/glyphos_ai/glyph/decoder.py"
+        )
+        tree = ast.parse(decoder_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                if node.module and "encoder" in node.module:
+                    self.fail(f"decoder.py still imports from encoder: from {node.module} import ...")
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if "encoder" in alias.name:
+                        self.fail(f"decoder.py still imports encoder: import {alias.name}")
+
+    def test_encode_decode_round_trip(self) -> None:
+        """Basic byte-level encode → decode round-trip passes."""
+        from glyphos_ai.glyph.decoder import decode_text
+        from glyphos_ai.glyph.encoder import encode_text
+
+        original = "Hello, GlyphOS!"
+        encoded = encode_text(original, include_header=True)
+        decoded = decode_text(encoded)
+        self.assertEqual(decoded, original)
+
+    def test_encode_decode_round_trip_no_header(self) -> None:
+        from glyphos_ai.glyph.decoder import decode_text
+        from glyphos_ai.glyph.encoder import encode_text
+
+        original = "no-header test"
+        encoded = encode_text(original, include_header=False)
+        decoded = decode_text(encoded)
+        self.assertEqual(decoded, original)
+
+    def test_decode_text_errors_replace(self) -> None:
+        """decode_text with errors='replace' should not raise on invalid UTF-8
+        if such bytes are somehow produced."""
+        from glyphos_ai.glyph.decoder import decode_text
+        from glyphos_ai.glyph.encoder import encode_bytes
+
+        mangled = encode_bytes(b"abc", include_header=False)
+        result = decode_text(mangled, errors="replace")
+        self.assertIsInstance(result, str)
+
+    def test_decode_tokens_rejects_non_list(self) -> None:
+        from glyphos_ai.glyph.decoder import GlyphDecoder
+
+        decoder = GlyphDecoder()
+        with self.assertRaises(TypeError):
+            decoder.decode_tokens("not-a-list")  # type: ignore[arg-type]
+
+    def test_decode_tokens_rejects_non_string_items(self) -> None:
+        from glyphos_ai.glyph.decoder import GlyphDecoder, GlyphDecodingError
+
+        decoder = GlyphDecoder()
+        with self.assertRaises(GlyphDecodingError):
+            decoder.decode_tokens([42, 73])  # type: ignore[list-item]
+
+    def test_decode_tokens_strict_unknown_raises(self) -> None:
+        from glyphos_ai.glyph.decoder import GlyphDecoder, GlyphDecodingError
+
+        decoder = GlyphDecoder()
+        with self.assertRaises(GlyphDecodingError):
+            decoder.decode_tokens(["\ue000", "NOT_A_GLYPH"], strict=True)
+
+    def test_decode_tokens_non_strict_unknown_skips(self) -> None:
+        from glyphos_ai.glyph.decoder import GlyphDecoder
+
+        decoder = GlyphDecoder()
+        result = decoder.decode_tokens(["\ue000", "NOT_A_GLYPH"], strict=False)
+        self.assertEqual(result, b"\x00")
+
+    def test_context_encoding_rejects_none(self) -> None:
+        from glyphos_ai.glyph.context_encoding import encode_context
+
+        with self.assertRaises(TypeError):
+            encode_context(None)  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":

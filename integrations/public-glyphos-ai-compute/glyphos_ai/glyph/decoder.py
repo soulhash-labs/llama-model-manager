@@ -11,10 +11,7 @@ import argparse
 import base64
 from pathlib import Path
 
-try:
-    from .encoder import MAGIC, GlyphMap, load_glyph_map
-except ImportError:
-    from encoder import MAGIC, GlyphMap, load_glyph_map  # type: ignore
+from .glyph_core import MAGIC, GlyphMap, load_glyph_map
 
 
 class GlyphDecodingError(ValueError):
@@ -121,9 +118,14 @@ class GlyphDecoder:
         return self.decode_to_bytes(payload, strict=strict).decode("utf-8", errors=errors)
 
     def decode_tokens(self, tokens: list[str], strict: bool = True) -> bytes:
+        if not isinstance(tokens, list | tuple):
+            raise TypeError(f"decode_tokens requires a list or tuple of str, got {type(tokens).__name__}")
+
         decoded = bytearray()
 
         for index, token in enumerate(tokens):
+            if not isinstance(token, str):
+                raise GlyphDecodingError(f"decode_tokens expected str at position {index}, got {type(token).__name__}")
             if token not in self.glyph_map.glyph_to_byte:
                 if strict:
                     raise GlyphDecodingError(f"unknown glyph token at position {index}: {token!r}")
