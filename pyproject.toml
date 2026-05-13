@@ -23,3 +23,72 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["lmm_config", "lmm_errors", "lmm_storage", "lmm_types", "lmm_health", "lmm_receipts", "lmm_notifications", "lmm_providers"]
+
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glyphos-ai-compute"
+version = "0.6.0"
+description = "Glyph-first routing and prompt shaping with explicit upstream context."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Benji Labs" }
+]
+keywords = [
+  "glyph",
+  "routing",
+  "prompt-shaping",
+  "llm",
+  "ai-compute",
+  "explicit-context",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+  "PyYAML>=6.0",
+  "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2.1",
+  "twine>=5.1.1",
+  "ruff>=0.6.0",
+  "mypy>=1.10.0",
+]
+
+[project.scripts]
+glyphos-route = "glyphos_ai.ai_compute.router:main"
+glyph-route = "glyphos_ai.ai_compute.router:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["glyphos_ai*"]
+exclude = ["tests*", "docs*", ".planning*"]
+
+[tool.setuptools.package-data]
+"glyphos_ai.glyph" = ["glyph_map.yaml"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = false
