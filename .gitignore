@@ -39,3 +39,6 @@ docs/
 web/branding/
 desktop/*icon*.svg
 .planning/
+
+# Detached orion share (no longer tracked in this repo)
+share_orion/
