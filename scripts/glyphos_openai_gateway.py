@@ -746,7 +746,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
 def create_gateway_server(
     host: str = "127.0.0.1",
     port: int = 4010,
-    backend_base_url: str = "http://127.0.0.1:8081/v1",
+    backend_base_url: str = os.environ.get("LLAMA_MODEL_BACKEND_BASE_URL", "http://127.0.0.1:8081/v1"),
     model_id: str = "",
     gateway_mode: str = "full",
     watcher_config: object | None = None,

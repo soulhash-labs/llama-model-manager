@@ -349,9 +349,7 @@ def _extract_bash_xml_command(text: str) -> str | None:
     if command_start >= 0:
         rest = attrs[command_start + len('command="') :]
         marker_positions = [
-            position
-            for position in (rest.find('" timeout='), rest.find('" description='))
-            if position >= 0
+            position for position in (rest.find('" timeout='), rest.find('" description=')) if position >= 0
         ]
         if marker_positions:
             command = rest[: min(marker_positions)].strip()
@@ -533,7 +531,19 @@ def _anthropic_tool_use_text_to_tool_call(text: str, payload: dict[str, Any]) ->
         return None
 
     parsed = _parse_json_object(text) or _parse_embedded_json_object(text)
-    if not isinstance(parsed, dict) or str(parsed.get("type", "")).replace("-", "_") != "tool_use":
+    if not isinstance(parsed, dict):
+        return None
+
+    # Handle {"tool_use": {"type": "tool_use", "name": "Bash", "command": "..."}}
+    # where the outer key is "tool_use" instead of a top-level "type" field.
+    if (
+        "tool_use" in parsed
+        and isinstance(parsed["tool_use"], dict)
+        and str(parsed.get("type", "")).replace("-", "_") != "tool_use"
+    ):
+        parsed = parsed["tool_use"]
+
+    if str(parsed.get("type", "")).replace("-", "_") != "tool_use":
         return None
 
     name = str(parsed.get("name", ""))
@@ -541,6 +551,12 @@ def _anthropic_tool_use_text_to_tool_call(text: str, payload: dict[str, Any]) ->
         return None
 
     arguments = parsed.get("input", parsed.get("arguments", {}))
+    # Some local models emit tool arguments as flat keys (e.g. "command": "...")
+    # instead of nested under "input": {"command": "..."}. Wrap them.
+    if not isinstance(arguments, dict) or not arguments:
+        command = parsed.get("command")
+        if command is not None:
+            arguments = {"command": str(command)}
     if isinstance(arguments, str):
         parsed_arguments = _parse_json_object(arguments)
         arguments = parsed_arguments if parsed_arguments is not None else {"value": arguments}
@@ -587,6 +603,8 @@ def _normalize_tool_call(text: str, payload: dict[str, Any]) -> dict[str, Any] |
         candidate = parsed["tool_call"]
     elif isinstance(parsed.get("tool_calls"), list) and parsed["tool_calls"]:
         candidate = parsed["tool_calls"][0]
+    elif isinstance(parsed.get("tool_use"), dict):
+        candidate = parsed["tool_use"]
     elif parsed.get("type") == "tool_use":
         candidate = parsed
 

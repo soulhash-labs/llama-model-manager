@@ -554,3 +554,64 @@
 
 ### When searching for deploy/install logic, include shell scripts
 - The actual installer code was in `install.sh` (bash function `ensure_context_mode_mcp_dist`), not in Python. Searching only Python files would have missed the root cause entirely. The `bin/llama-model` CLI also runs all its doctor checks in bash. Shell scripts in this project own deployment, installation, health checks, and process lifecycle — searching only Python or JS will miss critical logic.
+
+# Session 2026-05-13: Gateway Hardening Pass — Circular Import, Input Validation, Env Config, F401 Cleanup
+
+## What we did
+
+### P0 — Circular import + codec/decoder guards (highest priority)
+- **Broken circular import** `api_client.py` ↔ `llamacpp_client.py` by extracting `BaseChatClient` and `_result` into a new `client_base.py`. Both clients now import from `.client_base`. Added `__all__` exports and a fresh-process import regression test.
+- **Added `None` guard** in `codec.py` `decode_bytes_to_entries` — raises `GlyphCodecError` instead of crashing on `None` input.
+- **Added `isinstance(payload, str)` guard** in `decoder.py` `_strip_header` — catches string inputs that would cause `TypeError` at `.encode("utf-8")`.
+- **Verified `protocol_normalizers.py`** `tool_use` wrapper → flat `command` mapping is correct across all 4 code paths. Added regression test.
+
+### P1 — Env-backed config + test verification
+- **`--backend-base-url` default** in `gateway_server.py` now reads `LLAMA_MODEL_BACKEND_BASE_URL` env var, falling back to `http://127.0.0.1:8081/v1`.
+- **`create_gateway_server()` default** in `glyphos_openai_gateway.py` reads the same env var.
+- **Glyph codec tests blocked** by `Duplicate glyph tokens detected` from `glyph_map.yaml` → `load_registry()`. Fixed 3 duplicate emojis (see P2 bonus).
+- **22/22 codec tests pass** after fixing glyph_map.yaml duplicates.
+
+### P2 — Code hygiene
+- **Ruff F401/F541**: 4 unused imports removed (2 in `api_client.py`/`llamacpp_client.py`, 1 in `claude_gateway.py`, 1 in `adaptive_routing.py`). Zero F541 issues found.
+- **Type hints**: `context_encoding.py` and `pulse.py` already fully annotated on all public functions — no additions needed.
+- **`render-sovereignty-bridge-clip.py` naming**: standalone Pillow script, no namespace conflicts, leave as-is.
+
+### P2 — Deploy to runtime
+- Discovered runtime at `~/.local/share/llama-model-manager/` was missing files (`codec.py`, `registry.py`, `glyph_map.yaml`) and had stale versions of `types.py`, `decoder.py`, etc. Full sync done.
+- Import regression verified end-to-end on runtime: `BaseChatClient` → `codec roundtrip` → `registry (256 entries)`.
+
+### P2 bonus — glyph_map.yaml duplicate fix
+- 3 duplicate emoji glyphs: `📶` (ping/signal_strength), `🔋` (battery/battery_level), `🕊` (sanctuary/dove).
+- Fixed `signal_strength` → `📳`, battery(0x6F) → `🗳️`, dove(0xF5) → `🤍`.
+- `test_glyph_registry.py` 28/28 passed, `test_glyph_codec.py` 22/22 passed.
+
+## What we learned
+
+### Circular import patterns
+- **Forward reference via a shared base module** (client_base.py) is cleaner than lazy imports inside methods. Both clients import from the same base, and the base imports nothing from either client — zero circular dependency risk.
+- **`__all__` exports** provide explicit API boundaries and prevent accidental name collisions from star imports.
+- **Always verify circular imports are broken with a fresh-process test.** Import order matters — a test that only imports one module may not exercise the circular path. The regression test imports every client in dependency order and verifies all classes resolve.
+
+### Deploy = separate step
+- **Runtime deployment is independent of repo work.** Changes to Python files in the repo are NOT automatically reflected in the installed runtime at `~/.local/share/llama-model-manager/`. Explicitly `cp` or use the install script after every change batch.
+- **Runtime packages can be stale or incomplete.** The runtime `glyphos_ai/glyph/` directory was missing 3 files (`codec.py`, `registry.py`, `glyph_map.yaml`) and had old versions of 2 others (`types.py`, `decoder.py`). Always diff or confirm before declaring deployment done.
+- **Testing from the repo and testing from the runtime use different PYTHONPATHs.** Use `PYTHONPATH=/path/to/integrations/public-glyphos-ai-compute:$PYTHONPATH` or run tests from within that directory.
+
+### Env var defaults in argparse
+- **`default=os.environ.get("VAR", "fallback")` at the module level** evaluates once at import time. That's actually fine for argparse defaults — the env var is read once when the module loads. If you need per-invocation evaluation, use `None` as default and resolve in the body.
+- **Consistent env var naming**: `LLAMA_MODEL_BACKEND_BASE_URL` matches the existing `LLAMA_MODEL_*` convention from `lmm_config.py` / `lmm_providers.py`. Use the same prefix across the entire project.
+
+### YAML registry uniqueness
+- **`glyph_map.yaml` entries must have unique glyph tokens (emojis).** The `GlyphRegistry.__init__` builds `self._by_glyph = {entry.glyph: entry ...}` and checks `len(self._by_glyph) != 256`. Using the same emoji for two different codes silently duplicates cause `len()` to be < 256 and raises `Duplicate glyph tokens detected`.
+- **Same emoji can appear in valid YAML** for different conceptual entries (e.g., `battery` as a destination node and `battery_level` as a measurement). The emoji is a compact visual token, not a semantic category — each code MUST have a unique glyph.
+- **Follow-up cross-reference**: When fixing duplicates, check whether the replaced emoji is used in codec tests, mnemonic maps, or URL paths. Pure-glyph tests (tokenization, encode/decode) only care about code values, not visual representation, so emoji changes are transparent.
+- **Source of duplicates**: The `glyph_map.yaml` was extended/edited over multiple sessions. Entries like `📶 ping` (0x2A) and `📶 signal_strength` (0xA1) were added independently. No automated uniqueness check existed until `GlyphRegistry` was added. Add a CI check for unique glyphs.
+
+### Ruff hygiene
+- **After refactoring that moves code between files, always run `ruff check --select F401`** to catch imports that were used in the old location but are now unused. Our `import requests` in `api_client.py` and `llamacpp_client.py` became unused after the BaseChatClient extraction.
+- **`ruff --fix` with `--select F401` is safe** for unused imports. It only removes the import line — no other code is modified.
+- **E501 (line too long) pre-existing findings are not actionable** without a project-wide decision on line length policy. The project has no `pyproject.toml` ruff config for line length — 23 pre-existing E501s exist across 8 files.
+
+### Type hint verification
+- **Don't assume files lack type hints.** Many files in this project are already fully annotated, especially newer ones. Always read the file first before planning "add type hints" work.
+- **Module-level constants** (like `GLYPH_KEY_ALIASES`, `LOVE_FREQUENCY`) are type-inferred by MyPy/pyright — explicit annotations are cosmetic only. Prioritize function signatures (params + return type) which affect callers and editor tooling.

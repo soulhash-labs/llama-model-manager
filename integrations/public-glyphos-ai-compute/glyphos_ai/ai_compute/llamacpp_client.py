@@ -1,36 +1,57 @@
+"""llama.cpp HTTP server client.
+
+Uses the OpenAI-compatible /v1/chat/completions route by default,
+with /health and /models for status checks.
+"""
+
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from typing import Any
 
-import requests
+from .client_base import BaseChatClient, _result
 
 
-class LlamaCppClient:
+class LlamaCppClient(BaseChatClient):
     """
-    llama.cpp HTTP server client.
+    OpenAI-compatible llama.cpp client.
 
-    Uses the OpenAI-compatible /v1/chat/completions route by default,
-    with /health and /models for status checks.
+    Accepts base_url as either:
+    - http://127.0.0.1:8081
+    - http://127.0.0.1:8081/v1
     """
 
     def __init__(
         self,
-        base_url: str = "http://localhost:8080",
-        model: str = "gpt-3.5-turbo",
-        timeout: int = 60,
+        base_url: str = "http://127.0.0.1:8081",
+        model: str = "",
+        max_tokens: int = 1000,
+        timeout: int = 300,
         api_key: str = "sk-no-key-required",
         default_system: str | None = None,
-    ) -> None:
+    ):
+        super().__init__(model=model, max_tokens=max_tokens, timeout=timeout)
         self.base_url = base_url.rstrip("/")
-        self.model = model
-        self.timeout = timeout
         self.api_key = api_key
         self.default_system = default_system
-        self._session = requests.Session()
 
-    def _url(self, path: str) -> str:
-        return f"{self.base_url}/{path.lstrip('/')}"
+    @property
+    def _root_url(self) -> str:
+        return self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
+
+    @property
+    def _v1_url(self) -> str:
+        return self.base_url if self.base_url.endswith("/v1") else f"{self.base_url}/v1"
+
+    def _models_url(self) -> str:
+        return f"{self._root_url}/models"
+
+    def _health_url(self) -> str:
+        return f"{self._root_url}/health"
+
+    def _chat_url(self) -> str:
+        return f"{self._v1_url}/chat/completions"
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -40,22 +61,36 @@ class LlamaCppClient:
 
     def is_available(self) -> bool:
         try:
-            response = self._session.get(
-                self._url("/health"),
-                headers=self._headers(),
-                timeout=5,
-            )
+            response = self._session.get(self._health_url(), headers=self._headers(), timeout=5)
+            if response.status_code == 200:
+                return True
+        except Exception:
+            pass
+
+        try:
+            response = self._session.get(self._models_url(), headers=self._headers(), timeout=5)
             return response.status_code == 200
         except Exception:
             return False
 
+    def _resolve_model(self) -> str:
+        if self.model:
+            return self.model
+        try:
+            response = self._session.get(self._models_url(), headers=self._headers(), timeout=10)
+            response.raise_for_status()
+            payload = response.json()
+            models = payload.get("data", []) if isinstance(payload, dict) else []
+            for item in models:
+                if isinstance(item, dict) and item.get("id"):
+                    return str(item["id"])
+        except Exception:
+            pass
+        return "local-llama"
+
     def list_models(self) -> dict[str, Any]:
         try:
-            response = self._session.get(
-                self._url("/models"),
-                headers=self._headers(),
-                timeout=10,
-            )
+            response = self._session.get(self._models_url(), headers=self._headers(), timeout=10)
             response.raise_for_status()
             return response.json()
         except Exception as exc:
@@ -64,42 +99,33 @@ class LlamaCppClient:
     def generate(
         self,
         prompt: str,
-        *,
-        model: str | None = None,
-        system: str | None = None,
-        temperature: float = 0.7,
-        max_tokens: int = 500,
-        stream: bool = False,
-        response_format: dict[str, Any] | None = None,
-        extra_body: dict[str, Any] | None = None,
+        **kwargs,
     ) -> dict[str, Any]:
-        """
-        OpenAI-compatible chat-completions wrapper for llama.cpp.
-        """
         started = time.perf_counter()
 
         messages = []
-        effective_system = system or self.default_system
-        if effective_system:
-            messages.append({"role": "system", "content": effective_system})
+        system = kwargs.get("system", self.default_system)
+        if system:
+            messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
         payload: dict[str, Any] = {
-            "model": model or self.model,
+            "model": kwargs.get("model", self._resolve_model()),
             "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": stream,
+            "temperature": kwargs.get("temperature", 0.7),
+            "max_tokens": kwargs.get("max_tokens", self.max_tokens),
+            "stream": kwargs.get("stream", False),
         }
 
-        if response_format is not None:
-            payload["response_format"] = response_format
-        if extra_body:
-            payload.update(extra_body)
+        if "response_format" in kwargs and kwargs["response_format"] is not None:
+            payload["response_format"] = kwargs["response_format"]
+
+        if "extra_body" in kwargs and isinstance(kwargs["extra_body"], Mapping):
+            payload.update(dict(kwargs["extra_body"]))
 
         try:
             response = self._session.post(
-                self._url("/v1/chat/completions"),
+                self._chat_url(),
                 json=payload,
                 headers=self._headers(),
                 timeout=self.timeout,
@@ -108,43 +134,48 @@ class LlamaCppClient:
             data = response.json()
 
             latency_ms = int((time.perf_counter() - started) * 1000)
-
             choice0 = (data.get("choices") or [{}])[0]
             message = choice0.get("message") or {}
-            content = message.get("content", "")
-
             usage = data.get("usage") or {}
             timings = data.get("timings") or {}
 
-            return {
-                "response": content,
-                "model": data.get("model", payload["model"]),
-                "latency_ms": latency_ms,
-                "tokens_used": usage.get("completion_tokens"),
-                "prompt_tokens": usage.get("prompt_tokens"),
-                "total_tokens": usage.get("total_tokens"),
-                "timings": timings,
-                "raw": data,
-            }
+            return _result(
+                response=message.get("content", ""),
+                latency_ms=latency_ms,
+                tokens_used=usage.get("completion_tokens"),
+                raw=data,
+                prompt_tokens=usage.get("prompt_tokens"),
+                total_tokens=usage.get("total_tokens"),
+                timings=timings,
+                model=data.get("model", payload["model"]),
+            )
         except Exception as exc:
-            return {
-                "response": f"llama.cpp error: {exc}",
-                "latency_ms": int((time.perf_counter() - started) * 1000),
-                "raw": {"error": str(exc)},
-            }
+            return _result(
+                response=f"llama.cpp error: {exc}",
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                raw={"error": str(exc)},
+            )
 
 
 def create_llamacpp_client(
-    base_url: str = "http://localhost:8080",
-    model: str = "gpt-3.5-turbo",
-    timeout: int = 60,
+    base_url: str = "http://127.0.0.1:8081",
+    model: str = "",
+    max_tokens: int = 1000,
+    timeout: int = 300,
     api_key: str = "sk-no-key-required",
     default_system: str | None = None,
 ) -> LlamaCppClient:
     return LlamaCppClient(
         base_url=base_url,
         model=model,
+        max_tokens=max_tokens,
         timeout=timeout,
         api_key=api_key,
         default_system=default_system,
     )
+
+
+__all__ = [
+    "LlamaCppClient",
+    "create_llamacpp_client",
+]

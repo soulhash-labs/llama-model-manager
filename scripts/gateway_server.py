@@ -6,6 +6,7 @@ scripts/gateway_server.py
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -104,7 +105,9 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="LMM OpenAI/Anthropic-compatible gateway through GlyphOS AI Compute")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=4010)
-    parser.add_argument("--backend-base-url", default="http://127.0.0.1:8081/v1")
+    parser.add_argument(
+        "--backend-base-url", default=os.environ.get("LLAMA_MODEL_BACKEND_BASE_URL", "http://127.0.0.1:8081/v1")
+    )
     parser.add_argument("--model-id", default="")
     args = parser.parse_args(argv)
 

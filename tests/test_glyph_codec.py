@@ -137,6 +137,23 @@ class GlyphCodecTests(unittest.TestCase):
         reconstructed = bytes_to_glyph_stream(payload, registry=self.registry)
         self.assertEqual(reconstructed, original)
 
+    # ------------------------------------------------------------------
+    # Defensive input validation
+    # ------------------------------------------------------------------
+
+    def test_decode_bytes_to_entries_rejects_none(self) -> None:
+        with self.assertRaises(GlyphCodecError):
+            decode_bytes_to_entries(None, registry=self.registry)
+
+    def test_decode_bytes_to_entries_rejects_string(self) -> None:
+        with self.assertRaises(TypeError):
+            decode_bytes_to_entries("not bytes", registry=self.registry)
+
+    def test_tokenize_glyph_stream_bare_string(self) -> None:
+        """tokenize_glyph_stream calls str() on input so ints are safe."""
+        tokens = tokenize_glyph_stream("⊕ 🌍", registry=self.registry)
+        self.assertEqual(len(tokens), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

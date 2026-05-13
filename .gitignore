@@ -46,7 +46,16 @@ share_orion/
 # Editor swap/backup files
 *.kate-swp
 *.old
+*.bak
+*.backup
 *~
+
+# Python cache/testing artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
 # AI tool config directories
 .claude/

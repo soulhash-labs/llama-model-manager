@@ -143,6 +143,8 @@ def decode_bytes_to_entries(
     registry: GlyphRegistry | None = None,
 ) -> list[GlyphEntry]:
     reg = _ensure_registry(registry)
+    if payload is None:
+        raise GlyphCodecError("decode_bytes_to_entries requires a byte payload, got None")
     return [reg.get_by_code(int(code)) for code in bytes(payload)]
 
 

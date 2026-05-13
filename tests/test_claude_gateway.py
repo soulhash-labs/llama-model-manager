@@ -122,9 +122,7 @@ class ClaudeGatewayToolTests(unittest.TestCase):
     def test_message_repairs_textual_bash_commands_to_tool_use(self) -> None:
         module = load_claude_gateway_module()
         gateway = module.ClaudeGateway("http://127.0.0.1:8081/v1")
-        fake = FakeUpstream(
-            'I will inspect the repo.\n\nfind . -type f -name "*.py" | head -20\n\nls -la\n'
-        )
+        fake = FakeUpstream('I will inspect the repo.\n\nfind . -type f -name "*.py" | head -20\n\nls -la\n')
         gateway.upstream = fake
 
         response = gateway.message(
@@ -211,7 +209,7 @@ class ClaudeGatewayToolTests(unittest.TestCase):
         module = load_claude_gateway_module()
         gateway = module.ClaudeGateway("http://127.0.0.1:8081/v1")
         fake = FakeUpstream(
-            '<think>\n</think>\n<tool_call>\n'
+            "<think>\n</think>\n<tool_call>\n"
             '{"type": "tool", "arguments": {"command": "git diff --name-only"}}\n'
             "</think>"
         )
@@ -314,6 +312,33 @@ class ClaudeGatewayToolTests(unittest.TestCase):
 
         self.assertEqual(response["stop_reason"], "tool_use")
         self.assertEqual(response["content"][0]["input"], {"command": "pwd"})
+
+    def test_message_repairs_tool_use_wrapper_key_with_flat_command(self) -> None:
+        module = load_claude_gateway_module()
+        gateway = module.ClaudeGateway("http://127.0.0.1:8081/v1")
+        fake = FakeUpstream(
+            '{"tool_use": {"type": "tool_use", "name": "Bash", "command": "git log --oneline -20 && git status"}}'
+        )
+        gateway.upstream = fake
+
+        response = gateway.message(
+            {
+                "model": "qwen",
+                "messages": [{"role": "user", "content": "check the git log"}],
+                "tools": [{"name": "Bash", "input_schema": {"type": "object"}}],
+            }
+        )
+
+        self.assertEqual(response["stop_reason"], "tool_use")
+        self.assertEqual(response["content"][0]["type"], "tool_use")
+        self.assertEqual(response["content"][0]["name"], "Bash")
+        self.assertEqual(
+            response["content"][0]["input"],
+            {"command": "git log --oneline -20 && git status"},
+        )
+        self.assertEqual(response["lmm"]["tool_invocation_mode"], "textual_pseudo_call")
+        self.assertTrue(response["lmm"]["repair_attempted"])
+        self.assertTrue(response["lmm"]["repair_succeeded"])
 
     def test_message_repairs_tool_code_block_to_command_only(self) -> None:
         module = load_claude_gateway_module()

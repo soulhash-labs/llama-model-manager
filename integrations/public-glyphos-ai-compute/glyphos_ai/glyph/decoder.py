@@ -22,6 +22,8 @@ class GlyphDecodingError(ValueError):
 
 
 def _strip_header(payload: str) -> str:
+    if not isinstance(payload, str):
+        raise GlyphDecodingError(f"payload must be a string, got {type(payload).__name__}")
     payload = payload.strip()
     if payload.startswith(MAGIC):
         return payload[len(MAGIC) :].strip()

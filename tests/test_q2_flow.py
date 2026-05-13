@@ -1,5 +1,9 @@
 import builtins
+import os
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from glyphos_ai.ai_compute.glyph_to_prompt import (
@@ -350,6 +354,71 @@ class Phase6Q2FlowTests(unittest.TestCase):
             data["routing"]["preferred_backend"],
             "llamacpp",
         )
+
+
+class LlamaCppClientSingleSourceOfTruthTests(unittest.TestCase):
+    """Regression: LlamaCppClient must have exactly one canonical definition."""
+
+    def test_exported_llamacppclient_is_canonical(self) -> None:
+        from glyphos_ai.ai_compute.api_client import LlamaCppClient as exported
+        from glyphos_ai.ai_compute.llamacpp_client import LlamaCppClient as canonical
+
+        self.assertIs(
+            exported,
+            canonical,
+            "api_client.LlamaCppClient must be the same object as llamacpp_client.LlamaCppClient",
+        )
+
+    def test_api_client_does_not_define_llamacppclient_inline(self) -> None:
+        from pathlib import Path
+
+        source = (
+            Path(__file__).resolve().parent.parent
+            / "integrations/public-glyphos-ai-compute/glyphos_ai/ai_compute/api_client.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn(
+            "class LlamaCppClient",
+            source,
+            "api_client.py must not define LlamaCppClient inline",
+        )
+
+    def test_llamacppclient_inherits_basechatclient(self) -> None:
+        from glyphos_ai.ai_compute.api_client import BaseChatClient, LlamaCppClient
+
+        self.assertTrue(
+            issubclass(LlamaCppClient, BaseChatClient),
+            "LlamaCppClient must inherit from BaseChatClient",
+        )
+
+    def test_llamacppclient_imports_in_fresh_process(self) -> None:
+        """Circular imports can hide inside a warmed pytest process but fail in
+        a fresh interpreter.  This test catches that case."""
+        code = (
+            "from glyphos_ai.ai_compute.api_client import LlamaCppClient; "
+            "from glyphos_ai.ai_compute.llamacpp_client import LlamaCppClient as Canonical; "
+            "assert LlamaCppClient is Canonical; "
+            "print('ok')"
+        )
+
+        root = str((Path(__file__).resolve().parent.parent / "integrations/public-glyphos-ai-compute").resolve())
+
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            env={**os.environ, "PYTHONPATH": root},
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        if result.returncode != 0:
+            self.fail(
+                f"Fresh-process import failed (exit={result.returncode}):\n"
+                f"stdout: {result.stdout}\n"
+                f"stderr: {result.stderr}"
+            )
+        self.assertIn("ok", result.stdout)
 
 
 if __name__ == "__main__":

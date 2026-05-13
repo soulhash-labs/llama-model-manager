@@ -5,7 +5,6 @@ import argparse
 import concurrent.futures
 import json
 import sys
-import threading
 import time
 import urllib.error
 import urllib.parse
@@ -166,7 +165,7 @@ class ClaudeGateway:
         }
         if isinstance(payload.get("max_tokens"), int):
             request["max_tokens"] = payload["max_tokens"]
-        if isinstance(payload.get("temperature"), (int, float)):
+        if isinstance(payload.get("temperature"), int | float):
             request["temperature"] = payload["temperature"]
         return request
 
@@ -254,12 +253,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
         self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def write_sse_event(self, event: str, payload: dict[str, Any]) -> None:
-        self.wfile.write(f"event: {event}\n".encode("utf-8"))
-        self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
+        self.wfile.write(f"event: {event}\n".encode())
+        self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode())
         self.wfile.flush()
 
     def write_sse_comment(self, text: str = "keepalive") -> None:
-        self.wfile.write(f": {text}\n\n".encode("utf-8"))
+        self.wfile.write(f": {text}\n\n".encode())
         self.wfile.flush()
 
     def _stream_messages(self, payload: dict[str, Any]) -> None:
@@ -271,18 +270,21 @@ class GatewayHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         message_id = f"msg_{int(time.time() * 1000)}"
-        self.write_sse_event("message_start", {
-            "type": "message_start",
-            "message": {
-                "id": message_id,
-                "type": "message",
-                "role": "assistant",
-                "model": self.gateway.exposed_model_name(),
-                "content": [],
-                "stop_reason": None,
-                "usage": {"input_tokens": 0, "output_tokens": 0},
+        self.write_sse_event(
+            "message_start",
+            {
+                "type": "message_start",
+                "message": {
+                    "id": message_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": self.gateway.exposed_model_name(),
+                    "content": [],
+                    "stop_reason": None,
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                },
             },
-        })
+        )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(self.gateway.message, payload)
@@ -296,43 +298,58 @@ class GatewayHandler(BaseHTTPRequestHandler):
         content = message.get("content") if isinstance(message.get("content"), list) else []
         first_block = content[0] if content and isinstance(content[0], dict) else {"type": "text", "text": ""}
         if first_block.get("type") == "tool_use":
-            self.write_sse_event("content_block_start", {
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {
-                    "type": "tool_use",
-                    "id": first_block.get("id", f"toolu_{int(time.time() * 1000)}"),
-                    "name": first_block.get("name", ""),
-                    "input": {},
+            self.write_sse_event(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": first_block.get("id", f"toolu_{int(time.time() * 1000)}"),
+                        "name": first_block.get("name", ""),
+                        "input": {},
+                    },
                 },
-            })
-            self.write_sse_event("content_block_delta", {
-                "type": "content_block_delta",
-                "index": 0,
-                "delta": {
-                    "type": "input_json_delta",
-                    "partial_json": json.dumps(first_block.get("input", {}), ensure_ascii=True),
-                },
-            })
-        else:
-            self.write_sse_event("content_block_start", {
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {"type": "text", "text": ""},
-            })
-            text = str(first_block.get("text", ""))
-            if text:
-                self.write_sse_event("content_block_delta", {
+            )
+            self.write_sse_event(
+                "content_block_delta",
+                {
                     "type": "content_block_delta",
                     "index": 0,
-                    "delta": {"type": "text_delta", "text": text},
-                })
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": json.dumps(first_block.get("input", {}), ensure_ascii=True),
+                    },
+                },
+            )
+        else:
+            self.write_sse_event(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""},
+                },
+            )
+            text = str(first_block.get("text", ""))
+            if text:
+                self.write_sse_event(
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "text_delta", "text": text},
+                    },
+                )
         self.write_sse_event("content_block_stop", {"type": "content_block_stop", "index": 0})
-        self.write_sse_event("message_delta", {
-            "type": "message_delta",
-            "delta": {"stop_reason": message.get("stop_reason", "end_turn")},
-            "usage": message.get("usage", {"input_tokens": 0, "output_tokens": 0}),
-        })
+        self.write_sse_event(
+            "message_delta",
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": message.get("stop_reason", "end_turn")},
+                "usage": message.get("usage", {"input_tokens": 0, "output_tokens": 0}),
+            },
+        )
         self.write_sse_event("message_stop", {"type": "message_stop"})
 
     def do_POST(self) -> None:  # noqa: N802
@@ -367,9 +384,16 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     handler = type("GatewayHandlerImpl", (GatewayHandler,), {})
-    handler.gateway = ClaudeGateway(args.upstream_base, upstream_timeout_seconds=args.upstream_timeout_seconds, advertised_model_id=args.advertised_model_id)
+    handler.gateway = ClaudeGateway(
+        args.upstream_base,
+        upstream_timeout_seconds=args.upstream_timeout_seconds,
+        advertised_model_id=args.advertised_model_id,
+    )
     server = ThreadingHTTPServer((args.host, args.port), handler)
-    print(f"Claude gateway listening on http://{args.host}:{args.port} -> {args.upstream_base} (timeout={args.upstream_timeout_seconds}s)", flush=True)
+    print(
+        f"Claude gateway listening on http://{args.host}:{args.port} -> {args.upstream_base} (timeout={args.upstream_timeout_seconds}s)",
+        flush=True,
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

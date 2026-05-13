@@ -124,7 +124,7 @@ destinations:   # 0x40 – 0x7F
   - { code: 0x6C, glyph: "🔮", name: crystal_sphere }
   - { code: 0x6D, glyph: "🛡", name: sentinel }
   - { code: 0x6E, glyph: "📦", name: container }
-  - { code: 0x6F, glyph: "🔋", name: battery }
+  - { code: 0x6F, glyph: "🗳️", name: battery }
   - { code: 0x70, glyph: "🔨", name: forge }
   - { code: 0x71, glyph: "🗺", name: map_room }
   - { code: 0x72, glyph: "🏴‍☠️", name: pirate_net }
@@ -176,7 +176,7 @@ time_quantity:  # 0x80 – 0xBF
   - { code: 0x9E, glyph: "🌑", name: moon_new }
   - { code: 0x9F, glyph: "🌕", name: moon_full }
   - { code: 0xA0, glyph: "💯", name: percent }
-  - { code: 0xA1, glyph: "📶", name: signal_strength }
+  - { code: 0xA1, glyph: "📳", name: signal_strength }
   - { code: 0xA2, glyph: "🎚️", name: slider_value }
   - { code: 0xA3, glyph: "🧮", name: count }
   - { code: 0xA4, glyph: "📏", name: length }
@@ -262,7 +262,7 @@ sacred_mods:    # 0xC0 – 0xFF
   - { code: 0xF2, glyph: "✴", name: star8 }
   - { code: 0xF3, glyph: "❇", name: sparkle8 }
   - { code: 0xF4, glyph: "🪬", name: hamsa }
-  - { code: 0xF5, glyph: "🕊", name: dove }
+  - { code: 0xF5, glyph: "🤍", name: dove }
   - { code: 0xF6, glyph: "☢", name: radiation }
   - { code: 0xF7, glyph: "🛐", name: worship }
   - { code: 0xF8, glyph: "💫", name: dizzy }
