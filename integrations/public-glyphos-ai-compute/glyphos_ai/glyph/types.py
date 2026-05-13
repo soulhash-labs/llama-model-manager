@@ -1,16 +1,31 @@
 """
 Glyph Types
 ===========
-Python types matching the TypeScript glyph_types.ts, plus explicit
-upstream-context support for harness-driven routing.
+Python types matching the TypeScript glyph_types.ts, plus
+explicit upstream-context support for harness-driven routing.
+
+This merged version keeps the current live-repo shape:
+- GlyphPacket
+- ContextPayload (gateway/local compression path)
+- helper maps and PSI/time helpers
+
+And adds:
+- ContextPacket
+- RoutingHints
+- validation helpers
+- compatibility helpers
+- packet construction / export helpers
+
+without forcing a repo-wide redesign.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
 from typing import Any, Literal, TypedDict
 
-# === Public context contract ===
+# === Public context contract ==================================================
 
 Locality = Literal["orion-local", "lan", "cloud", "external"]
 PreferredBackend = Literal["llamacpp", "openai", "anthropic", "xai", "local", "external"]
@@ -24,7 +39,13 @@ class RoutingHints(TypedDict, total=False):
 
 
 class ContextPacket(TypedDict, total=False):
-    """Explicit upstream context contract for harness/orchestrator integration."""
+    """
+    Explicit upstream context contract for harness/orchestrator integration.
+
+    This is distinct from ContextPayload:
+    - ContextPacket = public injected context from the harness
+    - ContextPayload = internal gateway/local encoding state
+    """
 
     content: str
     locality: Locality
@@ -35,7 +56,7 @@ class ContextPacket(TypedDict, total=False):
     source: str
 
 
-# === Glyph Constants ===
+# === Glyph Constants ==========================================================
 
 
 class Glyphs:
@@ -108,7 +129,7 @@ class Glyphs:
     ACTION_REDIRECT = "⊾"
     ACTION_ROUTE = "⊿"
 
-    # === ENTITIES (64) ===
+    # === ENTITIES / DESTINATIONS (64) ===
     DEST_MARS = "MRS"
     DEST_MOON = "MON"
     DEST_EARTH = "ERTH"
@@ -157,14 +178,15 @@ class Glyphs:
     ENTITY_DASHBOARD = "DSH"
     ENTITY_REPORT = "RPT"
 
-    # === TIME ===
+    # === PACKET FRAMING ===
     HEADER = "H"
     SEPARATOR = "|"
     END = ">"
-    COHERENCE = "Ψ"  # Psi for coherence
+    COHERENCE = "Ψ"
 
 
-# === Action Mapping ===
+# === Action Mapping ===========================================================
+
 ACTION_MAP = {
     "BOOK": Glyphs.ACTION_BOOK,
     "QUERY": Glyphs.ACTION_QUERY,
@@ -194,8 +216,8 @@ ACTION_MAP = {
     "SYNTHESIZE": Glyphs.ACTION_SYNTHESIZE,
 }
 
+# === Destination Mapping ======================================================
 
-# === Destination Mapping ===
 DEST_MAP = {
     "MARS": Glyphs.DEST_MARS,
     "MOON": Glyphs.DEST_MOON,
@@ -204,6 +226,8 @@ DEST_MAP = {
     "PLANET": Glyphs.DEST_PLANET,
     "GALAXY": Glyphs.DEST_GALAXY,
     "UNIVERSE": Glyphs.DEST_UNIVERSE,
+    "DIMENSION": Glyphs.DEST_DIMENSION,
+    "REALITY": Glyphs.DEST_REALITY,
     "AURORA": Glyphs.DEST_AURORA,
     "TERRAN": Glyphs.DEST_TERRAN,
     "STARLIGHT": Glyphs.DEST_STARLIGHT,
@@ -230,12 +254,12 @@ DEST_MAP = {
     "REPORT": Glyphs.ENTITY_REPORT,
 }
 
+# === PSI Levels ===============================================================
 
-# === PSI Levels ===
-PSI_LEVELS = ["Ψ0", "Ψ1", "Ψ2", "Ψ3", "Ψ4", "Ψ5", "Ψ6", "Ψ7", "Ψ8", "Ψ9"]
+PSI_LEVELS = [f"Ψ{i}" for i in range(10)]
 
 
-# === Data Classes ===
+# === Data Classes =============================================================
 
 
 @dataclass
@@ -248,19 +272,29 @@ class Intent:
     modifiers: list[str] | None = None
     coherence: float | None = None
 
+    def normalized(self) -> Intent:
+        return Intent(
+            action=str(self.action).strip().upper(),
+            destination=str(self.destination).strip().upper(),
+            time_slot=max(0, int(self.time_slot)),
+            modifiers=[str(m).strip() for m in (self.modifiers or []) if str(m).strip()],
+            coherence=normalize_psi(self.coherence) if self.coherence is not None else None,
+        )
+
 
 @dataclass
 class ContextPayload:
-    """Carries context state (raw + encoded) through the GlyphOS pipeline.
+    """
+    Carries context state (raw + encoded) through the GlyphOS pipeline.
 
     The router inspects this to decide whether to apply Ψ encoding.
     """
 
     raw_context: str = ""
     raw_context_chars: int = 0
-    encoding_status: str = "none"  # "none" | "encoded" | "skipped" | "disabled" | "error_raw_fallback"
+    encoding_status: str = "none"  # none|encoded|skipped|disabled|error_raw_fallback
     encoded_context: str = ""
-    encoding_format: str = ""  # "GE1-JSON" | "GE1-LINES"
+    encoding_format: str = ""  # GE1-JSON | GE1-LINES
     encoding_ratio: float = 1.0  # encoded_chars / raw_chars (lower = better)
     estimated_token_delta: int = 0
     error: str = ""
@@ -273,13 +307,31 @@ class GlyphPacket:
     instance_id: str
     psi_coherence: float
     action: str
-    header: str = "H"
+    header: str = Glyphs.HEADER
     time_slot: str = "T00"
     destination: str = ""
+    modifiers: list[str] | None = None
     # Encoding metadata (filled by gateway, inspected by router)
-    encoding_status: str = "none"  # mirrors ContextPayload.encoding_status
-    encoding_format: str = ""  # "GE1-JSON" | "GE1-LINES"
+    encoding_status: str = "none"
+    encoding_format: str = ""
     encoding_ratio: float = 1.0
+    packet_version: int = 1
+
+    def __post_init__(self) -> None:
+        self.instance_id = str(self.instance_id).strip()
+        self.psi_coherence = normalize_psi(self.psi_coherence)
+        self.action = str(self.action).strip().upper()
+        self.header = str(self.header).strip() or Glyphs.HEADER
+        self.time_slot = normalize_time_slot(self.time_slot)
+        self.destination = str(self.destination).strip().upper()
+        self.modifiers = [str(m).strip() for m in (self.modifiers or []) if str(m).strip()]
+        self.encoding_status = str(self.encoding_status).strip() or "none"
+        self.encoding_format = str(self.encoding_format).strip()
+        try:
+            self.encoding_ratio = float(self.encoding_ratio)
+        except (TypeError, ValueError):
+            self.encoding_ratio = 1.0
+        self.packet_version = int(self.packet_version)
 
     @property
     def instanceId(self) -> str:
@@ -293,8 +345,39 @@ class GlyphPacket:
     def timeSlot(self) -> str:
         return self.time_slot
 
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
-# === Helper Functions ===
+    @classmethod
+    def from_intent(cls, instance_id: str, intent: Intent, psi_coherence: float) -> GlyphPacket:
+        normalized = intent.normalized()
+        return cls(
+            instance_id=instance_id,
+            psi_coherence=psi_coherence,
+            action=normalized.action,
+            time_slot=time_to_slot(normalized.time_slot),
+            destination=normalized.destination,
+            modifiers=normalized.modifiers,
+        )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> GlyphPacket:
+        return cls(
+            instance_id=str(value.get("instance_id", value.get("instanceId", ""))),
+            psi_coherence=float(value.get("psi_coherence", value.get("psiCoherence", 0.5))),
+            action=str(value.get("action", "DEFAULT")),
+            header=str(value.get("header", Glyphs.HEADER)),
+            time_slot=str(value.get("time_slot", value.get("timeSlot", "T00"))),
+            destination=str(value.get("destination", "")),
+            modifiers=list(value.get("modifiers", [])) if isinstance(value.get("modifiers"), list) else [],
+            encoding_status=str(value.get("encoding_status", value.get("encodingStatus", "none"))),
+            encoding_format=str(value.get("encoding_format", value.get("encodingFormat", ""))),
+            encoding_ratio=float(value.get("encoding_ratio", value.get("encodingRatio", 1.0))),
+            packet_version=int(value.get("packet_version", value.get("packetVersion", 1))),
+        )
+
+
+# === Helper Functions =========================================================
 
 
 def normalize_psi(psi: float | int | None) -> float:
@@ -306,7 +389,7 @@ def normalize_psi(psi: float | int | None) -> float:
 
 
 def psi_to_level(psi: float) -> str:
-    """Convert psi value (0-1) to psi level string"""
+    """Convert psi value (0-1) to psi level string."""
     value = normalize_psi(psi)
     if value >= 1.0:
         return "Ψ9"
@@ -315,7 +398,7 @@ def psi_to_level(psi: float) -> str:
 
 
 def level_to_psi(level: str) -> float:
-    """Convert psi level string to psi value (0-1)"""
+    """Convert psi level string to psi value (0-1)."""
     try:
         return PSI_LEVELS.index(str(level).strip()) / 10
     except ValueError:
@@ -323,7 +406,7 @@ def level_to_psi(level: str) -> float:
 
 
 def time_to_slot(t: int) -> str:
-    """Convert time value to slot string"""
+    """Convert time value to slot string."""
     try:
         value = int(t)
     except (TypeError, ValueError):
@@ -333,7 +416,7 @@ def time_to_slot(t: int) -> str:
 
 
 def slot_to_time(slot: str) -> int:
-    """Convert slot string to time value"""
+    """Convert slot string to time value."""
     try:
         text = str(slot).strip().upper()
         if text.startswith("T"):
@@ -351,11 +434,19 @@ def normalize_time_slot(slot: str | int) -> str:
 
 
 def validate_context_packet_shape(value: Any) -> ContextPacket:
-    """Validate and normalize explicit upstream harness context."""
+    """
+    Validate explicit upstream harness context.
+
+    Accepts:
+    - None
+    - mapping-like objects
+
+    Returns a normalized ContextPacket dict.
+    """
     if value is None:
         return {}
 
-    if not isinstance(value, dict):
+    if not isinstance(value, Mapping):
         raise TypeError("ContextPacket must be mapping-like")
 
     out: ContextPacket = {}
@@ -387,13 +478,13 @@ def validate_context_packet_shape(value: Any) -> ContextPacket:
 
     if "routing_hints" in value and value["routing_hints"] is not None:
         hints = value["routing_hints"]
-        if not isinstance(hints, dict):
+        if not isinstance(hints, Mapping):
             raise ValueError("ContextPacket.routing_hints must be a mapping")
         out["routing_hints"] = dict(hints)  # type: ignore[assignment]
 
     if "metadata" in value and value["metadata"] is not None:
         metadata = value["metadata"]
-        if not isinstance(metadata, dict):
+        if not isinstance(metadata, Mapping):
             raise ValueError("ContextPacket.metadata must be a mapping")
         out["metadata"] = dict(metadata)
 
@@ -401,6 +492,43 @@ def validate_context_packet_shape(value: Any) -> ContextPacket:
         out["source"] = str(value["source"])
 
     return out
+
+
+def action_to_glyph(action: str) -> str:
+    """Encode a canonical action name to its compatibility glyph."""
+    return ACTION_MAP.get(str(action).strip().upper(), Glyphs.ACTION_QUERY)
+
+
+def destination_to_glyph(destination: str) -> str:
+    """Encode a canonical destination/entity name to its compatibility token."""
+    return DEST_MAP.get(str(destination).strip().upper(), str(destination).strip().upper())
+
+
+def packet_to_compat_dict(packet: GlyphPacket) -> dict[str, Any]:
+    """
+    Produce a dict containing both snake_case and camelCase fields
+    for interop with older callers.
+    """
+    return {
+        "instance_id": packet.instance_id,
+        "instanceId": packet.instance_id,
+        "psi_coherence": packet.psi_coherence,
+        "psiCoherence": packet.psi_coherence,
+        "action": packet.action,
+        "header": packet.header,
+        "time_slot": packet.time_slot,
+        "timeSlot": packet.time_slot,
+        "destination": packet.destination,
+        "modifiers": list(packet.modifiers or []),
+        "encoding_status": packet.encoding_status,
+        "encodingStatus": packet.encoding_status,
+        "encoding_format": packet.encoding_format,
+        "encodingFormat": packet.encoding_format,
+        "encoding_ratio": packet.encoding_ratio,
+        "encodingRatio": packet.encoding_ratio,
+        "packet_version": packet.packet_version,
+        "packetVersion": packet.packet_version,
+    }
 
 
 __all__ = [
@@ -422,4 +550,7 @@ __all__ = [
     "slot_to_time",
     "normalize_time_slot",
     "validate_context_packet_shape",
+    "action_to_glyph",
+    "destination_to_glyph",
+    "packet_to_compat_dict",
 ]
