@@ -1,0 +1,6 @@
+ai_compute:
+  routing:
+    preferred_local_backend: llamacpp
+    default_lane: local
+    destination_lane_map: {}
+  lanes: {}

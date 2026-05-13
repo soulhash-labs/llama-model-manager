@@ -4190,7 +4190,7 @@ PY
         )" && bundled_glyphos_importable="yes" || bundled_glyphos_importable="no"
     fi
     [[ -f "$INSTALLED_APP_ROOT/integrations/context-mode-mcp/package.json" ]] && context_mode_mcp="yes"
-    [[ -f "$INSTALLED_APP_ROOT/integrations/context-mode-mcp/dist/index.js" ]] && context_mode_mcp_dist="yes"
+    [[ -f "$INSTALLED_APP_ROOT/integrations/context-mode-mcp/dist/index.js" ]] && [[ -d "$INSTALLED_APP_ROOT/integrations/context-mode-mcp/node_modules/domino" ]] && context_mode_mcp_dist="yes"
     if [[ "$installed_web_launcher" != "yes" || "$installed_web_app" != "yes" || "$installed_gateway_script" != "yes" || "$bundled_glyphos" != "yes" || "$bundled_glyphos_importable" != "yes" || "$context_mode_mcp" != "yes" || "$context_mode_mcp_dist" != "yes" ]]; then
         install_ok="no"
         if [[ "$context_mode_mcp" == "yes" && "$context_mode_mcp_dist" != "yes" ]]; then

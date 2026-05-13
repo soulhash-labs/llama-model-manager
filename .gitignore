@@ -42,3 +42,13 @@ desktop/*icon*.svg
 
 # Detached orion share (no longer tracked in this repo)
 share_orion/
+
+# Editor swap/backup files
+*.kate-swp
+*.old
+*~
+
+# AI tool config directories
+.claude/
+.opencode/
+.sisyphus/

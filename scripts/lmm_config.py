@@ -140,7 +140,6 @@ class ContextConfig:
 @dataclass(frozen=True)
 class GlyphEncodingConfig:
     disabled: bool = False
-    force_error: bool = False
 
 
 @dataclass(frozen=True)
@@ -211,7 +210,6 @@ def load_lmm_config_from_env() -> LMMConfig:
     )
     glyph_encoding = GlyphEncodingConfig(
         disabled=_bool_env("LMM_GLYPH_ENCODING_DISABLED", False),
-        force_error=bool(_env("LMM_GLYPH_ENCODING_FORCE_ERROR", "")),
     )
     update_watcher = UpdateWatcherConfig(
         enabled=_bool_env("LMM_UPDATE_WATCHER_ENABLED", False),

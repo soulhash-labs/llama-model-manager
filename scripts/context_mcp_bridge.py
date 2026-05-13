@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Bridge script for Context Mode MCP.
 Spawns the MCP server via stdio and dispatches tools from the gateway.
+# file: scripts/context_mcp_bridge.py
 """
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import select
@@ -19,32 +21,76 @@ MCP_ROOT = APP_ROOT / "integrations" / "context-mode-mcp"
 
 
 def _pipe_error(name: str) -> RuntimeError:
-    return RuntimeError(f"Context MCP server {name} pipe is unavailable")
+    safe_name = str(name).strip() or "unknown"
+    return RuntimeError(f"Context MCP server {safe_name} pipe is unavailable")
 
 
 def read_stdin_json() -> dict[str, Any]:
+    """
+    Read a JSON object from stdin.
+
+    Returns:
+        {} if stdin is empty/whitespace only
+
+    Raises:
+        RuntimeError if stdin contains malformed JSON or a non-object payload
+    """
     raw = sys.stdin.read()
     if not raw.strip():
         return {}
+
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Context MCP bridge stdin JSON malformed: {exc}") from exc
-    return payload if isinstance(payload, dict) else {}
+        preview = raw.strip()[:400]
+        raise RuntimeError(f"Context MCP bridge stdin JSON malformed: {exc}; payload preview: {preview!r}") from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Context MCP bridge stdin payload must be a JSON object, got {type(payload).__name__}")
+
+    return payload
+
+
+def _mcp_exit_detail(proc: subprocess.Popen[str], *, limit: int = 2000) -> str:
+    """
+    Return a compact exit description if the child has already exited.
+    Safe to call repeatedly.
+    """
+    if proc.poll() is None:
+        return ""
+
+    stderr_text = _mcp_stderr_snippet(proc, limit=limit)
+    detail = f"Context MCP server exited (exit={proc.returncode})"
+    if stderr_text:
+        detail += f": {stderr_text}"
+    return detail
 
 
 def send_message(proc: subprocess.Popen[str], payload: dict[str, Any]) -> None:
-    """Send a JSON-RPC message as newline-delimited JSON (NDJSON).
+    """
+    Send one JSON-RPC message to the MCP child over stdin.
 
-    The MCP SDK StdioServerTransport uses newline-delimited JSON, not
-    the Content-Length framing from earlier protocol versions.
+    Raises a detailed RuntimeError if:
+    - stdin is unavailable
+    - the child already exited
+    - the write/flush fails
     """
     if proc.stdin is None:
-        raise _pipe_error("stdin")
+        raise RuntimeError("Context MCP server stdin is unavailable")
+
+    exit_detail = _mcp_exit_detail(proc)
+    if exit_detail:
+        raise RuntimeError(f"Context MCP server is not running before write; {exit_detail}")
+
+    raw = json.dumps(payload, ensure_ascii=False) + "\n"
+
     try:
-        proc.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
+        proc.stdin.write(raw)
         proc.stdin.flush()
-    except (BrokenPipeError, OSError) as exc:
+    except (BrokenPipeError, OSError, ValueError) as exc:
+        exit_detail = _mcp_exit_detail(proc)
+        if exit_detail:
+            raise RuntimeError(f"Context MCP server stdin write failed: {exc}; {exit_detail}") from exc
         raise RuntimeError(f"Context MCP server stdin write failed: {exc}") from exc
 
 
@@ -52,35 +98,105 @@ def read_message(proc: subprocess.Popen[str], timeout: float = 10.0) -> dict[str
     """Read a single JSON-RPC response line (NDJSON) from the MCP server stdout."""
     if proc.stdout is None:
         raise _pipe_error("stdout")
+
+    exit_detail = _mcp_exit_detail(proc)
+    if exit_detail:
+        raise RuntimeError(f"Context MCP server is not running before read; {exit_detail}")
+
     try:
         ready = select.select([proc.stdout], [], [], timeout)
     except (OSError, ValueError) as exc:
+        exit_detail = _mcp_exit_detail(proc)
+        if exit_detail:
+            raise RuntimeError(f"Context MCP server stdout wait failed: {exc}; {exit_detail}") from exc
         raise RuntimeError(f"Context MCP server stdout wait failed: {exc}") from exc
+
     if not ready[0]:
+        exit_detail = _mcp_exit_detail(proc)
+        if exit_detail:
+            raise TimeoutError(f"MCP bridge read timeout after {timeout}s; {exit_detail}")
         raise TimeoutError(f"MCP bridge read timeout after {timeout}s")
+
     try:
         line = proc.stdout.readline()
-    except OSError as exc:
+    except (BrokenPipeError, OSError, ValueError) as exc:
+        exit_detail = _mcp_exit_detail(proc)
+        if exit_detail:
+            raise RuntimeError(f"Context MCP server stdout read failed: {exc}; {exit_detail}") from exc
         raise RuntimeError(f"Context MCP server stdout read failed: {exc}") from exc
+
     if not line:
+        exit_detail = _mcp_exit_detail(proc)
+        if exit_detail:
+            raise RuntimeError(f"Context MCP server closed stdout; {exit_detail}")
         raise RuntimeError("Context MCP server closed stdout")
+
     stripped = line.strip()
     if not stripped:
+        exit_detail = _mcp_exit_detail(proc)
+        if exit_detail:
+            raise RuntimeError(f"Context MCP server returned empty line; {exit_detail}")
         raise RuntimeError("Context MCP server returned empty line")
+
     try:
         payload = json.loads(stripped)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Context MCP server returned malformed JSON: {exc}") from exc
-    return payload if isinstance(payload, dict) else {}
+        preview = stripped[:400]
+        exit_detail = _mcp_exit_detail(proc)
+        message = f"Context MCP server returned malformed JSON: {exc}; payload preview: {preview!r}"
+        if exit_detail:
+            message += f"; {exit_detail}"
+        raise RuntimeError(message) from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Context MCP server returned non-object JSON-RPC payload: {type(payload).__name__}")
+
+    return payload
 
 
-def request(proc: subprocess.Popen[str], payload: dict[str, Any]) -> dict[str, Any]:
+def request(
+    proc: subprocess.Popen[str],
+    payload: dict[str, Any],
+    *,
+    expect_id: int | str | None = None,
+) -> dict[str, Any]:
+    """
+    Send one JSON-RPC request and wait for one JSON-RPC response.
+
+    - surfaces process-exit details early
+    - wraps read/parse errors with stderr/exit context when available
+    - validates that a dict response was returned
+    - optionally validates response id
+    """
+    exit_detail = _mcp_exit_detail(proc)
+    if exit_detail:
+        raise RuntimeError(f"Context MCP server is not running before request; {exit_detail}")
+
     send_message(proc, payload)
-    request_id = payload.get("id")
-    while True:
+
+    try:
         response = read_message(proc)
-        if request_id is None or response.get("id") == request_id:
-            return response
+    except (json.JSONDecodeError, TimeoutError, ValueError, OSError, RuntimeError) as exc:
+        exit_detail = _mcp_exit_detail(proc)
+        if exit_detail:
+            raise RuntimeError(f"Context MCP server response read failed: {exc}; {exit_detail}") from exc
+        raise RuntimeError(f"Context MCP server response read failed: {exc}") from exc
+
+    if not isinstance(response, dict):
+        raise RuntimeError(f"Context MCP server returned non-object response: {type(response).__name__}")
+
+    if response.get("jsonrpc") != "2.0":
+        raise RuntimeError(f"Context MCP server returned invalid JSON-RPC envelope: {response!r}")
+
+    if expect_id is not None and response.get("id") != expect_id:
+        raise RuntimeError(
+            f"Context MCP server returned mismatched response id: expected {expect_id!r}, got {response.get('id')!r}"
+        )
+
+    if "error" in response and response["error"] is not None:
+        raise RuntimeError(f"Context MCP server returned JSON-RPC error: {response['error']}")
+
+    return response
 
 
 def extract_context(response: dict[str, Any]) -> dict[str, Any]:
@@ -149,13 +265,85 @@ def extract_context(response: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _mcp_stderr_snippet(proc: subprocess.Popen[str], *, limit: int = 2000) -> str:
+    """
+    Return a short stderr snippet only if the child has already exited.
+    Avoids blocking on a still-running process.
+    """
+    if proc.stderr is None or proc.poll() is None:
+        return ""
+    try:
+        text = proc.stderr.read() or ""
+    except Exception as exc:
+        return f"<unable to read stderr: {exc}>"
+    text = text.strip()
+    if len(text) > limit:
+        return text[:limit] + "…"
+    return text
+
+
+def _terminate_mcp_process(proc: subprocess.Popen[str], *, strict: bool = True) -> None:
+    """Gracefully terminate the MCP server process.
+
+    Tolerates common benign cleanup cases:
+    - process already exited
+    - stdin/stdout/stderr already closed
+    - broken pipe on stdin
+    - EBADF/EPIPE during pipe close
+    """
+    errors: list[str] = []
+
+    def _benign_pipe_error(exc: BaseException) -> bool:
+        if isinstance(exc, BrokenPipeError | ValueError):
+            # Broken pipe or "I/O operation on closed file"
+            return True
+        if isinstance(exc, OSError) and exc.errno in {errno.EBADF, errno.EPIPE}:
+            return True
+        return False
+
+    # Terminate only if still running.
+    try:
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=1)
+                except (ProcessLookupError, subprocess.TimeoutExpired, OSError) as kill_exc:
+                    errors.append(f"kill failed: {kill_exc}")
+            except (ProcessLookupError, OSError) as exc:
+                # If it exited between poll() and terminate(), that is not fatal.
+                if proc.poll() is None:
+                    errors.append(f"terminate failed: {exc}")
+    except Exception as exc:
+        errors.append(f"process state check failed: {exc}")
+
+    # Close pipes, but do not treat already-closed / broken-pipe conditions as fatal.
+    for name, pipe in (("stdin", proc.stdin), ("stdout", proc.stdout), ("stderr", proc.stderr)):
+        if pipe is None:
+            continue
+        try:
+            if not pipe.closed:
+                pipe.close()
+        except Exception as exc:
+            if _benign_pipe_error(exc):
+                continue
+            errors.append(f"close {name} failed: {exc}")
+
+    if errors:
+        message = "Context MCP process cleanup failed: " + "; ".join(errors)
+        if strict:
+            raise RuntimeError(message)
+        print(f"[MCP Bridge] warning: {message}", file=sys.stderr)
+
+
 def _start_mcp_process(project_root: str) -> subprocess.Popen[str]:
     """Spawn and initialize the MCP server process."""
     entry = MCP_ROOT / "dist" / "index.js"
     if not entry.is_file():
-        raise SystemExit(
-            f"Context MCP entrypoint is missing at {entry}; run npm install/build in {MCP_ROOT}"
-        )
+        raise SystemExit(f"Context MCP entrypoint is missing at {entry}; run npm install/build in {MCP_ROOT}")
 
     command = ["node", str(entry)]
     env = dict(os.environ)
@@ -166,15 +354,26 @@ def _start_mcp_process(project_root: str) -> subprocess.Popen[str]:
         cwd=str(MCP_ROOT),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         text=True,
         env=env,
     )
+
     try:
-        # Give the Node.js MCP process time to start accepting stdin.
-        # Without this delay, writing immediately after spawn causes the MCP
-        # process to silently ignore the input, leading to a read timeout.
+        if proc.stdin is None or proc.stdout is None or proc.stderr is None:
+            raise RuntimeError("Context MCP process did not expose stdio pipes")
+
+        # Give the Node MCP process a brief moment to boot.
         time.sleep(0.2)
+
+        # Early-exit check: if the child died during startup, surface real stderr now.
+        if proc.poll() is not None:
+            stderr_text = _mcp_stderr_snippet(proc)
+            message = f"Context MCP server exited before initialize (exit={proc.returncode})"
+            if stderr_text:
+                message += f": {stderr_text}"
+            raise RuntimeError(message)
+
         request(
             proc,
             {
@@ -188,41 +387,34 @@ def _start_mcp_process(project_root: str) -> subprocess.Popen[str]:
                 },
             },
         )
-        send_message(proc, {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
-    except (BrokenPipeError, json.JSONDecodeError, OSError, RuntimeError, TimeoutError, ValueError) as exc:
-        try:
-            _terminate_mcp_process(proc)
-        except RuntimeError as cleanup_exc:
-            raise RuntimeError(f"Context MCP initialization failed: {exc}; cleanup failed: {cleanup_exc}") from exc
-        raise RuntimeError(f"Context MCP initialization failed: {exc}") from exc
-    return proc
 
+        send_message(
+            proc,
+            {
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {},
+            },
+        )
 
-def _terminate_mcp_process(proc: subprocess.Popen[str], *, strict: bool = True) -> None:
-    """Gracefully terminate the MCP server process."""
-    errors: list[str] = []
-    try:
-        if proc.poll() is None:
-            proc.terminate()
-            proc.wait(timeout=1)
-    except (ProcessLookupError, subprocess.TimeoutExpired, OSError) as exc:
-        errors.append(f"terminate failed: {exc}")
-        try:
-            proc.kill()
-            proc.wait(timeout=1)
-        except (ProcessLookupError, subprocess.TimeoutExpired, OSError) as kill_exc:
-            errors.append(f"kill failed: {kill_exc}")
-    for name, pipe in (("stdin", proc.stdin), ("stdout", proc.stdout), ("stderr", proc.stderr)):
-        try:
-            if pipe:
-                pipe.close()
-        except OSError as exc:
-            errors.append(f"close {name} failed: {exc}")
-    if errors:
-        message = "Context MCP process cleanup failed: " + "; ".join(errors)
-        if strict:
+        # Secondary check: some MCP servers die immediately after initialize.
+        if proc.poll() is not None:
+            stderr_text = _mcp_stderr_snippet(proc)
+            message = f"Context MCP server exited immediately after initialize (exit={proc.returncode})"
+            if stderr_text:
+                message += f": {stderr_text}"
             raise RuntimeError(message)
-        print(f"[MCP Bridge] warning: {message}", file=sys.stderr)
+
+    except (BrokenPipeError, json.JSONDecodeError, OSError, RuntimeError, TimeoutError, ValueError) as exc:
+        stderr_text = _mcp_stderr_snippet(proc)
+        detail = str(exc)
+        if stderr_text and stderr_text not in detail:
+            detail = f"{detail}; stderr: {stderr_text}"
+
+        _terminate_mcp_process(proc, strict=False)
+        raise RuntimeError(f"Context MCP initialization failed: {detail}") from exc
+
+    return proc
 
 
 def _dispatch_search(gateway_request: dict[str, Any]) -> int:

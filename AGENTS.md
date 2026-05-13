@@ -47,3 +47,12 @@
 ## Core Principles
 - **Simplicity First**: Make every change as simple as possible. Impact minimal code
 - **No Laziness**: Find root causes. No temporary fixes. Senior developer standards
+
+## Tool-Call Contract (Strict)
+1. Invoke tools directly with required structured arguments. Never print tool calls as text, markdown, or prose.
+2. Never prefix shell commands with "$". Never emit duplicate keys.
+3. Always include every required field (description + command for bash; subagent_type, run_in_background, load_skills, description, prompt for task).
+4. One tool call at a time unless the runtime explicitly supports parallel calls.
+5. **REPAIR (one shot)**: If your previous output contained a malformed tool call, re-emit ONLY the corrected structured invocation. Do not explain, add markdown, or add prose. If the repair also fails, the system will hard-fail.
+6. **TOOL FAILURE**: If a tool returns an error, fix the root cause. Never retry with identical args. Never switch to printing pseudo-calls.
+7. **LANE-SPECIFIC (local GlyphOS/llama.cpp)**: Zero tolerance for pseudo-calls. If a tool is needed, invoke it directly in structured form.

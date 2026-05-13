@@ -523,3 +523,34 @@
 ### Type checker patterns for optional imports
 - **The LSP (pyright/basedpyright) cannot track variable guards across function boundaries.** Using a `_have_yaml` boolean with `if not _have_yaml: return {}` at the function start does not convince pyright that `yaml` is bound inside the function. The pattern `_yaml is None` at the function start + using `_yaml` (not `yaml`) throughout satisfies the type checker because the guard is directly testing the variable.
 - **The `# type: ignore[assignment]` comment on `_yaml = None` is needed** because importing `yaml` (which has type info) and assigning `None` to it in the except branch would normally be a type violation. The ignore comment documents that this is intentional — the type is effectively `Any` when yaml is absent.
+
+# Session 2026-05-13: Context MCP domino Dependency Bug Fix
+
+## What we did
+
+- **Investigated the `domino` dependency bug**: The Context MCP installer skipped `npm ci` if `dist/index.js` existed, regardless of whether `node_modules/` had the runtime dependencies.
+
+- **Root cause**: `build.js:5` externalizes `domino` and `turndown` via `MCP_EXTERNALS = ["domino", "turndown"]`. These are excluded from the esbuild bundle and must be present in `node_modules/` at runtime. The readiness gates everywhere only checked `dist/index.js` existence.
+
+- **Fixed 3 locations + 1 test**:
+
+| File | Line | Before | After |
+|---|---|---|---|
+| `install.sh` | 544 | `[[ -f dist/index.js ]] && return 0` | `[[ -f dist/index.js ]] && [[ -d node_modules/domino ]] && return 0` |
+| `bin/llama-model` | 4193 | `[[ -f dist/index.js ]] && context_mode_mcp_dist="yes"` | `[[ -f dist/index.js ]] && [[ -d node_modules/domino ]] && context_mode_mcp_dist="yes"` |
+| `scripts/gateway/context_provider.py` | 119-122 | only checked `dist/index.js` → `"bridge_ready"` | now checks `node_modules/domino` → `"missing_deps"` before `"bridge_ready"` |
+| `tests/test_portability.sh` | 1254 | only created `dist/index.js` | also creates `node_modules/domino/` to match new check |
+
+## What we learned
+
+### Build-time externalization creates a runtime dep contract
+- **`domino` is externalized by esbuild (not bundled)** — `build.js:5` marks `MCP_EXTERNALS = ["domino", "turndown"]`. These must be in `node_modules/` at runtime via `npm ci`. The bug was that `dist/index.js` passing as a build artifact without verifying runtime deps. Any esbuild config with `external` creates a deployment contract: the externalized packages must be installed separately and verified at startup.
+
+### The same bug repeated across 3 layers
+- **installer** (`install.sh`), **doctor CLI** (`bin/llama-model`), and **gateway health check** (`context_provider.py`) all used `dist/index.js` existence as the sole readiness signal. This is a natural but dangerous abstraction — `dist/index.js` is a build artifact, not a deployment artifact. The correct readiness signal is: "build artifact exists AND runtime deps are installed."
+
+### Explore agents hallucinate paths — always verify
+- Three explore agents in this session fabricated file paths: `mcp/` directory (doesn't exist), `scripts/npm_hardened_ci.py` (doesn't exist), `.cache/opencode/packages/` (not present). The finder reported "found 6 files" for `context_mode_mcp` references but missed the actual code in `bin/llama-model`. Always verify agent-sourced file paths against `ls` before relying on content. Shell scripts (`.sh`) contain critical logic often missed by Python-only searches.
+
+### When searching for deploy/install logic, include shell scripts
+- The actual installer code was in `install.sh` (bash function `ensure_context_mode_mcp_dist`), not in Python. Searching only Python files would have missed the root cause entirely. The `bin/llama-model` CLI also runs all its doctor checks in bash. Shell scripts in this project own deployment, installation, health checks, and process lifecycle — searching only Python or JS will miss critical logic.

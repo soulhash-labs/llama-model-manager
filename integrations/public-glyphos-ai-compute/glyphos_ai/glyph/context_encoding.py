@@ -8,7 +8,6 @@ The router inspects ContextPayload to decide whether to apply encoding.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
 from typing import Any
 
 from glyphos_ai.glyph.types import ContextPayload
@@ -34,18 +33,24 @@ GLYPH_KEY_ALIASES = {
 
 
 def _compact_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 def _alias_context_keys(value: Any) -> Any:
     if isinstance(value, dict):
-        return {
-            GLYPH_KEY_ALIASES.get(str(key), str(key)): _alias_context_keys(item)
-            for key, item in value.items()
-        }
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            alias = GLYPH_KEY_ALIASES.get(str(key), str(key))
+            if alias in result:
+                raise ValueError(f"glyph key collision: '{key}' -> '{alias}' overwrites existing key")
+            result[alias] = _alias_context_keys(item)
+        return result
     if isinstance(value, list):
         return [_alias_context_keys(item) for item in value]
     return value
+
+
+_MAX_UNIQUE_LINES = 10_000
 
 
 def _repeated_line_payload(text: str) -> str:
@@ -55,6 +60,8 @@ def _repeated_line_payload(text: str) -> str:
         if not line:
             continue
         if line not in counts:
+            if len(order) >= _MAX_UNIQUE_LINES:
+                return ""  # too many unique lines, skip line-based encoding
             order.append(line)
         counts[line] = counts.get(line, 0) + 1
     repeated = [{"n": counts[line], "x": line} for line in order if counts[line] > 1]
@@ -69,40 +76,30 @@ def _repeated_line_payload(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def encode_context(raw: str, *, disabled: bool = False, force_error: bool = False) -> ContextPayload:
+def encode_context(raw: str, *, disabled: bool = False) -> ContextPayload:
     """Attempt Ψ (GE1) compression on raw context text.
 
     Returns a ContextPayload with:
-    - raw_context always preserved
+    - raw_context always preserved (original text including whitespace)
     - encoded_context only if compression is effective
     - encoding_status indicating result
-
-    The router calls this ONLY when targeting local llama.cpp.
-    Cloud backends receive ContextPayload(encoding_status="skipped").
     """
-    raw = raw.strip()
-    raw_chars = len(raw)
+    raw_context = raw  # preserve original per docstring contract
+    working = raw.strip()
+    raw_chars = len(working)
 
-    if not raw:
+    if not working:
         return ContextPayload(
-            raw_context=raw,
+            raw_context=raw_context,
             raw_context_chars=raw_chars,
             encoding_status="none",
         )
 
     if disabled:
         return ContextPayload(
-            raw_context=raw,
+            raw_context=raw_context,
             raw_context_chars=raw_chars,
             encoding_status="disabled",
-        )
-
-    if force_error:
-        return ContextPayload(
-            raw_context=raw,
-            raw_context_chars=raw_chars,
-            encoding_status="error_raw_fallback",
-            error="forced glyph encoding failure",
         )
 
     try:
@@ -111,18 +108,18 @@ def encode_context(raw: str, *, disabled: bool = False, force_error: bool = Fals
 
         # Try GE1-JSON first
         try:
-            parsed = json.loads(raw)
+            parsed = json.loads(working)
             encoded = "GE1-JSON " + _compact_json(_alias_context_keys(parsed))
             encoding_format = "GE1-JSON"
         except json.JSONDecodeError:
             # Fall back to GE1-LINES
-            encoded = _repeated_line_payload(raw)
+            encoded = _repeated_line_payload(working)
             if encoded:
                 encoding_format = "GE1-LINES"
 
         if not encoded:
             return ContextPayload(
-                raw_context=raw,
+                raw_context=raw_context,
                 raw_context_chars=raw_chars,
                 encoding_status="raw_unstructured",
             )
@@ -131,7 +128,7 @@ def encode_context(raw: str, *, disabled: bool = False, force_error: bool = Fals
 
         if encoded_chars >= raw_chars:
             return ContextPayload(
-                raw_context=raw,
+                raw_context=raw_context,
                 raw_context_chars=raw_chars,
                 encoding_status="raw_not_smaller",
                 encoding_format=encoding_format,
@@ -139,19 +136,23 @@ def encode_context(raw: str, *, disabled: bool = False, force_error: bool = Fals
             )
 
         return ContextPayload(
-            raw_context=raw,
+            raw_context=raw_context,
             raw_context_chars=raw_chars,
             encoding_status="encoded",
             encoded_context=encoded,
             encoding_format=encoding_format,
             encoding_ratio=round(encoded_chars / raw_chars, 4),
-            estimated_token_delta=round((raw_chars - encoded_chars) / 4),
+            estimated_token_delta=_estimate_token_delta(working, encoded),
         )
 
-    except Exception as exc:
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError, RecursionError) as exc:
         return ContextPayload(
-            raw_context=raw,
+            raw_context=raw_context,
             raw_context_chars=raw_chars,
             encoding_status="error_raw_fallback",
-            error=str(exc)[:400],
+            error=f"{type(exc).__name__}: {exc}"[:400],
         )
+
+
+def _estimate_token_delta(raw: str, encoded: str) -> int:
+    return round((len(raw.encode("utf-8")) - len(encoded.encode("utf-8"))) / 4)

@@ -1,0 +1,7 @@
+include README.md
+include LICENSE
+recursive-include glyphos_ai/glyph *.yaml
+recursive-include tests *.py
+prune .planning
+prune docs
+global-exclude __pycache__ *.py[cod] .DS_Store

@@ -118,6 +118,8 @@ def context_status() -> tuple[str, bool]:
         return "missing_bridge", False
     if not (root / "dist" / "index.js").is_file():
         return "missing_dist", False
+    if not (root / "node_modules" / "domino").is_dir():
+        return "missing_deps", False
     return "bridge_ready", False
 
 
@@ -310,7 +312,9 @@ def retrieve_context(
         )
         if completed.returncode != 0:
             stderr_trimmed = (completed.stderr or "")[:500]
-            result.update({"status": "error", "source": "context-mode-mcp", "error": f"context_command_failed: {stderr_trimmed}"})
+            result.update(
+                {"status": "error", "source": "context-mode-mcp", "error": f"context_command_failed: {stderr_trimmed}"}
+            )
             return result
         extracted = command_context_from_output(completed.stdout)
         text = context_to_text(extracted.get("context", ""))
@@ -360,7 +364,6 @@ def build_context_payload(context_result: dict[str, Any]) -> Any:
         return encode_context(
             raw_context,
             disabled=bool(encoding_config.disabled),
-            force_error=bool(encoding_config.force_error),
         )
     except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
         return SimpleNamespace(
@@ -463,9 +466,7 @@ def _context_payload_value(context_payload: Any | None, name: str, default: Any)
     return getattr(context_payload, name, default)
 
 
-def glyph_encoding_result_for_context(
-    context_result: dict[str, Any], context_payload: Any | None
-) -> dict[str, Any]:
+def glyph_encoding_result_for_context(context_result: dict[str, Any], context_payload: Any | None) -> dict[str, Any]:
     if context_payload is not None:
         return context_payload_to_encoding_result(context_payload)
 

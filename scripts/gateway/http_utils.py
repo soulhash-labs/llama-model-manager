@@ -10,6 +10,19 @@ from urllib.error import HTTPError, URLError
 from lmm_errors import InvalidRequestError
 
 
+class GatewayError(RuntimeError):
+    def __init__(self, message: str, *, target: str = "") -> None:
+        super().__init__(message)
+        self.target = target
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "message": str(self),
+            "type": "gateway_error",
+            "target": self.target,
+        }
+
+
 def json_response(
     handler: BaseHTTPRequestHandler,
     status: int,

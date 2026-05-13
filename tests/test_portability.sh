@@ -1251,6 +1251,7 @@ def routing_telemetry_snapshot(limit=1):
         "recent_attempts": [],
     }
 PY
+    mkdir -p "$tmp/home/.local/share/llama-model-manager/integrations/context-mode-mcp/node_modules/domino"
     mkdir -p "$tmp/home/.local/share/llama-model-manager/integrations/context-mode-mcp/dist"
     : >"$tmp/home/.local/share/llama-model-manager/integrations/context-mode-mcp/dist/index.js"
 

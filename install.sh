@@ -541,7 +541,7 @@ ensure_context_mode_mcp_dist() {
     local mcp_dir="$ROOT_DIR/integrations/context-mode-mcp"
 
     [[ -f "$mcp_dir/package.json" ]] || return 0
-    [[ -f "$mcp_dir/dist/index.js" ]] && return 0
+    [[ -f "$mcp_dir/dist/index.js" ]] && [[ -d "$mcp_dir/node_modules/domino" ]] && return 0
 
     if ! command -v npm >/dev/null 2>&1; then
         printf 'post-install warning: Context Mode MCP dist/index.js is missing and npm is unavailable; Context MCP will remain degraded until you run npm ci --ignore-scripts && npm run build:mcp in %s\n' "$mcp_dir" >&2
