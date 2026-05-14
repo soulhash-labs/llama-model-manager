@@ -1329,6 +1329,20 @@ validate_extra_args_deprecated() {
     fi
 }
 
+validate_extra_args_no_core_launch_flags() {
+    local extra="${1:-}"
+    local lower="${extra,,}"
+
+    # The launcher already emits -c "$context" before extra_args.
+    # Core launch flags belong in the tsv context column or
+    # --context on llama-model add, not in extra_args.
+    case "$lower" in
+        *--ctx-size*|*--context-size*|*" -c "*)
+            die "Do not put context flags in extra_args. Use the models.tsv context column or 'llama-model add --context N' instead."
+            ;;
+    esac
+}
+
 split_tsv_record() {
     local raw="${1-}"
 
@@ -3375,6 +3389,7 @@ ${STARTUP_FAILURE_ACTION}"
         model_extra="$(normalize_deprecated_llama_flags "$model_extra")"
     fi
     validate_extra_args_deprecated "${model_extra:-}"
+    validate_extra_args_no_core_launch_flags "${model_extra:-}"
     if [[ -n "$model_extra" ]]; then
         mapfile -d '' -t extra_args < <(split_shell_words "$model_extra")
     fi
@@ -3711,6 +3726,27 @@ show_current() {
     if [[ -n "$auto_fit_override_reason" ]]; then
         printf 'auto_fit_override_reason: %s\n' "$auto_fit_override_reason"
     fi
+
+    # Gateway context-budget status
+    local gateway_url="http://${LLAMA_MODEL_GATEWAY_HOST}:${LLAMA_MODEL_GATEWAY_PORT}/healthz"
+    local budget_json
+    budget_json="$(curl -fsS --max-time 2 "$gateway_url" 2>/dev/null || true)"
+    if [[ -n "$budget_json" ]]; then
+        local max_tok safety_margin allowed mode soft_limit
+        max_tok="$(printf '%s' "$budget_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('context_budget',{}).get('max_tokens',''))" 2>/dev/null || true)"
+        safety_margin="$(printf '%s' "$budget_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('context_budget',{}).get('safety_margin',''))" 2>/dev/null || true)"
+        allowed="$(printf '%s' "$budget_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('context_budget',{}).get('allowed_prompt_tokens',''))" 2>/dev/null || true)"
+        mode="$(printf '%s' "$budget_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('context_budget',{}).get('overflow_mode',''))" 2>/dev/null || true)"
+        soft_limit="$(printf '%s' "$budget_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('context_budget',{}).get('agent_soft_limit',''))" 2>/dev/null || true)"
+        if [[ -n "$max_tok" ]]; then
+            printf 'gateway_max_context: %s\n' "$max_tok"
+            printf 'gateway_safety_margin: %s\n' "${safety_margin:-unknown}"
+            printf 'gateway_allowed_prompt: %s\n' "${allowed:-unknown}"
+            printf 'gateway_overflow_mode: %s\n' "${mode:-unknown}"
+            printf 'gateway_agent_soft_limit: %s\n' "${soft_limit:-unknown}"
+        fi
+    fi
+
     if curl -fsS "$url" >/dev/null 2>&1; then
         printf 'health: ok (%s)\n' "$url"
     else
@@ -5446,7 +5482,13 @@ post_switch_client_sync() {
     local model_path="${2:-}"
     local context="${3:-}"
 
-    : "$alias" "$model_path" "$context"
+    # Seed sync target variables from the model that was just started
+    # so downstream sync commands have a stable source of truth.
+    SYNC_TARGET_ALIAS="$alias"
+    SYNC_TARGET_MODEL_PATH="$model_path"
+    SYNC_TARGET_MODEL_NAME="$(basename "$model_path")"
+    SYNC_TARGET_MODEL_ID="$alias"
+    SYNC_TARGET_CONTEXT="$context"
 
     if toggle_enabled "$LLAMA_MODEL_SYNC_OPENCODE"; then
         post_switch_run_sync opencode sync_opencode --preset balanced
@@ -5518,7 +5560,7 @@ sync_claude() {
     printf 'settings_file: %s\n' "$CLAUDE_SETTINGS_FILE"
     printf 'settings_exists_before: %s\n' "$settings_exists_before"
     printf 'claude_auth: %s\n' "$([[ -n "$auth_token" ]] && printf configured || printf unchanged)"
-    printf 'claude_api_key: %s\n' "$([[ -n "$api_key_source" ]] && printf configured || printf none)"
+    printf 'claude_api_key: %s\n' "$([[ -n "$api_key" ]] && printf configured || printf none)"
 }
 
 lmm_gateway_script() {
@@ -5574,6 +5616,24 @@ lmm_gateway_wait_for_health() {
     return 1
 }
 
+active_context_window() {
+    local pid
+    pid="$(find_pid 2>/dev/null || true)"
+    if [[ -n "$pid" ]]; then
+        local window
+        window="$(cmd_arg_from_pid "$pid" -c 2>/dev/null || true)"
+        if [[ -n "$window" ]]; then
+            printf '%s\n' "$window"
+            return 0
+        fi
+    fi
+    if read_state_file 2>/dev/null && [[ -n "${CURRENT_CONTEXT:-}" ]]; then
+        printf '%s\n' "$CURRENT_CONTEXT"
+        return 0
+    fi
+    printf '%s\n' "$LLAMA_SERVER_CONTEXT"
+}
+
 lmm_gateway_start() {
     local gateway_mode="${1:-full}"
     local script
@@ -5599,6 +5659,10 @@ lmm_gateway_start() {
     LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE="${LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE:-}" \
     LLAMA_MODEL_GLYPHOS_TELEMETRY_FILE="${LLAMA_MODEL_GLYPHOS_TELEMETRY_FILE:-$STATE_DIR/glyphos-routing.json}" \
     LMM_GATEWAY_STATE_FILE="${LMM_GATEWAY_STATE_FILE:-$STATE_DIR/lmm-gateway-requests.json}" \
+    LMM_MAX_CONTEXT_TOKENS="${LMM_MAX_CONTEXT_TOKENS:-$(active_context_window)}" \
+    LMM_CONTEXT_SAFETY_MARGIN="${LMM_CONTEXT_SAFETY_MARGIN:-}" \
+    LMM_CONTEXT_OVERFLOW_MODE="${LMM_CONTEXT_OVERFLOW_MODE:-}" \
+    LMM_AGENT_SOFT_CONTEXT_LIMIT="${LMM_AGENT_SOFT_CONTEXT_LIMIT:-}" \
     setsid python3 "$script" \
         --host "$LLAMA_MODEL_GATEWAY_HOST" \
         --port "$LLAMA_MODEL_GATEWAY_PORT" \
