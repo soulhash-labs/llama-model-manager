@@ -637,3 +637,103 @@
 - **Static SPAs don't need MCP server env vars.** A Vite-bundled dashboard SPA served by a dev server has no network connection to an MCP server. Claims about missing `CTX_PROJECT_ROOT` or "MCP server URL" in `index.html` are category errors — `index.html` in a Vite SPA is a static template, not a server config file.
 - **TypeScript inference is type safety.** Explicit type annotations on simple array literals (`const x = [{ name: "a", saved: 1 }]`) are redundant. The inferred type `{ name: string; saved: number }[]` provides full compile-time checking.
 - **Check package.json before claiming missing dependencies.** Common dashboard deps (`react`, `react-dom`, `recharts`, `tailwindcss`, `vite`, `@tanstack/react-router`) are all listed in the context-mode-mcp `package.json` devDependencies. Claims otherwise are factually incorrect.
+
+# Session 2026-05-14: 6-Fix GUI Patching Campaign — Context Budget Guard + Agent Discipline + n_ctx Integration
+
+## What we did
+
+Implemented three coordinated fixes (A/B/C) for gateway context overflow prevention, agent file-reading discipline, and n_ctx integration across the launcher and GUI:
+
+### A — Gateway context budget guard
+
+| File | Change |
+|------|--------|
+| `scripts/lmm_config.py` | Added `ContextBudgetConfig` dataclass with `max_tokens` (65536), `safety_margin` (2048), `overflow_mode` ("reject"), `soft_limit` (60000) plus `__post_init__` validation for all constraints |
+| `scripts/gateway/handlers_openai.py` | Added `_estimate_tokens()` (chars/4 heuristic) and `_check_context_budget()` that raises `InvalidRequestError` (HTTP 400) before upstream routing. `compact`/`truncate` modes fall back to `reject` with stderr warning |
+| `scripts/glyphos_openai_gateway.py` | Exposed `context_budget` fields in `/healthz` response |
+| `tests/test_phase0_contracts.py` | Added 7 tests: overflow rejection, under-budget pass, compact fallback to reject, safety_margin >= max_tokens rejection, max_tokens < 1024 rejection, invalid overflow_mode rejection, and config validation for budget fields |
+
+### B — Agent file-reading rules
+
+| File | Change |
+|------|--------|
+| `AGENTS.md` | Added "Context Budget / File Reading Rules" section: search-first strategy, 120-line windows, compact-findings workflow, gateway context budget table (4 env vars), n_ctx increase via TSV context column |
+| `CLAUDE.md` | Same file-reading rules in compact format |
+
+### C — n_ctx integration in launcher + GUI
+
+| File | Change |
+|------|--------|
+| `bin/llama-model` | `active_context_window()` helper (PID → state file → env var fallback chain), `validate_extra_args_no_core_launch_flags()` rejecting `--ctx-size`/`--context-size`/`-c` in extra_args, 4 context-budget env vars passed to Python gateway, `show_current()` displaying context budget via `/healthz`, `sync_claude()` api_key detection fix (checks key value), `post_switch_client_sync()` seeding `SYNC_TARGET_*` variables |
+| `bin/llama-model-gui` | 4-column TSV parsing in `select_model()`, `detect_terminal()` fallback chain with gnome-terminal syntax support, Status menu action showing gateway budget, `ensure_editable_file()` for Registry/Defaults, `show_help()` fallback when HELP_FILE missing, `show_logs()` line count validation (1..5000), stop dialog without hardcoded port, renamed "Current" to "Status" |
+
+### Verification
+
+- **9/9 context-budget tests passing**, 12/12 gateway regression tests, all pre-existing tests
+- **bash -n clean** on both `bin/llama-model` and `bin/llama-model-gui`
+- **shellcheck**: Both scripts pass with only SC2086 false positives (variable expansions in GUI arg arrays)
+- **3-command launch chain**: `llama-model current` → `llama-model status` → `llama-model-gui` all functional end-to-end
+- **LSP diagnostics**: clean on changed Python files; `context_budget` attribute on `LMMConfig` not recognized by static type checker (pre-existing limitation — all clean before and after)
+- **Gateway guard in action**: oversized prompts get HTTP 400 with estimated count, max, allowed budget, and actionable guidance before any upstream routing
+
+### Commit record
+
+```
+847c827 docs: add file-reading rules and context budget documentation
+dd5a739 fix(bin): harden GUI with 4-column TSV, terminal fallback, menu actions
+12e9ef0 feat(bin): integrate context budget into launcher, validate extra_args
+df170c6 test(gateway): add 7 context-budget contract tests
+b5dc037 feat(gateway): add context budget guard and healthz exposure
+0b62b3c feat(config): add ContextBudgetConfig dataclass with validation
+```
+
+## What we learned
+
+### Context budget guard architecture
+
+- **Guard placement matters**: `_check_context_budget()` runs in `handle_chat_completions` after prompt assembly but before upstream routing. This catches overflow early with a clear 400 error instead of waiting for the upstream llama.cpp backend to return a 502 or crash. The cost is one additional config load per request, but the config is already cached via `functools.cache`.
+- **Chars/4 heuristic is intentionally crude**: It is fast, has zero external dependencies, and works universally across all models regardless of tokenizer. Documented as a `# TODO` replacement target for when a model-specific tokenizer or the llama.cpp `/tokenize` endpoint is available. The 4-char-per-token average is a documented assumption — code-heavy, Unicode, or structured payloads deviate from it.
+- **`compact`/`truncate` modes are accepted but not implemented**: Accepted in the config dataclass as valid overflow_mode values, but the gateway code falls back to `reject` with an explicit stderr warning. This prevents silent data loss from truncation before the feature is implemented. The comment in `_check_context_budget()` marks the fallback site.
+- **The budget check is the first line of defense, not a replacement for agent discipline**: Agent-level rules (search-first, 120-line windows, compact findings) reduce the probability of hitting the budget. The gateway guard catches the remaining cases. Both layers are needed.
+
+### n_ctx derivation chain
+
+- **`active_context_window()` has a three-tier fallback**: (1) running llama-server PID's `-c` argument via `cmd_arg_from_pid`, (2) state file `CURRENT_CONTEXT` field, (3) `LLAMA_SERVER_CONTEXT` env var defaulting to 128000. This ensures the gateway's `LMM_MAX_CONTEXT_TOKENS` default always reflects what the backend is actually configured to use.
+- **`validate_extra_args_no_core_launch_flags()` uses `case` with lowercase matching** to catch `--ctx-size`, `--context-size`, and `-c` in any case combination (flag names are case-insensitive). It also catches the bash-only flavor `" -c "` (with surrounding spaces) since `-c` is a common short flag. The error message directs users to the TSV context column or `llama-model add --context N`.
+- **Context flags in `extra_args` are now a hard error**, not a warning. The launcher always emits `-c "$context"` before `extra_args`, so a context flag in extra_args creates a duplicate `-c` where the last one wins — leading to confusing behavior. One canonical source (TSV column 4) eliminates the ambiguity.
+
+### Pre-commit hook interaction with staged files
+
+- **`ruff-format` "fails" by design when it reformats a file**: The hook modifies the file in place and reports a non-zero exit code. This is pre-commit's signal to the user that they need to re-stage the reformatted file. The commit does NOT proceed automatically on the first attempt.
+- **The correct workflow for files affected by pre-commit formatters**: `git add <file> → pre-commit run --files <file> → git add <file> → git commit`. The second `git add` captures the formatter's changes. Skipping it produces a commit that either fails (pre-commit blocks it) or uses the pre-format version (if `--no-verify` is used).
+- **Pre-commit's stash/restore cycle is automatic**: The `[WARNING] Unstaged files detected. [INFO] Stashing unstaged files ... [INFO] Restored changes from ...` messages are pre-commit's internal mechanism to isolate staged changes from working-tree dirt. Do not manually interfere with these stashes — pre-commit manages them entirely.
+- **Shell scripts (`bin/llama-model`, `bin/llama-model-gui`) skip ruff hooks**: Ruff's file matchers are set to `*.py` only, so bash scripts pass through without the re-stage requirement. Only Python files trigger the ruff-format cycle.
+- **Running `pre-commit run --files <path>` before the actual commit is the key insight**: This lets you see if the hook will modify the file, re-stage it, and then commit cleanly on the first attempt. The pre-commit stash/restore cycle still runs but since the hooks already passed, the commit proceeds.
+
+### Launcher backward compatibility
+
+- **`show_current()` in `llama-model` now tries `status` first, falls back to `current`**: `"$LLAMA_MODEL_BIN" status 2>/dev/null || "$LLAMA_MODEL_BIN" current`. The `status` subcommand provides gateway-budget and health fields. Older versions that lack `status` silently fail (stderr to /dev/null) and fall back to the traditional `current` output. This pattern maintains forward compatibility without breaking older installations.
+- **Same fallback in the GUI**: `menu_status_text()` uses the same `status || current` pattern and parses the extra `gateway_max_context` / `gateway_safety_margin` fields when available. The Status menu action shows budget info inline without requiring a separate screen.
+- **`post_switch_client_sync()` now seeds `SYNC_TARGET_*` variables**: This ensures downstream sync commands (`sync-claude`, `sync-opencode`, etc.) have a stable source of truth for the model alias, path, and context — even if `llama-model current` changes between the time sync starts and finishes.
+
+### GUI hardenings
+
+- **`select_model()` reads 4 TSV columns**: Was 3 columns (alias, path, extra). The 4th "Context" column was previously swallowed into `extra_args` as a side effect of `split_shell_words` — context values like `81920` were treated as extra args. Now read as a dedicated column matching the launcher's TSV format.
+- **`detect_terminal()` iterates a fallback chain**: Instead of only trying `x-terminal-emulator` (which doesn't exist on many systems), it tries 8 candidates in order: `x-terminal-emulator`, `gnome-terminal`, `konsole`, `xfce4-terminal`, `mate-terminal`, `lxterminal`, `alacritty`, `kitty`, `xterm`. The `gnome-terminal` syntax path (`--` instead of `-e`) avoids the "option parsing stopped" error on newer gnome-terminal versions.
+- **`ensure_editable_file()` creates parent dirs and missing files**: Previously, opening Registry or Defaults when the file didn't exist would open a blank zenity dialog. Now creates both the directory and a skeleton file (with TSV header for models.tsv).
+- **`show_help()` falls back to a text guide when HELP_FILE is missing**: Displays useful commands inline instead of a blank dialog.
+- **`show_logs()` validates line count range**: Rejects values < 1 or > 5000, preventing a system-freeze from requesting 999999 log lines.
+
+### Git commit hygiene
+
+- **6 atomic commits from 8 files**: Split by concern (config → gateway → test → launcher → GUI → docs). Each commit has exactly one logical purpose. The dependency order follows the module hierarchy: foundation config first, gateway implementation second, tests third, launcher and GUI integration fourth/fifth, documentation last.
+- **Semantic commit style is the project convention**: All 30 recent commits use semantic prefixes (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`). The scope tag (e.g., `(config)`, `(gateway)`, `(bin)`) helps group commits by subsystem.
+- **Sisyphus attribution is consistent**: Every commit gets two trailers: "Ultraworked with Sisyphus (https://github.com/code-yeongyu/oh-my-openagent)" and "Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>". This is applied as `-m` arguments to `git commit`.
+- **Multiple files in the same commit require a one-sentence justification**: The gateway commit bundled `handlers_openai.py` and `glyphos_openai_gateway.py` because they form a tightly coupled integration (handler imports config, healthz exposes it). The docs commit bundled `AGENTS.md` and `CLAUDE.md` because they convey the same agent-reading-rules. If a justification can't be stated in one sentence, the files should be separate commits.
+
+### Post-commit integrity fix — `bin/llama-model` refinements
+
+- **`validate_extra_args_no_core_launch_flags()` must use token parsing, not substring matching**: The original implementation used `case "$lower" in *--ctx-size*)` which matched the substring anywhere in the args string (false positives on comments or concatenated flags). Worse, it only matched `" -c "` (with leading space), missing `-c 81920` when `-c` was at the start. The correct approach: `mapfile -d '' -t tokens < <(split_shell_words "$extra")` and iterate each token with exact `case "$token" in -c|--ctx-size|...)`. This catches all forms: `-c 81920`, `--ctx-size 81920`, `--ctx-size=81920`, `--context-size 81920`, `--context-size=81920`.
+- **`LLAMA_SERVER_EXTRA_ARGS` must also be validated**: The model-specific `extra_args` (from models.tsv column 3) were validated, but the runtime/global `LLAMA_SERVER_EXTRA_ARGS` env var was not. A user could set `LLAMA_SERVER_EXTRA_ARGS="--ctx-size 81920"` in defaults.env and reintroduce the duplicate-context bug. The fix: add `validate_extra_args_no_core_launch_flags "$LLAMA_SERVER_EXTRA_ARGS"` before the `mapfile` split.
+- **`active_context_window()` must check `--ctx-size` and `--context-size` in addition to `-c`**: The function only called `cmd_arg_from_pid "$pid" -c`. If the process was launched with `--ctx-size 81920` (e.g., by an older launcher version or manual invocation), `cmd_arg_from_pid -c` would return nothing and the function would fall back to state file / default — potentially returning a different value than what the process is actually using. The fix: `cmd_arg_from_pid "$pid" -c || cmd_arg_from_pid "$pid" --ctx-size || cmd_arg_from_pid "$pid" --context-size`. This matches the existing pattern used by `llama_server_process_rows()` on line 943.
+- **The error message should guide users to the correct fix**: The original message "Do not put context flags in extra_args" was correct but unhelpful. The revised message explains: "Use the model context field or 'llama-model add --context N' instead. Allowed extra_args include flags such as: --jinja --chat-template-file /path/to/template.jinja". This distinguishes banned flags (context) from allowed flags (template, sampling, runtime).

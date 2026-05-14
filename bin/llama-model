@@ -1331,16 +1331,22 @@ validate_extra_args_deprecated() {
 
 validate_extra_args_no_core_launch_flags() {
     local extra="${1:-}"
-    local lower="${extra,,}"
+    local -a tokens=()
+    local token
+
+    [[ -z "$extra" ]] && return 0
 
     # The launcher already emits -c "$context" before extra_args.
     # Core launch flags belong in the tsv context column or
     # --context on llama-model add, not in extra_args.
-    case "$lower" in
-        *--ctx-size*|*--context-size*|*" -c "*)
-            die "Do not put context flags in extra_args. Use the models.tsv context column or 'llama-model add --context N' instead."
-            ;;
-    esac
+    mapfile -d '' -t tokens < <(split_shell_words "$extra")
+    for token in "${tokens[@]}"; do
+        case "$token" in
+            -c|--ctx-size|--ctx-size=*|--context-size|--context-size=*)
+                die "Context-size flags are not allowed in extra_args."$'\n'"Use the model context field or 'llama-model add --context N' instead."$'\n'"Allowed extra_args include flags such as: --jinja --chat-template-file /path/to/template.jinja"
+                ;;
+        esac
+    done
 }
 
 split_tsv_record() {
@@ -3394,6 +3400,7 @@ ${STARTUP_FAILURE_ACTION}"
         mapfile -d '' -t extra_args < <(split_shell_words "$model_extra")
     fi
     if [[ -n "$LLAMA_SERVER_EXTRA_ARGS" ]]; then
+        validate_extra_args_no_core_launch_flags "$LLAMA_SERVER_EXTRA_ARGS"
         mapfile -d '' -t runtime_extra_args < <(split_shell_words "$LLAMA_SERVER_EXTRA_ARGS")
     fi
 
@@ -5621,7 +5628,12 @@ active_context_window() {
     pid="$(find_pid 2>/dev/null || true)"
     if [[ -n "$pid" ]]; then
         local window
-        window="$(cmd_arg_from_pid "$pid" -c 2>/dev/null || true)"
+        window="$(
+            cmd_arg_from_pid "$pid" -c 2>/dev/null \
+            || cmd_arg_from_pid "$pid" --ctx-size 2>/dev/null \
+            || cmd_arg_from_pid "$pid" --context-size 2>/dev/null \
+            || true
+        )"
         if [[ -n "$window" ]]; then
             printf '%s\n' "$window"
             return 0
