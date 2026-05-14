@@ -130,3 +130,28 @@ this env var in `~/.config/llama-server/defaults.env` to override.
 computation.  On a system with 12 GB VRAM and 48 GB RAM, increasing from 65536
 to 81920 is usually safe.  Going beyond 98304 may cause out-of-memory errors
 or significant slowdown.
+
+## No-Clobber / Source-of-Truth Rules
+
+Do not assume a missing string in one file is a regression until you verify
+the intended layer.
+
+Context-budget and security-guard ownership:
+
+- `scripts/lmm_config.py` owns `ContextBudgetConfig` and env validation.
+- `scripts/gateway/handlers_openai.py` owns context-budget request rejection.
+- `bin/llama-model` owns launcher propagation and active context detection.
+- `bin/llama-model-gui` owns Zenity GUI status/model registry behavior.
+- `web/app.js` owns dashboard frontend controls and client-side extra_args
+  validation.
+- `web/app.py` owns dashboard backend API, static serving, download
+  orchestration, and model/defaults persistence.
+
+Before claiming a regression:
+
+1. Run `git log -S <needle> -- <file>` to check whether the string ever
+   existed in that file.
+2. Check whether the guard belongs in another layer (see ownership above).
+3. Compare repo and runtime copies if runtime behavior differs.
+4. Prefer targeted patches; never rewrite full production files from stale
+   context.

@@ -18,5 +18,25 @@ Preferred workflow:
 - `rg "pattern" path/`
 - inspect matched line numbers
 - read only the smallest useful region
+
+## No-Clobber / Source-of-Truth Rules (see AGENTS.md for full version)
+
+Context-budget ownership:
+
+- `scripts/lmm_config.py` owns `ContextBudgetConfig` and env validation.
+- `scripts/gateway/handlers_openai.py` owns context-budget request rejection.
+- `bin/llama-model` owns launcher propagation and active context detection.
+- `bin/llama-model-gui` owns Zenity GUI status/model registry behavior.
+- `web/app.js` owns dashboard frontend controls and client-side extra_args
+  validation.
+- `web/app.py` owns dashboard backend API, static serving, download
+  orchestration, and model/defaults persistence.
+
+Before claiming a regression:
+1. Run `git log -S <needle> -- <file>`.
+2. Check whether the guard belongs in another layer.
+3. Compare repo and runtime copies if runtime behavior differs.
+4. Prefer targeted patches; never rewrite full production files from stale
+   context.
 - patch surgically
 - run focused tests
