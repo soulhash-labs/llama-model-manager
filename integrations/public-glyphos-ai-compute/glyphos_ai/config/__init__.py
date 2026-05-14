@@ -27,7 +27,7 @@ from typing import Any
 
 import yaml
 
-DEFAULT_CONFIG_PACKAGE = "glyphos_ai.config"
+DEFAULT_CONFIG_PACKAGE = __package__ or "glyphos_ai.config"
 DEFAULT_CONFIG_RESOURCE = "default.yaml"
 DEFAULT_CONFIG_ENV = "GLYPHOS_CONFIG_FILE"
 
