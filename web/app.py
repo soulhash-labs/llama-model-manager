@@ -34,6 +34,11 @@ PHASE0_SCHEMA_VERSION = 1
 MAX_ACTIVITY_EVENTS = 100
 DEFAULT_MAX_REQUEST_BYTES = 2 * 1024 * 1024
 DEFAULT_CLI_TIMEOUT_SECONDS = 60
+
+ALLOWED_SERVICE_ACTIONS: set[str] = {"status", "start", "stop", "restart", "logs"}
+ALLOWED_GATEWAY_ACTIONS: set[str] = {"status", "start", "stop", "restart", "logs"}
+ALLOWED_GATEWAY_LANES: set[str] = {"full", "fast"}
+
 KNOWN_DEFAULT_KEYS = [
     "LLAMA_SERVER_BIN",
     "LMM_DEFAULT_MAX_TOKENS",
@@ -86,6 +91,10 @@ KNOWN_DEFAULT_KEYS = [
     "CLAUDE_MODEL_ID",
     "CLAUDE_AUTH_TOKEN",
     "CLAUDE_API_KEY",
+    "LMM_MAX_CONTEXT_TOKENS",
+    "LMM_CONTEXT_SAFETY_MARGIN",
+    "LMM_CONTEXT_OVERFLOW_MODE",
+    "LMM_AGENT_SOFT_CONTEXT_LIMIT",
 ]
 
 
@@ -168,8 +177,9 @@ API_POST_PAYLOAD_SCHEMAS: dict[str, dict[str, Any]] = {
         "allowed": {"root"},
     },
     "/api/remote/search": {
-        "allowed": {"query", "limit", "cache_ttl_seconds"},
+        "allowed": {"query", "limit", "cache_ttl_seconds", "refresh"},
         "int_fields": {"limit", "cache_ttl_seconds"},
+        "bool_fields": {"refresh"},
     },
     "/api/switch": {
         "allowed": {"target"},
@@ -246,6 +256,7 @@ API_POST_PAYLOAD_SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "/api/downloads/delete-orphans": {
         "allowed": {"paths"},
+        "list_fields": {"paths"},
     },
     "/api/downloads/recover": {
         "allowed": set(),
@@ -282,24 +293,38 @@ API_POST_PAYLOAD_SCHEMAS: dict[str, dict[str, Any]] = {
 }
 
 
+_DEMO_DEFAULT_STATE: dict[str, Any] = {
+    "models": [],
+    "defaults": {},
+    "current": {},
+    "doctor": {},
+    "mode": {},
+}
+
+
 def _load_demo_state() -> dict[str, Any]:
     demo_path = Path(__file__).parent / "demo_state.json"
     if not demo_path.exists():
-        return {"state": {}, "discovery": [], "log": ""}
+        return {"state": dict(_DEMO_DEFAULT_STATE), "discovery": [], "log": ""}
 
     try:
         payload = json.loads(demo_path.read_text(encoding="utf-8"))
     except Exception:
-        return {"state": {}, "discovery": [], "log": ""}
+        return {"state": dict(_DEMO_DEFAULT_STATE), "discovery": [], "log": ""}
 
     if not isinstance(payload, dict):
-        return {"state": {}, "discovery": [], "log": ""}
+        return {"state": dict(_DEMO_DEFAULT_STATE), "discovery": [], "log": ""}
 
     state = payload.get("state")
     discovery = payload.get("discovery")
     log = payload.get("log")
+
+    merged_state = dict(_DEMO_DEFAULT_STATE)
+    if isinstance(state, dict):
+        merged_state.update(state)
+
     return {
-        "state": state if isinstance(state, dict) else {},
+        "state": merged_state,
         "discovery": discovery if isinstance(discovery, list) else [],
         "log": log if isinstance(log, str) else "",
     }
@@ -623,6 +648,8 @@ class Manager:
     def save_defaults(self, updates: dict[str, str]) -> None:
         if self.demo:
             return
+        if "LLAMA_SERVER_EXTRA_ARGS" in updates:
+            self.validate_no_context_flags_in_extra_args(updates["LLAMA_SERVER_EXTRA_ARGS"])
         self.defaults_file.parent.mkdir(parents=True, exist_ok=True)
         existing_lines = []
         if self.defaults_file.exists():
@@ -776,12 +803,35 @@ class Manager:
             parts.append(extra_args.strip())
         return " ".join(parts).strip()
 
+    @staticmethod
+    def validate_no_context_flags_in_extra_args(extra_args: str) -> None:
+        CORE_CONTEXT_FLAGS = {"-c", "--ctx-size", "--context-size"}
+        try:
+            tokens = shlex.split(extra_args or "", posix=True)
+        except ValueError as exc:
+            raise ValueError(f"Invalid extra args: {exc}") from exc
+        for token in tokens:
+            if token in CORE_CONTEXT_FLAGS or token.startswith("--ctx-size=") or token.startswith("--context-size="):
+                raise ValueError("Do not put context flags in extra_args. Use the context field or --context instead.")
+
     def save_model(self, payload: dict[str, Any]) -> dict[str, str]:
+        raw_mmproj = str(payload.get("mmproj", "")).strip()
+        raw_extra_args = str(payload.get("extra_args", "")).strip()
+        raw_extra = str(payload.get("extra", "")).strip()
+        if raw_extra and not raw_mmproj and not raw_extra_args:
+            split = self.split_extra(raw_extra)
+            mmproj_in = split["mmproj"]
+            extra_args_in = split["extra_args"]
+        else:
+            mmproj_in = raw_mmproj
+            extra_args_in = raw_extra_args
+        self.validate_no_context_flags_in_extra_args(extra_args_in)
+
         if self.demo:
             return {
                 "alias": self.sanitize_alias(str(payload.get("alias") or payload.get("path") or "")),
                 "path": str(payload.get("path", "")),
-                "extra": self.build_extra(str(payload.get("mmproj", "")).strip(), str(payload.get("extra_args", ""))),
+                "extra": self.build_extra(mmproj_in, extra_args_in),
                 "context": str(payload.get("context", "")).strip(),
                 "ngl": str(payload.get("ngl", "")).strip(),
                 "batch": str(payload.get("batch", "")).strip(),
@@ -801,7 +851,7 @@ class Manager:
         if not Path(resolved_model_path).is_file():
             raise ValueError(f"Model not found: {resolved_model_path}")
 
-        mmproj = str(payload.get("mmproj", "")).strip()
+        mmproj = mmproj_in
         if mmproj:
             mmproj = str(Path(mmproj).expanduser().resolve())
             if not Path(mmproj).is_file():
@@ -811,7 +861,7 @@ class Manager:
         model = {
             "alias": alias,
             "path": resolved_model_path,
-            "extra": self.build_extra(mmproj, str(payload.get("extra_args", ""))),
+            "extra": self.build_extra(mmproj, extra_args_in),
             "context": str(payload.get("context", "")).strip(),
             "ngl": str(payload.get("ngl", "")).strip(),
             "batch": str(payload.get("batch", "")).strip(),
@@ -829,21 +879,19 @@ class Manager:
                     **existing,
                     **model,
                     "mmproj": mmproj,
-                    "extra_args": str(payload.get("extra_args", "")).strip(),
+                    "extra_args": extra_args_in,
                     "exists": "yes",
                 }
                 replaced = True
                 break
         if not replaced:
-            models.append(
-                {**model, "mmproj": mmproj, "extra_args": str(payload.get("extra_args", "")).strip(), "exists": "yes"}
-            )
+            models.append({**model, "mmproj": mmproj, "extra_args": extra_args_in, "exists": "yes"})
 
         self.write_models(models)
         return {
             **model,
             "mmproj": mmproj,
-            "extra_args": str(payload.get("extra_args", "")).strip(),
+            "extra_args": extra_args_in,
             "exists": "yes",
         }
 
@@ -949,6 +997,10 @@ class Manager:
             "CLAUDE_MODEL_ID": values.get("CLAUDE_MODEL_ID", ""),
             "CLAUDE_AUTH_TOKEN": values.get("CLAUDE_AUTH_TOKEN", ""),
             "CLAUDE_API_KEY": values.get("CLAUDE_API_KEY", ""),
+            "LMM_MAX_CONTEXT_TOKENS": values.get("LMM_MAX_CONTEXT_TOKENS", ""),
+            "LMM_CONTEXT_SAFETY_MARGIN": values.get("LMM_CONTEXT_SAFETY_MARGIN", "2048"),
+            "LMM_CONTEXT_OVERFLOW_MODE": values.get("LMM_CONTEXT_OVERFLOW_MODE", "reject"),
+            "LMM_AGENT_SOFT_CONTEXT_LIMIT": values.get("LMM_AGENT_SOFT_CONTEXT_LIMIT", "60000"),
         }
 
     def iso_now(self) -> str:
@@ -2134,6 +2186,9 @@ class Manager:
         }
 
     def streamed_download(self, url: str, destination: Path, job: dict[str, Any]) -> dict[str, Any]:
+        parsed_url = urllib.parse.urlparse(url)
+        if parsed_url.scheme not in {"https", "http"}:
+            raise ValueError(f"Download URL scheme must be http or https, got: {parsed_url.scheme}")
         job_id = str(job.get("id", ""))
         resume_from = int(job.get("resume_from_bytes") or 0)
         headers = {"User-Agent": "llama-model-manager/3"}
@@ -3512,14 +3567,8 @@ class AppHandler(BaseHTTPRequestHandler):
         return ""
 
     def _authorize_api_request(self, route: str) -> None:
-        if route not in {
-            "/api/state",
-            "/api/logs",
-            "/api/dashboard-service/logs",
-            "/api/claude-gateway/logs",
-        }:
-            if not self._is_allowed_client():
-                raise ValidationError("client_not_allowed", "Client host not allowed to call the API")
+        if not self._is_allowed_client():
+            raise ValidationError("client_not_allowed", "Client host not allowed to call the API")
 
         token = parse_api_token()
         if not token:
@@ -3552,16 +3601,18 @@ class AppHandler(BaseHTTPRequestHandler):
         if not schema:
             return payload
 
-        allowed = schema.get("allowed", set())
-        required = schema.get("required", set())
+        bool_fields = schema.get("bool_fields", set())
+        list_fields = schema.get("list_fields", set())
         int_fields = schema.get("int_fields", set())
         str_fields = schema.get("str_fields", set())
 
-        if allowed:
+        if "allowed" in schema:
+            allowed = schema["allowed"]
             unknown = [key for key in payload if key not in allowed]
             if unknown:
                 raise ValidationError("unknown_field", f"Unknown field(s) for {route}: {', '.join(sorted(unknown))}")
 
+        required = schema.get("required", set())
         for field in required:
             if field not in payload:
                 raise ValidationError("missing_required_field", f"Missing required field: {field}")
@@ -3586,9 +3637,33 @@ class AppHandler(BaseHTTPRequestHandler):
             except (TypeError, ValueError) as exc:
                 raise ValidationError("invalid_field_type", f"Field '{field}' must be an integer") from exc
 
+        for field in bool_fields:
+            if field not in payload:
+                continue
+            value = payload[field]
+            if isinstance(value, bool):
+                payload[field] = value
+                continue
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in {"1", "true", "yes", "on", "enabled", "y"}:
+                    payload[field] = True
+                    continue
+                if normalized in {"0", "false", "no", "off", "disabled", "n"}:
+                    payload[field] = False
+                    continue
+            raise ValidationError("invalid_field_type", f"Field '{field}' must be a boolean")
+
+        for field in list_fields:
+            if field not in payload:
+                continue
+            value = payload.get(field)
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                raise ValidationError("invalid_field_type", f"Field '{field}' must be a list of strings")
+
         return payload
 
-    def _parse_lines_query(self, raw_lines: str | None, *, default: int = 80) -> int:
+    def _parse_lines_query(self, raw_lines: str | None, *, default: int = 80, maximum: int = 5000) -> int:
         value_text = str(raw_lines).strip() if raw_lines is not None else str(default)
         try:
             value = int(value_text)
@@ -3596,6 +3671,8 @@ class AppHandler(BaseHTTPRequestHandler):
             raise ValidationError("invalid_query_param", "Query parameter 'lines' must be an integer") from exc
         if value < 0:
             raise ValidationError("invalid_query_param", "Query parameter 'lines' must be non-negative")
+        if value > maximum:
+            raise ValidationError("invalid_query_param", f"Query parameter 'lines' must be <= {maximum}")
         return value
 
     def _track_api_activity(
@@ -3676,6 +3753,8 @@ class AppHandler(BaseHTTPRequestHandler):
             return {"ok": True}
         if route == "/api/dashboard-service":
             action = str(payload.get("action", "status")).strip()
+            if action not in ALLOWED_SERVICE_ACTIONS:
+                raise ValidationError("invalid_action", f"Invalid service action: {action}")
             self.manager.run_cli("dashboard-service", action)
             return {"ok": True, "service": self.manager.dashboard_service_status()}
         if route == "/api/opencode/sync":
@@ -3697,11 +3776,17 @@ class AppHandler(BaseHTTPRequestHandler):
             return {"ok": True, **self.manager.activate_context_glyphos_pipeline()}
         if route == "/api/claude-gateway":
             action = str(payload.get("action", "status")).strip()
+            if action not in ALLOWED_GATEWAY_ACTIONS:
+                raise ValidationError("invalid_action", f"Invalid claude-gateway action: {action}")
             result = self.manager.parse_key_values(self.manager.run_cli("claude-gateway", action))
             return {"ok": True, "result": result}
         if route == "/api/gateway":
             action = str(payload.get("action", "status")).strip()
+            if action not in ALLOWED_GATEWAY_ACTIONS:
+                raise ValidationError("invalid_action", f"Invalid gateway action: {action}")
             lane = str(payload.get("lane", "full")).strip().lower()
+            if lane not in ALLOWED_GATEWAY_LANES:
+                raise ValidationError("invalid_lane", f"Invalid gateway lane: {lane}")
             if lane == "fast":
                 result = self.manager.parse_key_values(self.manager.run_cli("gateway", "fast", action))
             else:
@@ -3764,6 +3849,8 @@ class AppHandler(BaseHTTPRequestHandler):
                     query = urllib.parse.parse_qs(parsed.query)
                     lines = self._parse_lines_query(query.get("lines", [None])[0], default=100)
                     lane = str(query.get("lane", ["full"])[0] or "full").strip().lower()
+                    if lane not in ALLOWED_GATEWAY_LANES:
+                        raise ValidationError("invalid_lane", f"Invalid gateway lane: {lane}")
                     if lane == "fast":
                         logs = self.manager.run_cli("gateway", "fast", "logs", str(lines))
                     else:
@@ -3829,8 +3916,16 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def serve_static(self, raw_path: str) -> None:
         path = raw_path if raw_path != "/" else "/index.html"
-        requested = (self.web_root / path.lstrip("/")).resolve()
-        if not str(requested).startswith(str(self.web_root.resolve())) or not requested.exists():
+        root = self.web_root.resolve()
+        requested = (root / path.lstrip("/")).resolve()
+
+        try:
+            requested.relative_to(root)
+        except ValueError:
+            self.send_error_json(HTTPStatus.NOT_FOUND, "Not found")
+            return
+
+        if not requested.exists() or not requested.is_file():
             self.send_error_json(HTTPStatus.NOT_FOUND, "Not found")
             return
 
