@@ -631,3 +631,9 @@
 - **Root `config/` should remain data-only.** Adding `config/__init__.py` at the repo root makes `import config` work, but `config` is a dangerously generic top-level name that can collide with other packages, local scripts, and PYTHONPATH resolution.
 - **Keep the Python loader under the actual package namespace** (`glyphos_ai.config`) and load data files by explicit path or env var. This avoids import ambiguity.
 - **A compatibility shim is better than a duplicate implementation.** If old import paths need to keep working, a 28-line re-export shim is easier to maintain than a full copy of the code.
+
+### Dashboard/dev-ui review classification
+- **Dev/demo dashboards are not production systems.** Before filing bugs about missing live data, env var plumbing, or production hardening in a dashboard, check whether it is scoped as "dev-only" or "demo/prototype." A dev dashboard with hardcoded sample data and placeholder values is an intentional development UI, not a production bug.
+- **Static SPAs don't need MCP server env vars.** A Vite-bundled dashboard SPA served by a dev server has no network connection to an MCP server. Claims about missing `CTX_PROJECT_ROOT` or "MCP server URL" in `index.html` are category errors — `index.html` in a Vite SPA is a static template, not a server config file.
+- **TypeScript inference is type safety.** Explicit type annotations on simple array literals (`const x = [{ name: "a", saved: 1 }]`) are redundant. The inferred type `{ name: string; saved: number }[]` provides full compile-time checking.
+- **Check package.json before claiming missing dependencies.** Common dashboard deps (`react`, `react-dom`, `recharts`, `tailwindcss`, `vite`, `@tanstack/react-router`) are all listed in the context-mode-mcp `package.json` devDependencies. Claims otherwise are factually incorrect.
