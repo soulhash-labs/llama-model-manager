@@ -616,3 +616,18 @@
 ### Type hint verification
 - **Don't assume files lack type hints.** Many files in this project are already fully annotated, especially newer ones. Always read the file first before planning "add type hints" work.
 - **Module-level constants** (like `GLYPH_KEY_ALIASES`, `LOVE_FREQUENCY`) are type-inferred by MyPy/pyright — explicit annotations are cosmetic only. Prioritize function signatures (params + return type) which affect callers and editor tooling.
+
+### Subagent scope boundaries
+- **Every subagent delegation MUST include a `MUST NOT` clause** listing directories and files the agent is forbidden to touch. Without explicit scope boundaries, over-eager subagents wander into unrelated files and corrupt them.
+- **Always `git diff --stat` after every delegation** to catch scope creep before it becomes uncommitted damage. A subagent can silently modify a file in 2 seconds — finding it hours later costs far more.
+- **When deploying/syncing files to runtime**, the prompt must list exactly which files to copy and explicitly forbid touching anything else. Rogue edits to unrelated files (like `config/__init__.py`) are the predictable result of vague scope.
+
+### Duplicate implementation drift
+- **Two files with the same code will inevitably diverge.** If two `config/__init__.py` files have the same implementation, one will get fixed and the other won't. The fix is to make one a shim that re-exports from the canonical source.
+- **A package marker `__init__.py` (0 bytes) is not the same as a code `__init__.py` (197 lines).** When Claude reports "empty __init__.py", verify which path it's looking at before assuming corruption. The `glyphos_ai/config/__init__.py` is a namespace marker; `config/__init__.py` (one level up) is the real module.
+- **`__package__` is safer than hardcoded package strings.** `DEFAULT_CONFIG_PACKAGE = __package__ or "glyphos_ai.config"` works regardless of how the package is installed or deployed. Hardcoded strings become wrong when files are moved or symlinked.
+
+### Config architecture best practice
+- **Root `config/` should remain data-only.** Adding `config/__init__.py` at the repo root makes `import config` work, but `config` is a dangerously generic top-level name that can collide with other packages, local scripts, and PYTHONPATH resolution.
+- **Keep the Python loader under the actual package namespace** (`glyphos_ai.config`) and load data files by explicit path or env var. This avoids import ambiguity.
+- **A compatibility shim is better than a duplicate implementation.** If old import paths need to keep working, a 28-line re-export shim is easier to maintain than a full copy of the code.
