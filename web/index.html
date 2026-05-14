@@ -670,6 +670,27 @@
               Claude API Key
               <input name="CLAUDE_API_KEY" id="default-claude-api-key" placeholder="local-dev-token">
             </label>
+            <span class="section-label span-2" style="margin-top: 0.5rem;">Context Budget</span>
+            <label title="Maximum backend context window (n_ctx). Overridden by model-specific and auto-fit values.">
+              Max Context Tokens
+              <input name="LMM_MAX_CONTEXT_TOKENS" id="default-context-budget-max" placeholder="65536">
+            </label>
+            <label title="Headroom subtracted from max_tokens to leave space for internal overhead.">
+              Safety Margin
+              <input name="LMM_CONTEXT_SAFETY_MARGIN" id="default-context-budget-margin" placeholder="2048">
+            </label>
+            <label title="What to do when the estimated prompt exceeds the allowed budget.">
+              Overflow Mode
+              <select name="LMM_CONTEXT_OVERFLOW_MODE" id="default-context-overflow-mode">
+                <option value="reject">reject</option>
+                <option value="compact">compact</option>
+                <option value="truncate">truncate</option>
+              </select>
+            </label>
+            <label title="Soft target for agent self-regulation (applies to AGENTS.md / CLAUDE.md agent instructions).">
+              Agent Soft Limit
+              <input name="LMM_AGENT_SOFT_CONTEXT_LIMIT" id="default-agent-soft-context-limit" placeholder="60000">
+            </label>
             <div class="form-actions span-2">
               <button
                 type="submit"

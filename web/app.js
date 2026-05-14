@@ -89,6 +89,28 @@ function isFeatureEnabled(value) {
   return !["0", "false", "no", "off", "disabled"].includes(normalized);
 }
 
+function positiveInt(value, fallback, max) {
+  const parsed = Math.round(Number(value));
+  if (!Number.isFinite(parsed)) return fallback;
+  if (max !== undefined && parsed > max) return max;
+  return Math.max(1, parsed);
+}
+
+function containsContextFlag(extraArgs) {
+  const text = String(extraArgs || "").trim();
+  if (!text) return false;
+  return /(^|\s)(-c|--ctx-size|--context-size)(=|\s|$)/.test(text);
+}
+
+function validateNoContextFlags(extraArgs, fieldLabel) {
+  if (!containsContextFlag(extraArgs)) return;
+  throw new Error(
+    `${fieldLabel} must not contain context-size flags. ` +
+    "Use the Context field instead. " +
+    "Allowed extra_args include: --jinja --chat-template-file /path/to/template.jinja"
+  );
+}
+
 function routingSignal(data) {
   const telemetry = data.glyphos_telemetry || {};
   const configured = Boolean(data.glyphos_config_exists);
@@ -158,13 +180,12 @@ function updateDashboardPage(pageId, options = {}) {
   }
 
   if (focus) {
-    const target = CSS.escape ? CSS.escape(targetId) : targetId;
-    const heading = document.querySelector(`#${target} h2`);
+    const page = document.getElementById(targetId);
+    const heading = page?.querySelector("h2");
     if (heading) {
       heading.setAttribute("tabindex", "-1");
       heading.focus({ preventScroll: true });
     }
-    const page = document.getElementById(targetId);
     if (page) page.scrollIntoView({ behavior: "auto", block: "start" });
   }
 }
@@ -403,12 +424,26 @@ function displayPath(path) {
 }
 
 async function api(path, options = {}) {
+  const headers = {
+    "Content-Type": "application/json",
+    ...(options.headers || {}),
+  };
+
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
     ...options,
+    headers,
   });
 
-  const payload = await response.json().catch(() => ({ ok: false, error: "Invalid JSON response" }));
+  const text = await response.text();
+  let payload = {};
+  if (text.trim()) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = { ok: false, error: "Invalid JSON response" };
+    }
+  }
+
   if (!response.ok) {
     const error = new Error(payload.error || "Request failed");
     error.code = payload.code || "";
@@ -1975,7 +2010,7 @@ function saveRemotePreferences() {
   const hideInput = $("#remote-hide-gated");
 
   if (queryInput) window.localStorage.setItem(STORAGE_KEYS.remoteQuery, queryInput.value.trim());
-  if (limitInput) window.localStorage.setItem(STORAGE_KEYS.remoteLimit, String(Math.max(1, Number(limitInput.value || 30))));
+  if (limitInput) window.localStorage.setItem(STORAGE_KEYS.remoteLimit, String(positiveInt(limitInput.value, 30, 60)));
   if (rootInput) window.localStorage.setItem(STORAGE_KEYS.remoteDestinationRoot, rootInput.value.trim());
   if (hideInput) window.localStorage.setItem(STORAGE_KEYS.remoteHideGated, hideInput.checked ? "1" : "0");
 }
@@ -2056,6 +2091,10 @@ function renderDefaults(defaults) {
   $("#default-claude-model-id").value = defaults.CLAUDE_MODEL_ID || "";
   $("#default-claude-auth-token").value = defaults.CLAUDE_AUTH_TOKEN || "";
   $("#default-claude-api-key").value = defaults.CLAUDE_API_KEY || "";
+  $("#default-context-budget-max").value = defaults.LMM_MAX_CONTEXT_TOKENS || "";
+  $("#default-context-budget-margin").value = defaults.LMM_CONTEXT_SAFETY_MARGIN || "2048";
+  $("#default-context-overflow-mode").value = defaults.LMM_CONTEXT_OVERFLOW_MODE || "reject";
+  $("#default-agent-soft-context-limit").value = defaults.LMM_AGENT_SOFT_CONTEXT_LIMIT || "60000";
 }
 
 async function refreshState() {
@@ -2108,6 +2147,8 @@ async function saveModel(event) {
     device: $("#model-device").value.trim(),
     notes: $("#model-notes").value.trim(),
   };
+
+  validateNoContextFlags(payload.extra_args, "Model extra args");
 
   await withButtonBusy(submitButton, "Saving...", async () => {
     await api("/api/models/save", {
@@ -2224,6 +2265,10 @@ function collectDefaultsPayload() {
     CLAUDE_MODEL_ID: $("#default-claude-model-id").value.trim(),
     CLAUDE_AUTH_TOKEN: $("#default-claude-auth-token").value.trim(),
     CLAUDE_API_KEY: $("#default-claude-api-key").value.trim(),
+    LMM_MAX_CONTEXT_TOKENS: $("#default-context-budget-max").value.trim(),
+    LMM_CONTEXT_SAFETY_MARGIN: $("#default-context-budget-margin").value.trim(),
+    LMM_CONTEXT_OVERFLOW_MODE: $("#default-context-overflow-mode").value.trim(),
+    LMM_AGENT_SOFT_CONTEXT_LIMIT: $("#default-agent-soft-context-limit").value.trim(),
   };
 }
 
@@ -2320,6 +2365,7 @@ async function saveDefaults(event) {
   event.preventDefault();
   const submitButton = event.submitter || $("#defaults-form button[type='submit']");
   const payload = collectDefaultsPayload();
+  validateNoContextFlags(payload.LLAMA_SERVER_EXTRA_ARGS, "Global extra args");
 
   await withButtonBusy(submitButton, "Saving...", async () => {
     await api("/api/defaults/save", {
@@ -2496,11 +2542,11 @@ async function onDownloadsTableClick(event) {
 async function performRemoteSearch(button) {
   saveRemotePreferences();
   const query = $("#remote-query")?.value.trim() || "";
-  const limit = Math.max(1, Math.round(Number($("#remote-limit")?.value || 30)));
+  const limit = positiveInt($("#remote-limit")?.value, 30, 60);
   await withButtonBusy(button, "Searching...", async () => {
     const payload = await api("/api/remote/search", {
       method: "POST",
-      body: JSON.stringify({ query, limit }),
+      body: JSON.stringify({ query, limit, refresh: true }),
     });
     state.data.remote_models = payload.remote_models || {};
     renderRemoteModels(state.data.remote_models);
@@ -2840,6 +2886,7 @@ function renderSessionHandoffs(summaries) {
   container.innerHTML = summaries.map(s => {
     const statusClass = s.status === "completed" ? "status-success" : s.status === "failed" ? "status-error" : "status-cancelled";
     const statusLabel = s.status.charAt(0).toUpperCase() + s.status.slice(1);
+    const artifacts = Array.isArray(s.artifacts) ? s.artifacts : [];
     return `<div class="handoff-card">
       <div class="handoff-header">
         <span class="handoff-model">${escapeHtml(s.model || "unknown")}</span>
@@ -2851,7 +2898,7 @@ function renderSessionHandoffs(summaries) {
         <span class="handoff-completed">${escapeHtml(s.completed_at || "")}</span>
       </div>
       <div class="handoff-prompt">${escapeHtml(s.prompt_preview || "")}</div>
-      ${s.artifacts?.length ? `<div class="handoff-artifacts">${s.artifacts.map(a => `<span class="artifact">${escapeHtml(a)}</span>`).join(" ")}</div>` : ""}
+      ${artifacts.length ? `<div class="handoff-artifacts">${artifacts.map(a => `<span class="artifact">${escapeHtml(a)}</span>`).join(" ")}</div>` : ""}
     </div>`;
   }).join("");
 }
