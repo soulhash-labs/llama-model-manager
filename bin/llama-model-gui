@@ -18,7 +18,20 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/llama-server"
 MODELS_FILE="${LLAMA_MODELS_FILE:-$CONFIG_DIR/models.tsv}"
 DEFAULTS_FILE="${LLAMA_DEFAULTS_FILE:-$CONFIG_DIR/defaults.env}"
 HELP_FILE="${LLAMA_HELP_FILE:-$CONFIG_DIR/HELP.txt}"
-TERMINAL_BIN="${TERMINAL_BIN:-$(command -v x-terminal-emulator || true)}"
+detect_terminal() {
+    if [[ -n "${TERMINAL_BIN:-}" ]]; then
+        command -v "$TERMINAL_BIN" && return 0
+    fi
+    local candidate
+    for candidate in x-terminal-emulator gnome-terminal konsole xfce4-terminal mate-terminal lxterminal alacritty kitty xterm; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            command -v "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+TERMINAL_BIN="$(detect_terminal || true)"
 
 if [[ "${LLAMA_MODEL_UI:-web}" != "zenity" ]] && [[ -x "$DEFAULT_LLAMA_MODEL_WEB_BIN" ]] && command -v python3 >/dev/null 2>&1; then
     exec "$DEFAULT_LLAMA_MODEL_WEB_BIN" "$@"
@@ -52,33 +65,52 @@ open_terminal_cmd() {
     local title="$1"
     local cmd="$2"
     local escaped_title
+    local term_base
 
     [[ -n "$TERMINAL_BIN" ]] || die "No terminal emulator found"
 
     printf -v escaped_title '%q' "$title"
-    "$TERMINAL_BIN" -e bash -lc "printf '%s\n\n' $escaped_title; $cmd; status=\$?; printf '\nExit status: %s\n' \"\$status\"; printf 'Press Enter to close...'; read -r; exit \$status"
+    term_base="$(basename "$TERMINAL_BIN")"
+    case "$term_base" in
+        gnome-terminal)
+            "$TERMINAL_BIN" -- bash -lc "printf '%s\n\n' $escaped_title; $cmd; status=\$?; printf '\nExit status: %s\n' \"\$status\"; printf 'Press Enter to close...'; read -r; exit \$status"
+            ;;
+        *)
+            "$TERMINAL_BIN" -e bash -lc "printf '%s\n\n' $escaped_title; $cmd; status=\$?; printf '\nExit status: %s\n' \"\$status\"; printf 'Press Enter to close...'; read -r; exit \$status"
+            ;;
+    esac
 }
 
 show_current() {
-    show_text "Current Model" "$("$LLAMA_MODEL_BIN" current)"
+    show_text "Current Model & Gateway" "$("$LLAMA_MODEL_BIN" status 2>/dev/null || "$LLAMA_MODEL_BIN" current)"
 }
 
 menu_status_text() {
-    local current
+    local status_out
     local alias
     local health
     local mode
+    local gw_max
 
-    current="$("$LLAMA_MODEL_BIN" current 2>/dev/null || true)"
-    alias="$(printf '%s\n' "$current" | awk -F': ' '/^alias:/ { print $2; exit }')"
-    health="$(printf '%s\n' "$current" | awk -F': ' '/^health:/ { print $2; exit }')"
-    mode="$(printf '%s\n' "$current" | awk -F': ' '/^active_mode:/ { print $2; exit }')"
+    status_out="$("$LLAMA_MODEL_BIN" status 2>/dev/null || "$LLAMA_MODEL_BIN" current 2>/dev/null || true)"
+    alias="$(printf '%s\n' "$status_out" | awk -F': ' '/^alias:/ { print $2; exit }')"
+    health="$(printf '%s\n' "$status_out" | awk -F': ' '/^health:/ { print $2; exit }')"
+    mode="$(printf '%s\n' "$status_out" | awk -F': ' '/^active_mode:/ { print $2; exit }')"
+    gw_max="$(printf '%s\n' "$status_out" | awk -F': ' '/^gateway_max_context:/ { print $2; exit }')"
 
     [[ -n "$alias" ]] || alias="stopped"
     [[ -n "$health" ]] || health="unavailable"
     [[ -n "$mode" ]] || mode="stopped"
 
-    printf 'Current model: %s\nClient mode: %s\nHealth: %s' "$alias" "$mode" "$health"
+    local summary="Model: $alias  Mode: $mode  Health: $health"
+    if [[ -n "$gw_max" ]]; then
+        local gw_safety gw_allowed gw_mode
+        gw_safety="$(printf '%s\n' "$status_out" | awk -F': ' '/^gateway_safety_margin:/ { print $2; exit }')"
+        gw_allowed="$(printf '%s\n' "$status_out" | awk -F': ' '/^gateway_allowed_prompt:/ { print $2; exit }')"
+        gw_mode="$(printf '%s\n' "$status_out" | awk -F': ' '/^gateway_overflow_mode:/ { print $2; exit }')"
+        summary="$summary"$'\n'"Budget: max=$gw_max margin=$gw_safety allowed=$gw_allowed mode=$gw_mode"
+    fi
+    printf '%s' "$summary"
 }
 
 show_list() {
@@ -97,6 +129,7 @@ show_logs() {
 
     lines="$(zenity --entry --title="Llama Logs" --text="How many log lines should be shown?" --entry-text="40")" || return 0
     [[ "$lines" =~ ^[0-9]+$ ]] || die "Log lines must be a number"
+    (( lines >= 1 && lines <= 5000 )) || die "Log lines must be between 1 and 5000"
     printf -v cmd '%q logs %q' "$LLAMA_MODEL_BIN" "$lines"
     open_terminal_cmd "Llama Server Logs" "$cmd"
 }
@@ -106,6 +139,7 @@ select_model() {
     local alias
     local path
     local extra
+    local context
     local selected
     local -a args
 
@@ -124,15 +158,16 @@ select_model() {
         --column "Alias"
         --column "Model"
         --column "Extra Args"
+        --column "Context"
     )
 
-    while IFS=$'\t' read -r alias path extra; do
+    while IFS=$'\t' read -r alias path extra context _rest; do
         [[ -n "$alias" ]] || continue
         [[ "${alias:0:1}" == "#" ]] && continue
         if [[ "$alias" == "$current_alias" ]]; then
-            args+=(TRUE "$alias" "$path" "${extra:-}")
+            args+=(TRUE "$alias" "$path" "${extra:-}" "${context:-}")
         else
-            args+=(FALSE "$alias" "$path" "${extra:-}")
+            args+=(FALSE "$alias" "$path" "${extra:-}" "${context:-}")
         fi
     done <"$MODELS_FILE"
 
@@ -179,11 +214,23 @@ restart_server() {
 }
 
 stop_server() {
-    zenity --question --title="Stop Llama Server" --text="Stop the server on port 8081?" || return 0
+    zenity --question --title="Stop Llama Server" --text="Stop the active llama.cpp server?" || return 0
 
     local cmd
     printf -v cmd '%q stop' "$LLAMA_MODEL_BIN"
     open_terminal_cmd "Stopping Llama Server" "$cmd"
+}
+
+ensure_editable_file() {
+    local path="$1"
+    mkdir -p "$(dirname "$path")"
+    if [[ ! -e "$path" ]]; then
+        if [[ "$(basename "$path")" == "models.tsv" ]]; then
+            printf '# alias\tmodel_path\textra_args\tcontext\n' >"$path"
+        else
+            : >"$path"
+        fi
+    fi
 }
 
 open_file() {
@@ -199,7 +246,21 @@ open_file() {
 }
 
 show_help() {
-    zenity --text-info --title="$APP_TITLE Help" --width=980 --height=720 --filename="$HELP_FILE"
+    if [[ -f "$HELP_FILE" ]]; then
+        zenity --text-info --title="$APP_TITLE Help" --width=980 --height=720 --filename="$HELP_FILE"
+    else
+        show_text "$APP_TITLE Help" "No help file found at:
+
+$HELP_FILE
+
+Useful commands:
+  llama-model current          — show running model, gateway, and health
+  llama-model list             — show registered model aliases
+  llama-model switch <alias>   — switch to another model
+  llama-model add <alias> <path> --context N  — register a model
+  llama-model gateway start    — start the LMM gateway
+  llama-model status           — show full status including context budget"
+    fi
 }
 
 main_menu() {
@@ -210,13 +271,13 @@ main_menu() {
         --text="$APP_BYLINE"$'\n\n'"$(menu_status_text)" \
         --column "Action" \
         --column "Description" \
-        "Current" "Show the running model and health status" \
+        "Status" "Show model, gateway context budget, and health" \
         "List" "Show registered model aliases" \
         "Switch" "Pick a model and restart the server" \
         "Client Mode" "Toggle single-client safer mode vs multi-client auto slots" \
         "Restart" "Restart the current model with the current defaults" \
         "Logs" "Open recent server logs in a terminal" \
-        "Stop" "Stop the server on port 8081" \
+        "Stop" "Stop the active llama.cpp server" \
         "Registry" "Open models.tsv for editing" \
         "Defaults" "Open defaults.env for runtime tuning" \
         "Help" "Show commands and registry format" \
@@ -226,15 +287,15 @@ main_menu() {
 while true; do
     choice="$(main_menu)" || exit 0
     case "$choice" in
-        Current) show_current ;;
+        Status) show_current ;;
         List) show_list ;;
         Switch) select_model ;;
         "Client Mode") set_client_mode ;;
         Restart) restart_server ;;
         Logs) show_logs ;;
         Stop) stop_server ;;
-        Registry) open_file "$MODELS_FILE" ;;
-        Defaults) open_file "$DEFAULTS_FILE" ;;
+        Registry) ensure_editable_file "$MODELS_FILE"; open_file "$MODELS_FILE" ;;
+        Defaults) ensure_editable_file "$DEFAULTS_FILE"; open_file "$DEFAULTS_FILE" ;;
         Help) show_help ;;
         Exit) exit 0 ;;
     esac
