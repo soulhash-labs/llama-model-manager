@@ -905,7 +905,14 @@ raw_cmd_arg_from_pid() {
     else
         cmdline="$(pid_command_line "$pid")"
         [[ -n "$cmdline" ]] || return 1
-        mapfile -d '' -t args < <(split_shell_words "$cmdline")
+        local tmp_raw
+        tmp_raw="$(mktemp)"
+        if ! split_shell_words_strict "$cmdline" >"$tmp_raw" 2>/dev/null; then
+            rm -f "$tmp_raw"
+            return 1
+        fi
+        mapfile -d '' -t args <"$tmp_raw"
+        rm -f "$tmp_raw"
     fi
 
     for ((i = 0; i < ${#args[@]}; i++)); do
@@ -940,7 +947,7 @@ llama_server_process_rows() {
         [[ "$cmdline" == *llama-server* ]] || continue
         port="$(raw_cmd_arg_from_pid "$pid" --port || true)"
         model="$(raw_cmd_arg_from_pid "$pid" -m || raw_cmd_arg_from_pid "$pid" --model || true)"
-        context="$(raw_cmd_arg_from_pid "$pid" -c || raw_cmd_arg_from_pid "$pid" --ctx-size || true)"
+        context="$(raw_cmd_arg_from_pid "$pid" -c || raw_cmd_arg_from_pid "$pid" --ctx-size || raw_cmd_arg_from_pid "$pid" --context-size || true)"
         ngl="$(raw_cmd_arg_from_pid "$pid" -ngl || raw_cmd_arg_from_pid "$pid" --n-gpu-layers || true)"
         printf 'pid=%s port=%s context=%s ngl=%s model=%s\n' \
             "$pid" "${port:-unknown}" "${context:-unknown}" "${ngl:-unknown}" "${model:-unknown}"
@@ -1223,7 +1230,7 @@ extra_mmproj_path() {
     local i
 
     [[ -n "$extra" ]] || return 1
-    mapfile -d '' -t tokens < <(split_shell_words "$extra")
+    mapfile -d '' -t tokens < <(split_shell_words_strict "$extra")
     for ((i = 0; i < ${#tokens[@]}; i++)); do
         if [[ "${tokens[i]}" == "--mmproj" ]] && (( i + 1 < ${#tokens[@]} )); then
             printf '%s\n' "${tokens[i + 1]}"
@@ -1242,7 +1249,7 @@ strip_mmproj_from_extra() {
     local quoted=""
 
     [[ -n "$extra" ]] || return 0
-    mapfile -d '' -t tokens < <(split_shell_words "$extra")
+    mapfile -d '' -t tokens < <(split_shell_words_strict "$extra")
     for ((i = 0; i < ${#tokens[@]}; i++)); do
         if [[ "${tokens[i]}" == "--mmproj" ]] && (( i + 1 < ${#tokens[@]} )); then
             ((i++))
@@ -1305,6 +1312,26 @@ split_shell_words() {
     done
 }
 
+split_shell_words_strict() {
+    local raw="$1"
+    [[ -n "$raw" ]] || return 0
+
+    if ! command_available python3; then
+        printf 'error: python3 required for strict shell-word parsing\n' >&2
+        return 2
+    fi
+
+    python3 -c '
+import shlex, sys
+try:
+    parts = shlex.split(sys.argv[1])
+except ValueError as exc:
+    print(f"error: invalid shell words: {exc}", file=sys.stderr)
+    sys.exit(2)
+sys.stdout.buffer.write(b"".join(part.encode("utf-8") + b"\0" for part in parts))
+' "$raw"
+}
+
 DEPRECATED_LLAMA_FLAGS_OLD="--chat-templateFile"
 DEPRECATED_LLAMA_FLAGS_NEW="--chat-template-file"
 
@@ -1333,13 +1360,23 @@ validate_extra_args_no_core_launch_flags() {
     local extra="${1:-}"
     local -a tokens=()
     local token
+    local tmp_strict
+    local tmp_err
 
     [[ -z "$extra" ]] && return 0
 
-    # The launcher already emits -c "$context" before extra_args.
-    # Core launch flags belong in the tsv context column or
-    # --context on llama-model add, not in extra_args.
-    mapfile -d '' -t tokens < <(split_shell_words "$extra")
+    tmp_strict="$(mktemp)"
+    tmp_err="$(mktemp)"
+    if ! split_shell_words_strict "$extra" >"$tmp_strict" 2>"$tmp_err"; then
+        local parse_error
+        parse_error="$(cat "$tmp_err" 2>/dev/null || true)"
+        rm -f "$tmp_strict" "$tmp_err"
+        die "Invalid shell quoting in extra_args.${parse_error:+ $parse_error}"
+    fi
+    rm -f "$tmp_err"
+    mapfile -d '' -t tokens <"$tmp_strict"
+    rm -f "$tmp_strict"
+
     for token in "${tokens[@]}"; do
         case "$token" in
             -c|--ctx-size|--ctx-size=*|--context-size|--context-size=*)
@@ -2974,6 +3011,13 @@ cmd_arg_from_pid() {
     raw_cmd_arg_from_pid "$pid" "$key"
 }
 
+context_arg_from_pid() {
+    local pid="$1"
+    cmd_arg_from_pid "$pid" -c 2>/dev/null \
+        || cmd_arg_from_pid "$pid" --ctx-size 2>/dev/null \
+        || cmd_arg_from_pid "$pid" --context-size 2>/dev/null
+}
+
 lookup_model() {
     local needle="$1"
     local raw_line
@@ -3388,6 +3432,12 @@ ${STARTUP_FAILURE_ACTION}"
         die "configured device ${device} expects backend ${expected_device_backend}, but selected llama-server binary uses ${SELECTED_LLAMA_SERVER_BACKEND}. Clear the device override or build a matching runtime."
     fi
 
+    # Validate quoting BEFORE any extra-arg parsing
+    validate_extra_args_no_core_launch_flags "${model_extra:-}"
+    if [[ -n "$LLAMA_SERVER_EXTRA_ARGS" ]]; then
+        validate_extra_args_no_core_launch_flags "$LLAMA_SERVER_EXTRA_ARGS"
+    fi
+
     validate_mmproj_for_model "$model_path" "$model_extra" "$force_mmproj" "$require_mmproj"
 
     # Normalize deprecated flags before launch
@@ -3395,13 +3445,11 @@ ${STARTUP_FAILURE_ACTION}"
         model_extra="$(normalize_deprecated_llama_flags "$model_extra")"
     fi
     validate_extra_args_deprecated "${model_extra:-}"
-    validate_extra_args_no_core_launch_flags "${model_extra:-}"
     if [[ -n "$model_extra" ]]; then
-        mapfile -d '' -t extra_args < <(split_shell_words "$model_extra")
+        mapfile -d '' -t extra_args < <(split_shell_words_strict "$model_extra")
     fi
     if [[ -n "$LLAMA_SERVER_EXTRA_ARGS" ]]; then
-        validate_extra_args_no_core_launch_flags "$LLAMA_SERVER_EXTRA_ARGS"
-        mapfile -d '' -t runtime_extra_args < <(split_shell_words "$LLAMA_SERVER_EXTRA_ARGS")
+        mapfile -d '' -t runtime_extra_args < <(split_shell_words_strict "$LLAMA_SERVER_EXTRA_ARGS")
     fi
 
     mkdir -p "$(dirname "$LLAMA_SERVER_LOG")"
@@ -3568,7 +3616,7 @@ ${STARTUP_FAILURE_ACTION}"
                 model_extra="$(strip_mmproj_from_extra "$model_extra")"
                 extra_args=()
                 if [[ -n "$model_extra" ]]; then
-                    mapfile -d '' -t extra_args < <(split_shell_words "$model_extra")
+                    mapfile -d '' -t extra_args < <(split_shell_words_strict "$model_extra")
                 fi
                 printf 'auto_fit: retrying without --mmproj after projector mismatch (text-only launch)\n'
                 ;;
@@ -3721,7 +3769,7 @@ show_current() {
     fi
     printf 'active_mode: %s\n' "$active_mode"
     printf 'active_parallel: %s\n' "$active_parallel"
-    printf 'active_context: %s\n' "$(cmd_arg_from_pid "$pid" -c || printf unknown)"
+    printf 'active_context: %s\n' "$(context_arg_from_pid "$pid" 2>/dev/null || printf unknown)"
     printf 'active_ngl: %s\n' "$active_ngl"
     printf 'requested_ngl: %s\n' "$requested_ngl"
     printf 'effective_gpu_layers: %s\n' "$active_ngl"
@@ -3734,25 +3782,7 @@ show_current() {
         printf 'auto_fit_override_reason: %s\n' "$auto_fit_override_reason"
     fi
 
-    # Gateway context-budget status
-    local gateway_url="http://${LLAMA_MODEL_GATEWAY_HOST}:${LLAMA_MODEL_GATEWAY_PORT}/healthz"
-    local budget_json
-    budget_json="$(curl -fsS --max-time 2 "$gateway_url" 2>/dev/null || true)"
-    if [[ -n "$budget_json" ]]; then
-        local max_tok safety_margin allowed mode soft_limit
-        max_tok="$(printf '%s' "$budget_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('context_budget',{}).get('max_tokens',''))" 2>/dev/null || true)"
-        safety_margin="$(printf '%s' "$budget_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('context_budget',{}).get('safety_margin',''))" 2>/dev/null || true)"
-        allowed="$(printf '%s' "$budget_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('context_budget',{}).get('allowed_prompt_tokens',''))" 2>/dev/null || true)"
-        mode="$(printf '%s' "$budget_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('context_budget',{}).get('overflow_mode',''))" 2>/dev/null || true)"
-        soft_limit="$(printf '%s' "$budget_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('context_budget',{}).get('agent_soft_limit',''))" 2>/dev/null || true)"
-        if [[ -n "$max_tok" ]]; then
-            printf 'gateway_max_context: %s\n' "$max_tok"
-            printf 'gateway_safety_margin: %s\n' "${safety_margin:-unknown}"
-            printf 'gateway_allowed_prompt: %s\n' "${allowed:-unknown}"
-            printf 'gateway_overflow_mode: %s\n' "${mode:-unknown}"
-            printf 'gateway_agent_soft_limit: %s\n' "${soft_limit:-unknown}"
-        fi
-    fi
+    print_gateway_context_budget
 
     if curl -fsS "$url" >/dev/null 2>&1; then
         printf 'health: ok (%s)\n' "$url"
@@ -4666,6 +4696,7 @@ add_model() {
     notes="${fields[9]}"
 
     validate_extra_args_deprecated "$extra"
+    validate_extra_args_no_core_launch_flags "$extra"
     validate_mmproj_for_model "$model_path" "$extra" "$ADD_FORCE_MMPROJ" "0"
 
     ensure_models_file
@@ -5128,7 +5159,7 @@ resolve_sync_target() {
                 alias="custom"
                 source="running-api"
             fi
-            context="$(cmd_arg_from_pid "$pid" -c || true)"
+            context="$(context_arg_from_pid "$pid" || true)"
         elif read_state_file && [[ -n "${CURRENT_MODEL:-}" ]]; then
             model_path="$CURRENT_MODEL"
             alias="${CURRENT_ALIAS:-custom}"
@@ -5568,6 +5599,7 @@ sync_claude() {
     printf 'settings_exists_before: %s\n' "$settings_exists_before"
     printf 'claude_auth: %s\n' "$([[ -n "$auth_token" ]] && printf configured || printf unchanged)"
     printf 'claude_api_key: %s\n' "$([[ -n "$api_key" ]] && printf configured || printf none)"
+    printf 'claude_api_key_source: %s\n' "$api_key_source"
 }
 
 lmm_gateway_script() {
@@ -5764,6 +5796,29 @@ lmm_gateway_stop() {
     printf 'stopped LMM %s gateway on port %s (pid %s may still be running)\n' "$gateway_mode" "$LLAMA_MODEL_GATEWAY_PORT" "$pid"
 }
 
+print_gateway_context_budget() {
+    local url="http://${LLAMA_MODEL_GATEWAY_HOST}:${LLAMA_MODEL_GATEWAY_PORT}/healthz"
+    local budget_json
+    budget_json="$(curl -fsS --max-time 2 "$url" 2>/dev/null || true)"
+    [[ -n "$budget_json" ]] || return 0
+
+    python3 - <<'PY' "$budget_json"
+import json, sys
+try:
+    payload = json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(0)
+budget = payload.get("context_budget") or {}
+if not isinstance(budget, dict) or not budget.get("max_tokens"):
+    raise SystemExit(0)
+print(f"gateway_max_context: {budget.get('max_tokens', '')}")
+print(f"gateway_safety_margin: {budget.get('safety_margin', 'unknown')}")
+print(f"gateway_allowed_prompt: {budget.get('allowed_prompt_tokens', 'unknown')}")
+print(f"gateway_overflow_mode: {budget.get('overflow_mode', 'unknown')}")
+print(f"gateway_agent_soft_limit: {budget.get('agent_soft_limit', 'unknown')}")
+PY
+}
+
 lmm_gateway_status() {
     local gateway_mode="${1:-full}"
     local running="no"
@@ -5782,6 +5837,7 @@ lmm_gateway_status() {
     printf 'backend_api_base: %s\n' "$(upstream_api_base)"
     printf 'mode_default: %s\n' "$(normalize_harness_mode "$LLAMA_MODEL_HARNESS_MODE")"
     printf 'log: %s\n' "$LLAMA_MODEL_GATEWAY_LOG"
+    print_gateway_context_budget
 }
 
 lmm_gateway_logs() {
