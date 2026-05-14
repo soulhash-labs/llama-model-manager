@@ -56,3 +56,77 @@
 5. **REPAIR (one shot)**: If your previous output contained a malformed tool call, re-emit ONLY the corrected structured invocation. Do not explain, add markdown, or add prose. If the repair also fails, the system will hard-fail.
 6. **TOOL FAILURE**: If a tool returns an error, fix the root cause. Never retry with identical args. Never switch to printing pseudo-calls.
 7. **LANE-SPECIFIC (local GlyphOS/llama.cpp)**: Zero tolerance for pseudo-calls. If a tool is needed, invoke it directly in structured form.
+
+## Context Budget / File Reading Rules
+
+### Why this matters
+
+The local llama.cpp backend has a context window (`n_ctx`, typically 65536 tokens).
+Requesting inference with more tokens than `n_ctx` causes the backend to return
+HTTP 400, wasting the round-trip.  The LMM gateway now pre-checks the estimated
+token count before forwarding and rejects oversized requests with a clear
+message.
+
+### File reading rules (all agents)
+
+Do not read whole files by default.
+
+1. Use `rg`, `grep`, or symbol search to locate relevant functions/classes.
+2. Read only the relevant function, class, or ~120 lines around the match.
+3. If more context is needed, request another narrow range.
+4. Avoid generated files, lockfiles, build artifacts, large logs, `.old` files,
+   cache files, and vendored files unless explicitly required.
+5. When a file has already been read, do not reread it fully.  Use targeted
+   search or refer to the previous summary.
+6. Keep total working context below 60k tokens unless explicitly told otherwise.
+7. If context is getting large, compact findings into a short summary before
+   continuing.
+8. Only read an entire file if you have enough context available and are
+   explicitly requested to do so.
+
+### Gateway context budget
+
+The gateway respects these environment variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LMM_MAX_CONTEXT_TOKENS` | 65536 | Backend context window (`n_ctx`) |
+| `LMM_CONTEXT_SAFETY_MARGIN` | 2048 | Headroom subtracted from max |
+| `LMM_CONTEXT_OVERFLOW_MODE` | reject | `reject` \| `compact` \| `truncate` |
+| `LMM_AGENT_SOFT_CONTEXT_LIMIT` | 60000 | Soft target for agent self-regulation |
+
+When a request exceeds `max_tokens - safety_margin`, the gateway returns a
+structured 400 error with the estimated count, budget, and actionable guidance.
+
+### Increasing n_ctx on llama.cpp
+
+The `n_ctx` value is set when launching `llama-server`.  The model entry in
+`~/.config/llama-server/models.tsv` has a dedicated context column (the 4th
+TSV column, also settable via `llama-model add --context N`).  The launcher
+always emits `-c "$context"` before any `extra_args`, so context flags in
+`extra_args` produce duplicate flags and stale state file entries.
+
+Use the context column or `--context` flag instead of `extra_args`:
+
+```bash
+llama-model add my-model /path/to/model.gguf --context 81920
+```
+
+or edit the TSV context column directly:
+
+```
+my-model	/path/to/model.gguf		81920	999	128	16	1
+```
+
+The launcher validates and rejects `--ctx-size`, `--context-size`, and
+`-c` inside `extra_args` at startup.
+
+If no explicit context is set, the llama.cpp binary uses its compiled default
+(usually the model's `context_length` metadata field from the GGUF header).
+The `llama-model` launcher defaults `LLAMA_SERVER_CONTEXT` to 128000; set
+this env var in `~/.config/llama-server/defaults.env` to override.
+
+**Warning**: higher `n_ctx` increases KV-cache memory and attention
+computation.  On a system with 12 GB VRAM and 48 GB RAM, increasing from 65536
+to 81920 is usually safe.  Going beyond 98304 may cause out-of-memory errors
+or significant slowdown.
