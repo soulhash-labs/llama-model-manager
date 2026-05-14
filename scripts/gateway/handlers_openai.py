@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterator, Mapping
 from http.server import BaseHTTPRequestHandler
 from typing import Any, TypedDict, cast
 
+from lmm_config import load_lmm_config_from_env
 from lmm_errors import GatewayError, InvalidRequestError
 from lmm_types import ExitResult, RunStatus
 
@@ -23,6 +24,43 @@ RoutePromptStreamFn = Callable[..., tuple[RoutedResult, Headers, Iterator[str]]]
 def _log_unexpected_handler_error(exc: BaseException) -> None:
     sys.stderr.write(f"error: unexpected OpenAI gateway handler failure: {exc}\n")
     sys.stderr.write(traceback.format_exc())
+
+
+def _estimate_tokens(text: str) -> int:
+    # TODO: replace chars/4 heuristic with model tokenizer or
+    # llama.cpp tokenize endpoint for accurate per-model counts.
+    # Code-heavy, Unicode, or structured payloads deviate from
+    # the ~4-char-per-token average.
+    return max(1, len(text) // 4) if text.strip() else 0
+
+
+def _check_context_budget(prompt: str) -> None:
+    """Raise InvalidRequestError if estimated tokens exceed configured budget."""
+    budget = load_lmm_config_from_env().context_budget
+    estimated = _estimate_tokens(prompt)
+    allowed = budget.max_tokens - budget.safety_margin
+    if estimated <= allowed:
+        return
+
+    # If compact/truncate mode is selected but not yet implemented,
+    # fall back to reject with an explicit warning.
+    if budget.overflow_mode in ("compact", "truncate"):
+        sys.stderr.write(
+            f"warning: LMM_CONTEXT_OVERFLOW_MODE={budget.overflow_mode} is not yet "
+            f"implemented; falling back to reject.\n"
+        )
+
+    sys.stderr.write(
+        f"context budget exceeded: ~{estimated} estimated tokens, "
+        f"{budget.max_tokens} max, {allowed} allowed "
+        f"(mode={budget.overflow_mode})\n"
+    )
+    raise InvalidRequestError(
+        f"Context too large: ~{estimated} estimated tokens vs {budget.max_tokens} max context. "
+        f"Allowed budget with {budget.safety_margin}-token safety margin: {allowed}. "
+        "Use rg/search first, read smaller file ranges (120 lines around match), "
+        "or compact current findings into a summary before continuing."
+    )
 
 
 class OpenAIHandlerAPI(TypedDict):
@@ -139,6 +177,8 @@ def handle_chat_completions(handler: BaseHTTPRequestHandler, api: Mapping[str, A
         if not prompt.strip():
             raise InvalidRequestError("messages must contain text content")
 
+        _check_context_budget(prompt)
+
         gateway_mode = str(getattr(handler.server, "gateway_mode", "full"))
         _, pipeline = prepare_gateway_pipeline(payload, prompt, model=model, stream=stream, gateway_mode=gateway_mode)
         record["timing"].update(pipeline.get("timing", {}))
@@ -224,7 +264,9 @@ def handle_chat_completions(handler: BaseHTTPRequestHandler, api: Mapping[str, A
                     "completion_chars": len(text),
                     "completed_at": current_iso_timestamp(),
                     "stream_tool_call_detected": bool(tool_call_info),
-                    "stream_tool_call_name": str(tool_call_info.get("name", "")) if isinstance(tool_call_info, dict) else "",
+                    "stream_tool_call_name": str(tool_call_info.get("name", ""))
+                    if isinstance(tool_call_info, dict)
+                    else "",
                     "tool_invocation_mode": tool_report["tool_invocation_mode"],
                     "tool_name": tool_report["tool_name"],
                     "lane": "4011" if record.get("gateway_mode") == "fast" else "4010",

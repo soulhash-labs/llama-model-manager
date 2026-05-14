@@ -636,6 +636,7 @@ def completion_payload(
 class LMMOpenAIGateway(_GatewayRuntime):
     def health(self) -> dict[str, Any]:
         fallback_order, preferred_cloud = _cloud_routing_config()
+        budget = load_lmm_config_from_env().context_budget
         return {
             "ok": True,
             "service": "lmm-glyphos-openai-gateway",
@@ -644,6 +645,13 @@ class LMMOpenAIGateway(_GatewayRuntime):
                 "fallback_order": fallback_order,
             },
             "cloud_providers": _get_cloud_provider_status(),
+            "context_budget": {
+                "max_tokens": budget.max_tokens,
+                "safety_margin": budget.safety_margin,
+                "allowed_prompt_tokens": budget.max_tokens - budget.safety_margin,
+                "overflow_mode": budget.overflow_mode,
+                "agent_soft_limit": budget.soft_limit,
+            },
         }
 
     def telemetry(self) -> dict[str, Any]:
