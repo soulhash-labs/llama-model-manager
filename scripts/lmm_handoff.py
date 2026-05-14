@@ -10,6 +10,21 @@ from dataclasses import dataclass
 from typing import Any
 
 
+def _coerce_optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_str_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
 @dataclass
 class HandoffSummary:
     """Human-readable summary of a completed long-running session."""
@@ -32,14 +47,13 @@ class HandoffSummary:
         prompt = str(record.get("prompt", ""))
         prompt_preview = prompt[:200] + ("…" if len(prompt) > 200 else "")
 
-        duration_ms = record.get("duration_ms") or record.get("latency_ms")
-        if duration_ms is not None:
-            duration_human = _format_duration(int(duration_ms))
-        else:
-            duration_human = ""
+        duration_ms = _coerce_optional_int(record.get("duration_ms"))
+        if duration_ms is None:
+            duration_ms = _coerce_optional_int(record.get("latency_ms"))
+        duration_human = _format_duration(duration_ms) if duration_ms is not None else ""
 
-        artifacts = record.get("artifacts")
-        if not isinstance(artifacts, list):
+        artifacts = _coerce_str_list(record.get("artifacts"))
+        if not artifacts:
             artifacts = _extract_artifacts(record)
 
         exit_result = record.get("exit_result") or ""

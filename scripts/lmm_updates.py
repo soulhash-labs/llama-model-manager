@@ -56,7 +56,7 @@ class UpdateStateStore(_FileLockedJsonStore):
         return {
             "current_version": str(raw.get("current_version", "")),
             "latest_version": str(raw.get("latest_version", "")),
-            "update_available": bool(raw.get("update_available", False)),
+            "update_available": _coerce_bool(raw.get("update_available", False)),
             "release_url": str(raw.get("release_url", "")),
             "release_notes_preview": str(raw.get("release_notes_preview", "")),
             "checked_at": str(raw.get("checked_at", "")),
@@ -73,6 +73,26 @@ class UpdateStateStore(_FileLockedJsonStore):
     def result_for(self, component: str) -> dict[str, object]:
         state = self.read_state()
         return self._normalize_result(state.get(component))
+
+
+def _coerce_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "enabled", "y"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled", "n"}:
+        return False
+    return default
+
+
+def _coerce_positive_int(value: object, default: int = 10) -> int:
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return default
 
 
 def _utc_timestamp() -> str:
@@ -114,7 +134,7 @@ class UpdateChecker:
         self.current_lmm_version = str(current_lmm_version).strip() or "v0.0.0"
         self.lmm_repo = str(lmm_repo or "").strip() or "soulhash-labs/llama-model-manager"
         self.llamacpp_repo = str(llamacpp_repo or "").strip() or "ggml-org/llama.cpp"
-        self.timeout = max(1, int(timeout))
+        self.timeout = _coerce_positive_int(timeout, default=10)
         self.state_store = UpdateStateStore(state_file)
 
     def _fetch_latest_release(self, owner: str, repo: str) -> dict[str, object] | None:
@@ -149,7 +169,7 @@ class UpdateChecker:
         return UpdateCheckResult(
             current_version=str(cached.get("current_version", "") or ""),
             latest_version=cached.get("latest_version", "") or "",
-            update_available=bool(cached.get("update_available", False)),
+            update_available=_coerce_bool(cached.get("update_available", False)),
             release_url=str(cached.get("release_url", "") or ""),
             release_notes_preview=str(cached.get("release_notes_preview", "") or ""),
             checked_at=str(cached.get("checked_at", "") or _utc_timestamp()),
@@ -163,7 +183,7 @@ class UpdateChecker:
         )
 
         owner, _, repo = repo_full_name.partition("/")
-        if not owner or not repo:
+        if not owner or not repo or "/" in repo:
             return UpdateCheckResult(
                 current_version=current_version,
                 latest_version=cached.latest_version,
@@ -178,7 +198,7 @@ class UpdateChecker:
             return UpdateCheckResult(
                 current_version=current_version,
                 latest_version=cached.latest_version,
-                update_available=bool(cached_update_available),
+                update_available=_coerce_bool(cached_update_available),
                 release_url=cached.release_url,
                 release_notes_preview=cached.release_notes_preview,
                 checked_at=cached.checked_at,
@@ -191,7 +211,7 @@ class UpdateChecker:
             return UpdateCheckResult(
                 current_version=current_version,
                 latest_version=cached.latest_version,
-                update_available=bool(cached_update_available),
+                update_available=_coerce_bool(cached_update_available),
                 release_url=cached.release_url,
                 release_notes_preview=cached.release_notes_preview,
                 checked_at=cached.checked_at,
@@ -200,7 +220,7 @@ class UpdateChecker:
         result = UpdateCheckResult(
             current_version=current_version,
             latest_version=latest_version,
-            update_available=self._is_newer(current_version, latest_version),
+            update_available=_coerce_bool(self._is_newer(current_version, latest_version)),
             release_url=release_url,
             release_notes_preview=_normalize_preview(preview),
             checked_at=_utc_timestamp(),
