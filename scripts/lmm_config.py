@@ -143,6 +143,52 @@ class GlyphEncodingConfig:
 
 
 @dataclass(frozen=True)
+class ContextBudgetConfig:
+    """Context overflow prevention for the local gateway.
+
+    Before forwarding a request to the backend (llama.cpp /chat/completions),
+    the gateway estimates the prompt token count and compares it against the
+    configured budget (``max_tokens`` minus ``safety_margin``).  If the
+    estimate exceeds the budget the action depends on ``overflow_mode``:
+
+    * ``reject`` — return a clear 400 error to the caller (safest).
+    * ``compact`` — compress older/large context.  Not yet implemented.
+    * ``truncate`` — silently drop oldest context.  Last resort only.
+    """
+
+    max_tokens: int = 65536
+    safety_margin: int = 2048
+    overflow_mode: str = "reject"
+    soft_limit: int = 60000
+
+    def __post_init__(self) -> None:
+        if self.max_tokens < 1024:
+            raise ConfigurationError(
+                "LMM_MAX_CONTEXT_TOKENS must be >= 1024", field="max_tokens", value=self.max_tokens
+            )
+        if self.safety_margin < 0:
+            raise ConfigurationError(
+                "LMM_CONTEXT_SAFETY_MARGIN must be >= 0", field="safety_margin", value=self.safety_margin
+            )
+        if self.safety_margin >= self.max_tokens:
+            raise ConfigurationError(
+                "LMM_CONTEXT_SAFETY_MARGIN must be less than LMM_MAX_CONTEXT_TOKENS",
+                field="safety_margin",
+                value=self.safety_margin,
+            )
+        if self.overflow_mode not in {"reject", "compact", "truncate"}:
+            raise ConfigurationError(
+                "LMM_CONTEXT_OVERFLOW_MODE must be reject, compact, or truncate",
+                field="overflow_mode",
+                value=self.overflow_mode,
+            )
+        if self.soft_limit < 1024:
+            raise ConfigurationError(
+                "LMM_AGENT_SOFT_CONTEXT_LIMIT must be >= 1024", field="soft_limit", value=self.soft_limit
+            )
+
+
+@dataclass(frozen=True)
 class UpdateWatcherConfig:
     enabled: bool = False
     check_interval_hours: int = 12
@@ -172,6 +218,7 @@ class LMMConfig:
     context: ContextConfig
     glyph_encoding: GlyphEncodingConfig
     update_watcher: UpdateWatcherConfig
+    context_budget: ContextBudgetConfig
 
 
 def default_state_file() -> Path:
@@ -224,9 +271,16 @@ def load_lmm_config_from_env() -> LMMConfig:
         timeout_seconds=_int_env("LMM_UPDATE_TIMEOUT_SECONDS", 5, minimum=1, maximum=30),
         state_file=Path(_env("LMM_UPDATE_STATE_FILE", str(default_update_state_file()))).expanduser(),
     )
+    context_budget = ContextBudgetConfig(
+        max_tokens=_int_env("LMM_MAX_CONTEXT_TOKENS", 65536, minimum=1024),
+        safety_margin=_int_env("LMM_CONTEXT_SAFETY_MARGIN", 2048, minimum=0),
+        overflow_mode=_env("LMM_CONTEXT_OVERFLOW_MODE", "reject"),
+        soft_limit=_int_env("LMM_AGENT_SOFT_CONTEXT_LIMIT", 60000, minimum=1024),
+    )
     return LMMConfig(
         gateway=gateway,
         context=context,
         glyph_encoding=glyph_encoding,
         update_watcher=update_watcher,
+        context_budget=context_budget,
     )
