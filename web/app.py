@@ -124,6 +124,15 @@ def env_int(name: str, fallback: int) -> int:
         return fallback
 
 
+def _is_loopback_bind(host: str) -> bool:
+    if host in {"127.0.0.1", "::1", "localhost"}:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def parse_api_token() -> str:
     return os.environ.get("LLAMA_MODEL_WEB_API_TOKEN", "").strip()
 
@@ -257,6 +266,7 @@ API_POST_PAYLOAD_SCHEMAS: dict[str, dict[str, Any]] = {
     "/api/downloads/delete-orphans": {
         "allowed": {"paths"},
         "list_fields": {"paths"},
+        "required": {"paths"},
     },
     "/api/downloads/recover": {
         "allowed": set(),
@@ -3632,6 +3642,8 @@ class AppHandler(BaseHTTPRequestHandler):
         for field in int_fields:
             if field not in payload:
                 continue
+            if isinstance(payload[field], bool):
+                raise ValidationError("invalid_field_type", f"Field '{field}' must be an integer")
             try:
                 payload[field] = int(payload[field])
             except (TypeError, ValueError) as exc:
@@ -3974,6 +3986,19 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument("--demo", action="store_true", help="Serve sanitized demo data for screenshots and public docs")
     args = parser.parse_args(argv)
+
+    if (
+        not _is_loopback_bind(args.host)
+        and not parse_api_token()
+        and not parse_allowed_hosts()
+        and os.environ.get("LLAMA_MODEL_WEB_ALLOW_UNPROTECTED_REMOTE", "").strip().lower() not in {"1", "true", "yes"}
+    ):
+        print(
+            f"Refusing to bind dashboard API on {args.host} without "
+            "LLAMA_MODEL_WEB_API_TOKEN or LLAMA_MODEL_WEB_ALLOWED_HOSTS.",
+            file=sys.stderr,
+        )
+        return 1
 
     web_root = Path(__file__).resolve().parent
     manager = Manager(web_root, demo=args.demo)
