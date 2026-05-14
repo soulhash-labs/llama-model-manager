@@ -141,6 +141,82 @@ class Phase0ContractTests(unittest.TestCase):
                 config_module.load_lmm_config_from_env()
         self.assertIn("configuration", raised.exception.__class__.__name__.lower())
 
+    def test_lmm_config_rejects_context_budget_safety_margin_exceeds_max(self) -> None:
+        config_module = self.load_script_module("llama_model_manager_config_budget_bad", LMM_CONFIG_PATH)
+        with mock.patch.dict(
+            os.environ,
+            {
+                "LMM_MAX_CONTEXT_TOKENS": "65536",
+                "LMM_CONTEXT_SAFETY_MARGIN": "70000",
+            },
+            clear=False,
+        ):
+            with self.assertRaises(Exception) as raised:
+                config_module.load_lmm_config_from_env()
+        self.assertIn("configuration", raised.exception.__class__.__name__.lower())
+        self.assertIn("must be less than", str(raised.exception).lower())
+
+    def test_lmm_config_rejects_context_budget_max_tokens_below_minimum(self) -> None:
+        config_module = self.load_script_module("llama_model_manager_config_budget_min", LMM_CONFIG_PATH)
+        with mock.patch.dict(
+            os.environ,
+            {"LMM_MAX_CONTEXT_TOKENS": "500"},
+            clear=False,
+        ):
+            with self.assertRaises(Exception) as raised:
+                config_module.load_lmm_config_from_env()
+        self.assertIn("configuration", raised.exception.__class__.__name__.lower())
+        self.assertIn("1024", str(raised.exception))
+
+    def test_lmm_config_rejects_context_budget_invalid_overflow_mode(self) -> None:
+        config_module = self.load_script_module("llama_model_manager_config_budget_mode", LMM_CONFIG_PATH)
+        with mock.patch.dict(
+            os.environ,
+            {"LMM_CONTEXT_OVERFLOW_MODE": "silent_drop"},
+            clear=False,
+        ):
+            with self.assertRaises(Exception) as raised:
+                config_module.load_lmm_config_from_env()
+        self.assertIn("configuration", raised.exception.__class__.__name__.lower())
+        self.assertIn("overflow_mode", str(raised.exception).lower())
+
+    def test_gateway_compact_mode_falls_back_to_reject(self) -> None:
+        """compact overflow mode is not implemented; gateway should reject with 400."""
+        gateway = self.load_gateway_module()
+
+        long_text = "x" * 20000  # ~5000 estimated tokens
+        with mock.patch.dict(
+            os.environ,
+            {
+                "LMM_MAX_CONTEXT_TOKENS": "2500",
+                "LMM_CONTEXT_SAFETY_MARGIN": "100",
+                "LMM_CONTEXT_OVERFLOW_MODE": "compact",
+            },
+            clear=False,
+        ):
+            stderr = io.StringIO()
+            with mock.patch("sys.stderr", stderr):
+                server = self.start_gateway_server(gateway_module=gateway)
+                payload = {
+                    "model": "test",
+                    "messages": [{"role": "user", "content": long_text}],
+                }
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json", "User-Agent": "phase0-test"},
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=5):
+                        pass
+                    self.fail("expected HTTP 400")
+                except error.HTTPError as exc:
+                    self.assertEqual(exc.code, 400)
+        # Fallback warning logged
+        self.assertIn("falling back to reject", stderr.getvalue())
+        self.assertIn("compact", stderr.getvalue())
+
     def test_lmm_error_payloads_are_machine_readable(self) -> None:
         errors_module = self.load_script_module("llama_model_manager_errors", LMM_ERRORS_PATH)
         exc = errors_module.ProviderTimeoutError("llama.cpp", 1800)
@@ -3113,6 +3189,84 @@ class Phase0ContractTests(unittest.TestCase):
         killpg.assert_called_once_with(proc.pid, gateway.signal.SIGKILL)
         self.assertEqual(proc.communicate_calls, 2)
 
+    def test_gateway_rejects_context_overflow(self) -> None:
+        """Request with prompt > n_ctx - safety_margin returns 400 with guidance."""
+        gateway = self.load_gateway_module()
+
+        def fake_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str]]:
+            return {
+                "text": "should not be reached",
+                "target": "llamacpp",
+                "reason_code": "default_local",
+                "reason": "should not be reached",
+                "latency_ms": 0,
+            }, {}
+
+        long_text = "hello gateway " * 2000  # ~26k chars → ~6500 "tokens"
+        with mock.patch.dict(
+            os.environ,
+            {"LMM_MAX_CONTEXT_TOKENS": "2500", "LMM_CONTEXT_SAFETY_MARGIN": "100"},
+            clear=False,
+        ):
+            with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+                server = self.start_gateway_server(gateway_module=gateway)
+                payload = {
+                    "model": "test",
+                    "messages": [{"role": "user", "content": long_text}],
+                }
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json", "User-Agent": "phase0-test"},
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as response:
+                        json.loads(response.read().decode("utf-8"))
+                    self.fail("expected HTTP 400 for context overflow")
+                except error.HTTPError as exc:
+                    self.assertEqual(exc.code, 400)
+                    err_body = json.loads(exc.read().decode("utf-8"))
+                    self.assertIn("Context too large", err_body.get("error", {}).get("message", ""))
+
+    def test_gateway_allows_context_under_budget(self) -> None:
+        """Short prompt under budget routes normally."""
+        gateway = self.load_gateway_module()
+
+        def fake_route(
+            prompt: str, model: str, max_tokens: int, temperature: float
+        ) -> tuple[dict[str, object], dict[str, str]]:
+            return {
+                "text": "routed ok",
+                "target": "llamacpp",
+                "reason_code": "default_local",
+                "reason": "default - use local llama.cpp",
+                "latency_ms": 7,
+            }, {}
+
+        with mock.patch.dict(
+            os.environ,
+            {"LMM_MAX_CONTEXT_TOKENS": "65536", "LMM_CONTEXT_SAFETY_MARGIN": "2048"},
+            clear=False,
+        ):
+            with mock.patch.object(gateway, "route_prompt", side_effect=fake_route):
+                server = self.start_gateway_server(gateway_module=gateway)
+                payload = {
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "short prompt"}],
+                }
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json", "User-Agent": "phase0-test"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(body["choices"][0]["message"]["content"], "routed ok")
+
     def test_gateway_context_mcp_command_result_is_used(self) -> None:
         captured: dict[str, object] = {}
 
@@ -3671,8 +3825,7 @@ while True:
 
     def test_gateway_anthropic_stream_records_pseudo_tool_repair(self) -> None:
         tool_text = (
-            'tool_use: {"type":"tool_use","id":"toolu_lookup_1","name":"lookup_ticket",'
-            '"input":{"ticket_id":"OPS-7"}}'
+            'tool_use: {"type":"tool_use","id":"toolu_lookup_1","name":"lookup_ticket","input":{"ticket_id":"OPS-7"}}'
         )
 
         def fake_stream_route(
@@ -6432,7 +6585,7 @@ while True:
         class TimeoutStreamResponse:
             status = 200
 
-            def __enter__(self) -> "TimeoutStreamResponse":
+            def __enter__(self) -> TimeoutStreamResponse:
                 return self
 
             def __exit__(self, *_args: object) -> None:
@@ -6452,7 +6605,7 @@ while True:
         class MalformedJsonResponse:
             status = 200
 
-            def __enter__(self) -> "MalformedJsonResponse":
+            def __enter__(self) -> MalformedJsonResponse:
                 return self
 
             def __exit__(self, *_args: object) -> None:
