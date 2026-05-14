@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import fcntl
 import json
-import os
 import sys
+import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -28,6 +29,7 @@ class _FileLockedJsonStore:
 
     def __init__(self, path: Path) -> None:
         self.path = path.expanduser()
+        self._thread_lock = threading.RLock()
 
     def _read_state(self, default_state: dict[str, Any]) -> dict[str, Any]:
         if not self.path.exists():
@@ -47,28 +49,35 @@ class _FileLockedJsonStore:
 
     def _write_state(self, payload: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        temp = self.path.with_name(f".{self.path.name}.tmp-{os.getpid()}")
-        temp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=str(self.path.parent),
+            prefix=f".{self.path.name}.tmp-",
+            delete=False,
+        ) as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+            temp = Path(handle.name)
         temp.replace(self.path)
 
     @contextmanager
     def _lock(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self.path.with_name(f".{self.path.name}.lock")
-        with lock_path.open("a", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        with self._thread_lock:
+            with lock_path.open("a", encoding="utf-8") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 class StorageAdapter(Protocol):
-    def read_state(self) -> dict[str, Any]:
-        ...
+    def read_state(self) -> dict[str, Any]: ...
 
-    def append_event(self, record: dict[str, Any]) -> dict[str, Any]:
-        ...
+    def append_event(self, record: dict[str, Any]) -> dict[str, Any]: ...
 
 
 class JsonGatewayTelemetryStore(_FileLockedJsonStore):
@@ -103,7 +112,7 @@ class JsonGatewayTelemetryStore(_FileLockedJsonStore):
                     counter_key = f"{key}:{value}"
                     counters[counter_key] = int(counters.get(counter_key, 0)) + 1
                 recent.insert(0, record)
-            del recent[self.recent_limit:]
+            del recent[self.recent_limit :]
 
             state["counters"] = counters
             state["recent_requests"] = recent
@@ -137,7 +146,7 @@ class JsonRunRecordStore(_FileLockedJsonStore):
                 records[0] = record
             else:
                 records.insert(0, record)
-            del records[self.recent_limit:]
+            del records[self.recent_limit :]
 
             state["schema_version"] = 1
             state["records"] = records

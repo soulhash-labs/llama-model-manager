@@ -67,6 +67,17 @@ def _is_timeout_error(exc: BaseException) -> bool:
     return isinstance(reason, socket.timeout) or isinstance(reason, TimeoutError)
 
 
+def _error_message(payload: dict[str, Any], status: int) -> str:
+    error = payload.get("error")
+    if isinstance(error, dict):
+        msg = error.get("message")
+        return str(msg) if msg else json.dumps(error, sort_keys=True)
+    if isinstance(error, str):
+        return error
+    msg = payload.get("message")
+    return str(msg) if msg else f"HTTP {status}"
+
+
 def _sse_content(line: str) -> str | None:
     stripped = line.strip()
     if not stripped or stripped.startswith(":"):
@@ -88,12 +99,20 @@ def _sse_content(line: str) -> str | None:
     if not isinstance(choices, list) or not choices:
         return None
 
-    delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
-    if not isinstance(delta, dict):
+    choice = choices[0] if isinstance(choices[0], dict) else None
+    if not isinstance(choice, dict):
         return None
 
-    content = delta.get("content")
-    return content if isinstance(content, str) else None
+    delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+    if isinstance(delta.get("content"), str):
+        return delta["content"]
+
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    if isinstance(message.get("content"), str):
+        return message["content"]
+
+    text = choice.get("text")
+    return text if isinstance(text, str) else None
 
 
 class LlamaCppProvider:
@@ -164,15 +183,13 @@ class LlamaCppProvider:
             if _is_timeout_error(exc):
                 raise ProviderTimeoutError(self.name, self.timeout) from exc
             raise ProviderError(str(exc), provider=self.name) from exc
-        except (socket.timeout, TimeoutError) as exc:
+        except TimeoutError as exc:
             raise ProviderTimeoutError(self.name, self.timeout) from exc
         except json.JSONDecodeError as exc:
             raise ProviderError(f"generate response JSON malformed: {exc.msg}", provider=self.name) from exc
 
         if status != 200:
-            message = response if isinstance(response, dict) else {}
-            if isinstance(message, dict):
-                message = message.get("error") or message.get("message") or f"HTTP {status}"
+            message = _error_message(response, status) if isinstance(response, dict) else f"HTTP {status}"
             raise ProviderError(f"generate failed ({status}): {message}", provider=self.name, status=status)
 
         choices = response.get("choices") if isinstance(response, dict) else None
@@ -237,7 +254,7 @@ class LlamaCppProvider:
             if _is_timeout_error(exc):
                 raise ProviderTimeoutError(self.name, self.timeout) from exc
             raise ProviderError(str(exc), provider=self.name) from exc
-        except (socket.timeout, TimeoutError) as exc:
+        except TimeoutError as exc:
             raise ProviderTimeoutError(self.name, self.timeout) from exc
 
 

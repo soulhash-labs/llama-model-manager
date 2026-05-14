@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -58,19 +58,25 @@ class Receipt:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Receipt:
+        def _safe_int(value: Any, default: int = 0) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
         return cls(
-            version=int(data.get("version", 1)),
+            version=_safe_int(data.get("version", 1)),
             run_id=str(data.get("run_id", "")),
             route_target=str(data.get("route_target", "")),
             route_reason_code=str(data.get("route_reason_code", "")),
             model=str(data.get("model", "")),
             harness=str(data.get("harness", "python")),
             status=str(data.get("status", "success")),
-            status_code=int(data.get("status_code", 200)),
+            status_code=_safe_int(data.get("status_code", 200)),
             request_digest=str(data.get("request_digest", "")),
-            response_chars=int(data.get("response_chars", 0)),
+            response_chars=_safe_int(data.get("response_chars", 0)),
             response_digest=str(data.get("response_digest", "")),
-            duration_ms=int(data.get("duration_ms", 0)),
+            duration_ms=_safe_int(data.get("duration_ms", 0)),
             created_at=str(data.get("created_at", _utc_timestamp())),
             error_message=data.get("error_message"),
         )
@@ -90,8 +96,17 @@ class ReceiptEmitter(_FileLockedJsonStore):
 
     def _write_lines(self, lines: list[str]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_name(f".{self.path.name}.tmp-{os.getpid()}")
-        tmp.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=str(self.path.parent),
+            prefix=f".{self.path.name}.tmp-",
+            delete=False,
+        ) as handle:
+            handle.write("\n".join(lines))
+            if lines:
+                handle.write("\n")
+            tmp = Path(handle.name)
         tmp.replace(self.path)
 
     def emit(self, receipt: Receipt) -> None:
@@ -114,7 +129,10 @@ class ReceiptEmitter(_FileLockedJsonStore):
                 continue
             if not isinstance(payload, dict):
                 continue
-            receipts.append(Receipt.from_dict(payload))
+            try:
+                receipts.append(Receipt.from_dict(payload))
+            except (TypeError, ValueError):
+                continue
             if len(receipts) >= count:
                 break
         return receipts

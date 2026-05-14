@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
+import tempfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -28,8 +28,16 @@ def load_json(path: Path) -> dict[str, Any]:
 
 def write_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    temp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=str(path.parent),
+        prefix=f".{path.name}.tmp-",
+        delete=False,
+    ) as handle:
+        json.dump(data, handle, indent=2)
+        handle.write("\n")
+        temp_path = Path(handle.name)
     temp_path.replace(path)
 
 
@@ -573,8 +581,15 @@ def write_yaml(path: Path, data: dict[str, Any]) -> None:
     if yaml is None:
         raise SystemExit("PyYAML is required for glyphos sync")
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    temp_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=str(path.parent),
+        prefix=f".{path.name}.tmp-",
+        delete=False,
+    ) as handle:
+        handle.write(yaml.safe_dump(data, sort_keys=False))
+        temp_path = Path(handle.name)
     temp_path.replace(path)
 
 

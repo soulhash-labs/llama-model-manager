@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import os
 import platform
 import shutil
@@ -54,13 +55,15 @@ class DesktopBackend:
             if self._command == "notify-send":
                 command = ["notify-send", title, body]
             else:
-                escaped_body = body.replace('"', '\\"')
-                command = ["osascript", "-e", f'display notification "{escaped_body}" with title "{title}"']
+                title_lit = json.dumps(title)
+                body_lit = json.dumps(body)
+                command = ["osascript", "-e", f"display notification {body_lit} with title {title_lit}"]
             result = subprocess.run(
                 command,
                 check=False,
                 capture_output=True,
                 text=True,
+                timeout=5,
             )
             return result.returncode == 0
         except Exception:

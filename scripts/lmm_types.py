@@ -24,6 +24,57 @@ class ExitResult(StrEnum):
     PROVIDER_ERROR = "provider_error"
 
 
+def _coerce_run_status(value: Any) -> RunStatus:
+    try:
+        return value if isinstance(value, RunStatus) else RunStatus(str(value))
+    except ValueError:
+        return RunStatus.FAILED
+
+
+def _coerce_exit_result(value: Any) -> ExitResult | None:
+    if value is None:
+        return None
+    try:
+        return value if isinstance(value, ExitResult) else ExitResult(str(value))
+    except ValueError:
+        return ExitResult.ERROR
+
+
+def _coerce_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_str_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "enabled", "y"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled", "n"}:
+        return False
+    return default
+
+
 def _utc_now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -153,19 +204,10 @@ class RunRecord:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RunRecord:
         status_value = data.get("status", RunStatus.PENDING.value)
-        if isinstance(status_value, RunStatus):
-            status = status_value
-        else:
-            status = RunStatus(str(status_value))
+        status = _coerce_run_status(status_value)
 
         exit_value = data.get("exit_result")
-        exit_result: ExitResult | None
-        if exit_value is None:
-            exit_result = None
-        elif isinstance(exit_value, ExitResult):
-            exit_result = exit_value
-        else:
-            exit_result = ExitResult(str(exit_value))
+        exit_result = _coerce_exit_result(exit_value)
 
         return cls(
             id=str(data.get("id", "")),
@@ -177,14 +219,14 @@ class RunRecord:
             provider=str(data.get("provider", "")),
             status=status,
             exit_result=exit_result,
-            duration_ms=data.get("duration_ms"),
+            duration_ms=_coerce_optional_int(data.get("duration_ms")),
             error_message=data.get("error_message"),
             route_target=str(data.get("route_target", "")),
             route_reason_code=str(data.get("route_reason_code", "")),
-            completion_chars=int(data.get("completion_chars", 0)),
+            completion_chars=_coerce_int(data.get("completion_chars", 0)),
             harness=str(data.get("harness", "")),
             context_status=str(data.get("context_status", "")),
-            context_used=bool(data.get("context_used", False)),
+            context_used=_coerce_bool(data.get("context_used", False)),
             session_id=str(data.get("session_id", "")),
             upstream_session_ref=str(data.get("upstream_session_ref", "")),
             handoff_summary=str(data.get("handoff_summary", "")),
@@ -192,10 +234,10 @@ class RunRecord:
             tool_invocation_mode=str(data.get("tool_invocation_mode", "")),
             tool_name=str(data.get("tool_name", "")),
             lane=str(data.get("lane", "")),
-            repair_attempted=bool(data.get("repair_attempted", False)),
-            repair_succeeded=bool(data.get("repair_succeeded", False)),
-            stream_tool_call_detected=bool(data.get("stream_tool_call_detected", False)),
+            repair_attempted=_coerce_bool(data.get("repair_attempted", False)),
+            repair_succeeded=_coerce_bool(data.get("repair_succeeded", False)),
+            stream_tool_call_detected=_coerce_bool(data.get("stream_tool_call_detected", False)),
             stream_tool_call_name=str(data.get("stream_tool_call_name", "")),
-            artifacts=list(data.get("artifacts", [])),
-            tags=list(data.get("tags", [])),
+            artifacts=_coerce_str_list(data.get("artifacts")),
+            tags=_coerce_str_list(data.get("tags")),
         )
