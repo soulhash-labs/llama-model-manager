@@ -1,9 +1,17 @@
 """
-Shared client primitives extracted from api_client.py to break the circular
-import between api_client and llamacpp_client.
+Shared base types for AI compute clients.
 
-api_client imports LlamaCppClient from llamacpp_client, and llamacpp_client
-imports BaseChatClient + _result from here — no cycle.
+Important:
+    This module must not import api_client.py, llamacpp_client.py, or any
+    provider-specific client. It is intentionally dependency-light so provider
+    modules can depend on it without creating import cycles.
+
+Current dependency graph:
+
+    api_client.py -> client_base.py           (BaseChatClient, _result)
+    api_client.py -> llamacpp_client.py        (LlamaCppClient)
+    llamacpp_client.py -> client_base.py       (BaseChatClient, _result)
+    client_base.py -> no project imports
 """
 
 from __future__ import annotations

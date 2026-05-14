@@ -6,11 +6,17 @@ with /health and /models for status checks.
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Mapping
 from typing import Any
 
 from .client_base import BaseChatClient, _result
+
+DEFAULT_LLAMACPP_BASE_URL = os.getenv(
+    "LLAMACPP_BASE_URL",
+    "http://127.0.0.1:8081",
+)
 
 
 class LlamaCppClient(BaseChatClient):
@@ -24,7 +30,7 @@ class LlamaCppClient(BaseChatClient):
 
     def __init__(
         self,
-        base_url: str = "http://127.0.0.1:8081",
+        base_url: str = DEFAULT_LLAMACPP_BASE_URL,
         model: str = "",
         max_tokens: int = 1000,
         timeout: int = 300,
@@ -158,7 +164,7 @@ class LlamaCppClient(BaseChatClient):
 
 
 def create_llamacpp_client(
-    base_url: str = "http://127.0.0.1:8081",
+    base_url: str = DEFAULT_LLAMACPP_BASE_URL,
     model: str = "",
     max_tokens: int = 1000,
     timeout: int = 300,
