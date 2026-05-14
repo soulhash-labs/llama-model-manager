@@ -1,28 +1,102 @@
 """
 Adaptive routing across local and external AI backends.
+
+Merged production router.
+
+Preserved from production/uploaded router.py:
+- local-first GlyphOS routing policy
+- ContextPayload support
+- upstream_context support
+- cloud fallback order and preferred cloud
+- routing_reason_code
+- per-router and shared telemetry
+- streaming support for local backends
+- lane selection for AURORA / TERRAN / STARLIGHT / POLARIS
+
+Merged from pasted router.py:
+- LOCAL_OLLAMA support
+- mapping/object-safe packet reads
+- CLI for glyph-first routing
+- status / JSON / prompt / structured output
+- explicit upstream-context CLI support
+
+Design rule:
+- No retrieval or hidden I/O.
+- upstream_context must be explicit.
+- External AI is routed only through configured clients.
 """
 
 from __future__ import annotations
 
+import argparse
 import fcntl
 import json
 import os
+import sys
 import threading
 import time
+import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, TypedDict
 
-from ..glyph.types import ContextPacket, ContextPayload, validate_context_packet_shape
 from .api_client import create_configured_clients
 from .glyph_to_prompt import build_prompt_from_packet, glyph_to_prompt
+
+try:
+    from .glyph_to_prompt import glyph_to_structured_json
+except Exception:  # pragma: no cover - compatibility for older glyph_to_prompt.py
+
+    def glyph_to_structured_json(glyph_packet: Any, upstream_context: Any = None) -> dict[str, Any]:
+        return {
+            "packet": _packet_to_dict(glyph_packet),
+            "upstream_context_provided": upstream_context is not None,
+        }
+
+
+try:
+    from ..glyph.encoder import decode_packet as decode_packet_string
+    from ..glyph.encoder import encode_packet as encode_packet_string
+except Exception:  # pragma: no cover - CLI-only dependency guard
+    decode_packet_string = None
+    encode_packet_string = None
+
+try:
+    from ..glyph.types import ContextPacket, ContextPayload, Intent, validate_context_packet_shape
+except Exception:  # pragma: no cover - compatibility fallback
+
+    class ContextPacket(TypedDict, total=False):
+        content: str
+        locality: Literal["orion-local", "lan", "cloud", "external"]
+        freshness: float | None
+        provenance: list[str]
+        routing_hints: dict[str, Any]
+        metadata: dict[str, Any]
+
+    @dataclass
+    class ContextPayload:
+        raw_context: str = ""
+        raw_context_chars: int = 0
+        encoding_status: str = ""
+        encoding_format: str = ""
+        encoding_ratio: float = 1.0
+
+    @dataclass
+    class Intent:
+        action: str
+        destination: str
+        time_slot: int
+
+    def validate_context_packet_shape(packet: dict[str, Any]) -> ContextPacket:
+        return packet  # type: ignore[return-value]
 
 
 class ComputeTarget(Enum):
     LOCAL_LLAMACPP = "llamacpp"
+    LOCAL_OLLAMA = "ollama"
     EXTERNAL_OPENAI = "openai"
     EXTERNAL_ANTHROPIC = "anthropic"
     EXTERNAL_XAI = "xai"
@@ -36,18 +110,23 @@ class RoutingConfig:
     complex_actions: list[str] | None = None
     cloud_fallback_order: list[str] | None = None
     preferred_cloud: str = "xai"
+    preferred_local_backend: str = "llamacpp"
 
     def __post_init__(self) -> None:
         if self.complex_actions is None:
             self.complex_actions = ["ANALYZE", "SYNTHESIZE", "PREDICT", "LEARN"]
+
         self.preferred_cloud = self._normalize_cloud_provider(self.preferred_cloud or "xai")
         self.cloud_fallback_order = self._normalize_cloud_fallback_order(
             self.cloud_fallback_order or ["xai", "openai", "anthropic"]
         )
+
         if self.preferred_cloud:
             self.cloud_fallback_order = [self.preferred_cloud] + [
-                p for p in self.cloud_fallback_order if p != self.preferred_cloud
+                provider for provider in self.cloud_fallback_order if provider != self.preferred_cloud
             ]
+
+        self.preferred_local_backend = self._normalize_local_provider(self.preferred_local_backend)
 
     @staticmethod
     def _normalize_cloud_provider(name: str) -> str:
@@ -63,10 +142,19 @@ class RoutingConfig:
             normalized_provider = RoutingConfig._normalize_cloud_provider(provider)
             if normalized_provider not in normalized:
                 normalized.append(normalized_provider)
+
         for provider in ("xai", "openai", "anthropic"):
             if provider not in normalized:
                 normalized.append(provider)
+
         return normalized
+
+    @staticmethod
+    def _normalize_local_provider(name: str) -> str:
+        provider = str(name or "").strip().lower()
+        if provider in {"ollama", "llamacpp", "llama.cpp"}:
+            return "ollama" if provider == "ollama" else "llamacpp"
+        return "llamacpp"
 
 
 @dataclass
@@ -88,10 +176,70 @@ _GLOBAL_ROUTING_STATE: dict[str, Any] = {
 _GLOBAL_ROUTING_LOCK = threading.Lock()
 
 
+def _read_field(source: Any, *names: str, default: Any = None) -> Any:
+    """Read from mapping or object without imposing runtime-heavy abstractions."""
+    if source is None:
+        return default
+
+    if isinstance(source, Mapping):
+        for name in names:
+            if name in source and source[name] is not None:
+                return source[name]
+        return default
+
+    for name in names:
+        value = getattr(source, name, None)
+        if value is not None:
+            return value
+
+    return default
+
+
+def _packet_value(packet: Any, snake_name: str, camel_name: str, default: Any) -> Any:
+    return _read_field(packet, snake_name, camel_name, default=default)
+
+
+def _packet_action(glyph_packet: Any) -> str:
+    return str(_read_field(glyph_packet, "action", default="DEFAULT") or "DEFAULT").strip().upper()
+
+
+def _packet_destination(glyph_packet: Any) -> str:
+    return str(_read_field(glyph_packet, "destination", default="") or "").strip().upper()
+
+
+def _packet_to_dict(packet: Any) -> dict[str, Any]:
+    if packet is None:
+        return {}
+    if isinstance(packet, Mapping):
+        return dict(packet)
+    if is_dataclass(packet):
+        return asdict(packet)
+    if hasattr(packet, "__dict__"):
+        return {key: value for key, value in vars(packet).items() if not key.startswith("_")}
+    return {"repr": repr(packet)}
+
+
+def _set_packet_attr(packet: Any, name: str, value: Any) -> None:
+    if isinstance(packet, Mapping):
+        return
+    try:
+        setattr(packet, name, value)
+    except Exception:
+        return
+
+
+def _glyph_to_prompt_safe(glyph_packet: Any, upstream_context: str | ContextPacket | None = None) -> str:
+    try:
+        return glyph_to_prompt(glyph_packet, upstream_context=upstream_context)
+    except TypeError:
+        return glyph_to_prompt(glyph_packet)
+
+
 def _telemetry_file() -> Path:
     configured = os.environ.get("LLAMA_MODEL_GLYPHOS_TELEMETRY_FILE", "").strip()
     if configured:
         return Path(configured).expanduser()
+
     state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")).expanduser()
     return state_home / "llama-server" / "glyphos-routing.json"
 
@@ -108,48 +256,46 @@ def _read_shared_state() -> dict[str, Any]:
     path = _telemetry_file()
     if not path.exists():
         return _blank_shared_state()
+
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
-        import sys as _sys
-
-        _sys.stderr.write(f"warning: corrupted routing telemetry file, resetting: {path}\n")
+        sys.stderr.write(f"warning: corrupted routing telemetry file, resetting: {path}\n")
         return _blank_shared_state()
     except OSError as exc:
-        import sys as _sys
-
-        _sys.stderr.write(f"warning: cannot read routing telemetry file: {path}: {exc}\n")
+        sys.stderr.write(f"warning: cannot read routing telemetry file: {path}: {exc}\n")
         return _blank_shared_state()
+
     if not isinstance(payload, dict):
-        import sys as _sys
-
-        _sys.stderr.write(f"warning: routing telemetry file has wrong type, resetting: {path}\n")
+        sys.stderr.write(f"warning: routing telemetry file has wrong type, resetting: {path}\n")
         return _blank_shared_state()
+
     state = _blank_shared_state()
+
     if isinstance(payload.get("attempts_by_target"), dict):
         state["attempts_by_target"] = dict(payload["attempts_by_target"])
+
     if isinstance(payload.get("fallback_reason_counts"), dict):
         state["fallback_reason_counts"] = dict(payload["fallback_reason_counts"])
+
     if isinstance(payload.get("recent_attempts"), list):
         state["recent_attempts"] = list(payload["recent_attempts"])[:_GLOBAL_ROUTING_HISTORY_LIMIT]
+
     return state
 
 
 def _write_shared_state(state: dict[str, Any]) -> None:
     path = _telemetry_file()
+
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
         temp.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
         temp.replace(path)
     except OSError as exc:
-        import sys as _sys
-
-        _sys.stderr.write(f"warning: failed to write routing telemetry: {path}: {exc}\n")
+        sys.stderr.write(f"warning: failed to write routing telemetry: {path}: {exc}\n")
     except Exception as exc:
-        import sys as _sys
-
-        _sys.stderr.write(f"warning: unexpected error writing routing telemetry: {path}: {exc}\n")
+        sys.stderr.write(f"warning: unexpected error writing routing telemetry: {path}: {exc}\n")
 
 
 @contextmanager
@@ -157,6 +303,7 @@ def _shared_state_lock():
     path = _telemetry_file()
     handle = None
     lock_held = False
+
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = path.with_name(f".{path.name}.lock")
@@ -164,15 +311,12 @@ def _shared_state_lock():
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         lock_held = True
     except OSError as exc:
-        import sys as _sys
-
-        _sys.stderr.write(f"warning: cannot acquire file lock for routing telemetry: {exc}\n")
+        sys.stderr.write(f"warning: cannot acquire file lock for routing telemetry: {exc}\n")
         handle = None
     except Exception as exc:
-        import sys as _sys
-
-        _sys.stderr.write(f"warning: unexpected error acquiring routing telemetry lock: {exc}\n")
+        sys.stderr.write(f"warning: unexpected error acquiring routing telemetry lock: {exc}\n")
         handle = None
+
     try:
         yield
     finally:
@@ -191,6 +335,7 @@ def _record_global_attempt(record: dict[str, Any]) -> None:
     with _GLOBAL_ROUTING_LOCK:
         with _shared_state_lock():
             shared_state = _read_shared_state()
+
             for key in ("attempts_by_target", "fallback_reason_counts"):
                 merged = dict(shared_state.get(key, {}))
                 for item_key, count in dict(_GLOBAL_ROUTING_STATE.get(key, {})).items():
@@ -200,6 +345,7 @@ def _record_global_attempt(record: dict[str, Any]) -> None:
             attempts_by_target = _GLOBAL_ROUTING_STATE.setdefault("attempts_by_target", {})
             fallback_reason_counts = _GLOBAL_ROUTING_STATE.setdefault("fallback_reason_counts", {})
             recent_attempts = list(shared_state.get("recent_attempts", []))
+
             for existing in list(_GLOBAL_ROUTING_STATE.setdefault("recent_attempts", [])):
                 if existing not in recent_attempts:
                     recent_attempts.append(existing)
@@ -208,6 +354,7 @@ def _record_global_attempt(record: dict[str, Any]) -> None:
             reason_code = _normalize_reason_code(str(record.get("reason_code", "unresolved")))
             success = bool(record.get("success", True))
             normalized_reason = reason_code
+
             if not success and not reason_code.endswith(".error"):
                 normalized_reason = f"{reason_code}.error"
 
@@ -220,6 +367,7 @@ def _record_global_attempt(record: dict[str, Any]) -> None:
             _GLOBAL_ROUTING_STATE["attempts_by_target"] = attempts_by_target
             _GLOBAL_ROUTING_STATE["fallback_reason_counts"] = fallback_reason_counts
             _GLOBAL_ROUTING_STATE["recent_attempts"] = recent_attempts
+
             _write_shared_state(_GLOBAL_ROUTING_STATE)
 
 
@@ -227,16 +375,20 @@ def routing_telemetry_snapshot(limit: int = 10) -> dict[str, Any]:
     with _GLOBAL_ROUTING_LOCK:
         with _shared_state_lock():
             shared_state = _read_shared_state()
+
             attempts_by_target = dict(shared_state.get("attempts_by_target", {}))
             for target, count in dict(_GLOBAL_ROUTING_STATE.get("attempts_by_target", {})).items():
                 attempts_by_target[target] = max(int(attempts_by_target.get(target, 0)), int(count))
+
             fallback_reason_counts = dict(shared_state.get("fallback_reason_counts", {}))
             for reason, count in dict(_GLOBAL_ROUTING_STATE.get("fallback_reason_counts", {})).items():
                 fallback_reason_counts[reason] = max(int(fallback_reason_counts.get(reason, 0)), int(count))
+
             recent_attempts = list(shared_state.get("recent_attempts", []))
             for existing in list(_GLOBAL_ROUTING_STATE.get("recent_attempts", [])):
                 if existing not in recent_attempts:
                     recent_attempts.append(existing)
+
             recent_attempts = sorted(
                 recent_attempts,
                 key=lambda item: float(item.get("time", 0)) if isinstance(item, dict) else 0,
@@ -247,7 +399,7 @@ def routing_telemetry_snapshot(limit: int = 10) -> dict[str, Any]:
     return {
         "attempts_by_target": attempts_by_target,
         "fallback_reason_counts": fallback_reason_counts,
-        "total_attempts": sum(int(v) for v in attempts_by_target.values()),
+        "total_attempts": sum(int(value) for value in attempts_by_target.values()),
         "recent_attempts": recent_attempts,
     }
 
@@ -264,17 +416,20 @@ def reset_routing_telemetry() -> None:
 def _normalize_upstream_context(upstream_context: str | ContextPacket | None) -> ContextPacket:
     if upstream_context is None:
         return {}
+
     if isinstance(upstream_context, str):
         return {"content": upstream_context}
+
     if isinstance(upstream_context, Mapping):
         return validate_context_packet_shape(dict(upstream_context))
+
     return {"content": str(upstream_context)}
 
 
 def _context_preferred_backend(ctx: ContextPacket) -> str | None:
     hints = ctx.get("routing_hints") or {}
-    if isinstance(hints, dict):
-        preferred = hints.get("preferred_backend")
+    if isinstance(hints, Mapping):
+        preferred = _read_field(hints, "preferred_backend", "preferredBackend", default=None)
         if preferred:
             return str(preferred).strip().lower()
     return None
@@ -291,16 +446,23 @@ class AdaptiveRouter:
     def __init__(
         self,
         llamacpp_client=None,
+        ollama_client=None,
         openai_client=None,
         anthropic_client=None,
         xai_client=None,
+        preferred_local_backend: str | None = None,
         config: RoutingConfig | None = None,
     ):
         self.llamacpp = llamacpp_client
+        self.ollama = ollama_client
         self.openai = openai_client
         self.anthropic = anthropic_client
         self.xai = xai_client
         self.config = config or RoutingConfig()
+
+        if preferred_local_backend:
+            self.config.preferred_local_backend = RoutingConfig._normalize_local_provider(preferred_local_backend)
+
         self._attempts_by_target: dict[str, int] = {}
         self._fallback_reason_counts: dict[str, int] = {}
         self._attempt_history: list[dict[str, Any]] = []
@@ -322,6 +484,7 @@ class AdaptiveRouter:
 
         self._attempts_by_target[key] = self._attempts_by_target.get(key, 0) + 1
         self._fallback_reason_counts[normalized] = self._fallback_reason_counts.get(normalized, 0) + 1
+
         record = {
             "target": key,
             "reason_code": normalized,
@@ -330,6 +493,7 @@ class AdaptiveRouter:
             "error": error_message,
             "time": time.time(),
         }
+
         self._attempt_history.insert(0, record)
         del self._attempt_history[self._ATTEMPT_HISTORY_LIMIT :]
 
@@ -349,22 +513,76 @@ class AdaptiveRouter:
             return False
         return str(action or "").strip().upper() in {name.upper() for name in complex_actions}
 
+    def _ordered_local_targets(self) -> list[ComputeTarget]:
+        if self.config.preferred_local_backend == "ollama":
+            return [ComputeTarget.LOCAL_OLLAMA, ComputeTarget.LOCAL_LLAMACPP]
+        return [ComputeTarget.LOCAL_LLAMACPP, ComputeTarget.LOCAL_OLLAMA]
+
     def _cloud_fallback_order(self) -> list[str]:
         return list(self.config.cloud_fallback_order or ["xai", "openai", "anthropic"])
 
-    def _local_routing_reason(self, action: str, psi: float) -> tuple[str, str]:
-        if psi >= self.config.high_coherence_threshold:
-            return "high coherence - Unified GlyphOS pipeline", "high_coherence_glyphos_pipeline"
-        if self._is_complex_action(action, self.config.complex_actions):
-            return "complex action - local fallback", "complex_action_local"
-        return "default - use local llama.cpp", "default_local"
+    def _preferred_backend_target(self, preferred_backend: str | None) -> ComputeTarget | None:
+        if not preferred_backend:
+            return None
 
-    def _local_routing_reason_stream(self, action: str, psi: float) -> tuple[str, str]:
+        name = str(preferred_backend).strip().lower()
+
+        if name in {"llamacpp", "llama.cpp"}:
+            return ComputeTarget.LOCAL_LLAMACPP
+        if name == "ollama":
+            return ComputeTarget.LOCAL_OLLAMA
+        if name == "openai":
+            return ComputeTarget.EXTERNAL_OPENAI
+        if name == "anthropic":
+            return ComputeTarget.EXTERNAL_ANTHROPIC
+        if name == "xai":
+            return ComputeTarget.EXTERNAL_XAI
+        if name == "local":
+            return self._ordered_local_targets()[0]
+        if name in {"cloud", "external"}:
+            first_provider = self._cloud_fallback_order()[0]
+            return {
+                "openai": ComputeTarget.EXTERNAL_OPENAI,
+                "anthropic": ComputeTarget.EXTERNAL_ANTHROPIC,
+                "xai": ComputeTarget.EXTERNAL_XAI,
+            }.get(first_provider)
+
+        return None
+
+    def _has_target(self, target: ComputeTarget) -> bool:
+        return {
+            ComputeTarget.LOCAL_LLAMACPP: self.llamacpp is not None,
+            ComputeTarget.LOCAL_OLLAMA: self.ollama is not None,
+            ComputeTarget.EXTERNAL_OPENAI: self.openai is not None,
+            ComputeTarget.EXTERNAL_ANTHROPIC: self.anthropic is not None,
+            ComputeTarget.EXTERNAL_XAI: self.xai is not None,
+            ComputeTarget.FALLBACK: True,
+        }[target]
+
+    def _local_routing_reason(self, action: str, psi: float, target: ComputeTarget) -> tuple[str, str]:
+        backend = "Ollama" if target is ComputeTarget.LOCAL_OLLAMA else "llama.cpp"
+
         if psi >= self.config.high_coherence_threshold:
-            return "high coherence - Unified GlyphOS pipeline", "high_coherence_glyphos_pipeline"
+            return f"high coherence - Unified GlyphOS pipeline via {backend}", f"high_coherence_{target.value}"
+
         if self._is_complex_action(action, self.config.complex_actions):
-            return "complex action - local stream", "complex_action_local_stream"
-        return "default - use local llama.cpp", "default_local"
+            return f"complex action - local {backend} fallback", f"complex_action_{target.value}"
+
+        return f"default - use local {backend}", f"default_{target.value}"
+
+    def _local_routing_reason_stream(self, action: str, psi: float, target: ComputeTarget) -> tuple[str, str]:
+        backend = "Ollama" if target is ComputeTarget.LOCAL_OLLAMA else "llama.cpp"
+
+        if psi >= self.config.high_coherence_threshold:
+            return (
+                f"high coherence - Unified GlyphOS pipeline stream via {backend}",
+                f"high_coherence_{target.value}_stream",
+            )
+
+        if self._is_complex_action(action, self.config.complex_actions):
+            return f"complex action - local {backend} stream", f"complex_action_{target.value}_stream"
+
+        return f"default - use local {backend} stream", f"default_{target.value}_stream"
 
     def _cloud_base_reason_code(self, action: str, provider: str) -> str:
         provider = str(provider or "").strip().lower()
@@ -375,23 +593,25 @@ class AdaptiveRouter:
     def _cloud_reason(self, action: str, provider: str) -> tuple[str, str]:
         provider = str(provider or "").strip().lower()
         reason_code = self._cloud_base_reason_code(action, provider)
+
         if provider == "openai":
             return "fallback - use OpenAI", reason_code
         if provider == "anthropic":
             return "fallback - use Anthropic", reason_code
         if provider == "xai":
             return "fallback - use xAI", reason_code
+
         return "fallback - use cloud", reason_code
 
     def _build_local_prompt(
         self,
-        glyph_packet,
+        glyph_packet: Any,
         prompt: str | None,
         context_payload: ContextPayload | None = None,
         upstream_context: str | ContextPacket | None = None,
     ) -> str:
         if context_payload is None and upstream_context is None:
-            return prompt if prompt is not None else glyph_to_prompt(glyph_packet)
+            return prompt if prompt is not None else _glyph_to_prompt_safe(glyph_packet)
 
         built_prompt = build_prompt_from_packet(
             glyph_packet,
@@ -399,23 +619,26 @@ class AdaptiveRouter:
             user_message=prompt or "",
             upstream_context=upstream_context,
         )
+
         if context_payload is not None:
-            glyph_packet.encoding_status = getattr(context_payload, "encoding_status", "")
-            glyph_packet.encoding_format = getattr(context_payload, "encoding_format", "")
-            glyph_packet.encoding_ratio = getattr(context_payload, "encoding_ratio", 1.0)
+            _set_packet_attr(glyph_packet, "encoding_status", getattr(context_payload, "encoding_status", ""))
+            _set_packet_attr(glyph_packet, "encoding_format", getattr(context_payload, "encoding_format", ""))
+            _set_packet_attr(glyph_packet, "encoding_ratio", getattr(context_payload, "encoding_ratio", 1.0))
+
         return built_prompt
 
     def _build_cloud_prompt(
         self,
-        glyph_packet,
+        glyph_packet: Any,
         prompt: str | None,
         context_payload: ContextPayload | None = None,
         upstream_context: str | ContextPacket | None = None,
     ) -> str:
         if context_payload is None and upstream_context is None:
-            return prompt if prompt is not None else glyph_to_prompt(glyph_packet)
+            return prompt if prompt is not None else _glyph_to_prompt_safe(glyph_packet)
 
         raw_context_payload: ContextPayload | None = None
+
         if context_payload is not None:
             raw_context = getattr(context_payload, "raw_context", "")
             raw_context_payload = ContextPayload(
@@ -423,9 +646,10 @@ class AdaptiveRouter:
                 raw_context_chars=len(str(raw_context)),
                 encoding_status="skipped",
             )
-            glyph_packet.encoding_status = "skipped"
-            glyph_packet.encoding_format = ""
-            glyph_packet.encoding_ratio = 1.0
+
+            _set_packet_attr(glyph_packet, "encoding_status", "skipped")
+            _set_packet_attr(glyph_packet, "encoding_format", "")
+            _set_packet_attr(glyph_packet, "encoding_ratio", 1.0)
 
         return build_prompt_from_packet(
             glyph_packet,
@@ -434,8 +658,48 @@ class AdaptiveRouter:
             upstream_context=upstream_context,
         )
 
+    @staticmethod
+    def _coerce_backend_result(
+        raw_result: Any,
+        target: ComputeTarget,
+        reason: str,
+        reason_code: str,
+    ) -> RoutingResult:
+        if isinstance(raw_result, RoutingResult):
+            return raw_result
+
+        if isinstance(raw_result, str):
+            return RoutingResult(
+                target=target,
+                response=raw_result,
+                routing_reason=reason,
+                routing_reason_code=reason_code,
+            )
+
+        if isinstance(raw_result, Mapping):
+            response = str(raw_result.get("response") or raw_result.get("text") or raw_result.get("content") or "")
+            latency = raw_result.get("latency_ms")
+            tokens = raw_result.get("tokens_used")
+
+            return RoutingResult(
+                target=target,
+                response=response,
+                routing_reason=reason,
+                routing_reason_code=reason_code,
+                latency_ms=int(latency) if latency is not None else None,
+                tokens_used=int(tokens) if tokens is not None else None,
+            )
+
+        return RoutingResult(
+            target=target,
+            response=str(raw_result),
+            routing_reason=reason,
+            routing_reason_code=reason_code,
+        )
+
     def _route_cloud(self, prompt: str, action: str, **generation_kwargs: Any) -> RoutingResult:
         last_error: RoutingResult | None = None
+
         for provider in self._cloud_fallback_order():
             if provider == "openai" and self.openai:
                 reason, reason_code = self._cloud_reason(action, provider)
@@ -451,6 +715,7 @@ class AdaptiveRouter:
 
             if not str(result.routing_reason_code).endswith(".error"):
                 return result
+
             last_error = result
 
         if last_error is not None:
@@ -465,286 +730,366 @@ class AdaptiveRouter:
 
     def route(
         self,
-        glyph_packet,
+        glyph_packet: Any,
         prompt: str | None = None,
         context_payload: ContextPayload | None = None,
         upstream_context: str | ContextPacket | None = None,
         **generation_kwargs: Any,
     ) -> RoutingResult:
-        """Route a glyph packet across local-first / cloud fallback policy."""
-        psi = self._packet_value(glyph_packet, "psi_coherence", "psiCoherence", 0.5)
-        action = glyph_packet.action
+        """Route a glyph packet across local-first / explicit cloud fallback policy."""
+        psi_raw = _packet_value(glyph_packet, "psi_coherence", "psiCoherence", 0.5)
+        try:
+            psi = float(psi_raw)
+        except (TypeError, ValueError):
+            psi = 0.5
+
+        action = _packet_action(glyph_packet)
         ctx = _normalize_upstream_context(upstream_context)
         preferred_backend = _context_preferred_backend(ctx)
+        preferred_target = self._preferred_backend_target(preferred_backend)
 
-        if preferred_backend == "llamacpp" and self.llamacpp:
+        if preferred_target is not None and self._has_target(preferred_target):
+            if preferred_target in {ComputeTarget.LOCAL_LLAMACPP, ComputeTarget.LOCAL_OLLAMA}:
+                built_prompt = self._build_local_prompt(
+                    glyph_packet,
+                    prompt,
+                    context_payload=context_payload,
+                    upstream_context=upstream_context,
+                )
+                return self._route_target(
+                    preferred_target,
+                    built_prompt,
+                    f"routing_hints - prefer {preferred_target.value}",
+                    f"context_hint_{preferred_target.value}",
+                    **generation_kwargs,
+                )
+
+            built_prompt = self._build_cloud_prompt(
+                glyph_packet,
+                prompt,
+                context_payload=context_payload,
+                upstream_context=upstream_context,
+            )
+            return self._route_target(
+                preferred_target,
+                built_prompt,
+                f"routing_hints - prefer {preferred_target.value}",
+                f"context_hint_{preferred_target.value}",
+                **generation_kwargs,
+            )
+
+        locality = _context_locality(ctx)
+        if locality in {"cloud", "external"}:
+            built_prompt = self._build_cloud_prompt(
+                glyph_packet,
+                prompt,
+                context_payload=context_payload,
+                upstream_context=upstream_context,
+            )
+            cloud_result = self._route_cloud(built_prompt, action=action, **generation_kwargs)
+            if cloud_result.target is not ComputeTarget.FALLBACK:
+                return cloud_result
+
+        for local_target in self._ordered_local_targets():
+            if not self._has_target(local_target):
+                continue
+
+            reason, reason_code = self._local_routing_reason(action=action, psi=psi, target=local_target)
             built_prompt = self._build_local_prompt(
                 glyph_packet,
                 prompt,
                 context_payload=context_payload,
                 upstream_context=upstream_context,
             )
-            return self._route_llamacpp(
-                built_prompt,
-                "routing_hints - prefer local llama.cpp",
-                "context_hint_llamacpp",
-                **generation_kwargs,
-            )
+            return self._route_target(local_target, built_prompt, reason, reason_code, **generation_kwargs)
 
-        if preferred_backend == "openai" and self.openai:
-            built_prompt = self._build_cloud_prompt(
+        return self._route_cloud(
+            prompt=self._build_cloud_prompt(
                 glyph_packet,
                 prompt,
                 context_payload=context_payload,
                 upstream_context=upstream_context,
-            )
-            return self._route_openai(
-                built_prompt,
-                "routing_hints - prefer OpenAI",
-                "context_hint_openai",
-                **generation_kwargs,
-            )
-
-        if preferred_backend == "anthropic" and self.anthropic:
-            built_prompt = self._build_cloud_prompt(
-                glyph_packet,
-                prompt,
-                context_payload=context_payload,
-                upstream_context=upstream_context,
-            )
-            return self._route_anthropic(
-                built_prompt,
-                "routing_hints - prefer Anthropic",
-                "context_hint_anthropic",
-                **generation_kwargs,
-            )
-
-        if preferred_backend == "xai" and self.xai:
-            built_prompt = self._build_cloud_prompt(
-                glyph_packet,
-                prompt,
-                context_payload=context_payload,
-                upstream_context=upstream_context,
-            )
-            return self._route_xai(
-                built_prompt,
-                "routing_hints - prefer xAI",
-                "context_hint_xai",
-                **generation_kwargs,
-            )
-
-        if not self.llamacpp:
-            return self._route_cloud(
-                prompt=self._build_cloud_prompt(
-                    glyph_packet,
-                    prompt,
-                    context_payload=context_payload,
-                    upstream_context=upstream_context,
-                ),
-                action=action,
-                **generation_kwargs,
-            )
-
-        reason, reason_code = self._local_routing_reason(action=action, psi=psi)
-        built_prompt = self._build_local_prompt(
-            glyph_packet,
-            prompt,
-            context_payload=context_payload,
-            upstream_context=upstream_context,
+            ),
+            action=action,
+            **generation_kwargs,
         )
-        return self._route_llamacpp(built_prompt, reason, reason_code, **generation_kwargs)
 
     def route_stream(
         self,
-        glyph_packet,
+        glyph_packet: Any,
         prompt: str | None = None,
         context_payload: ContextPayload | None = None,
         upstream_context: str | ContextPacket | None = None,
         **generation_kwargs: Any,
     ) -> tuple[dict[str, Any], Iterator[str]]:
-        """Route streaming traffic with local-first policy."""
-        if not self.llamacpp:
-            raise RuntimeError("no streaming-capable local llama.cpp backend is configured")
+        """Route streaming traffic through the preferred local streaming backend."""
+        psi_raw = _packet_value(glyph_packet, "psi_coherence", "psiCoherence", 0.5)
+        try:
+            psi = float(psi_raw)
+        except (TypeError, ValueError):
+            psi = 0.5
 
-        psi = self._packet_value(glyph_packet, "psi_coherence", "psiCoherence", 0.5)
-        reason, reason_code = self._local_routing_reason_stream(
-            action=str(getattr(glyph_packet, "action", "")), psi=psi
-        )
-        built_prompt = self._build_local_prompt(
-            glyph_packet,
-            prompt,
-            context_payload=context_payload,
-            upstream_context=upstream_context,
-        )
-        return self._route_llamacpp_stream(built_prompt, reason, reason_code, **generation_kwargs)
+        action = _packet_action(glyph_packet)
+        ctx = _normalize_upstream_context(upstream_context)
+        preferred_target = self._preferred_backend_target(_context_preferred_backend(ctx))
 
-    def _route_llamacpp_stream(
-        self, prompt: str, reason: str, reason_code: str, **generation_kwargs: Any
+        local_candidates: list[ComputeTarget]
+        if preferred_target in {ComputeTarget.LOCAL_LLAMACPP, ComputeTarget.LOCAL_OLLAMA}:
+            local_candidates = [preferred_target]
+        else:
+            local_candidates = self._ordered_local_targets()
+
+        for target in local_candidates:
+            client = self._client_for_target(target)
+            if client is None or not hasattr(client, "stream_generate"):
+                continue
+
+            reason, reason_code = self._local_routing_reason_stream(action=action, psi=psi, target=target)
+            built_prompt = self._build_local_prompt(
+                glyph_packet,
+                prompt,
+                context_payload=context_payload,
+                upstream_context=upstream_context,
+            )
+            return self._route_local_stream(target, built_prompt, reason, reason_code, **generation_kwargs)
+
+        raise RuntimeError("no streaming-capable local backend is configured")
+
+    def _client_for_target(self, target: ComputeTarget):
+        if target is ComputeTarget.LOCAL_LLAMACPP:
+            return self.llamacpp
+        if target is ComputeTarget.LOCAL_OLLAMA:
+            return self.ollama
+        if target is ComputeTarget.EXTERNAL_OPENAI:
+            return self.openai
+        if target is ComputeTarget.EXTERNAL_ANTHROPIC:
+            return self.anthropic
+        if target is ComputeTarget.EXTERNAL_XAI:
+            return self.xai
+        return None
+
+    def _route_target(
+        self,
+        target: ComputeTarget,
+        prompt: str,
+        reason: str,
+        reason_code: str,
+        **generation_kwargs: Any,
+    ) -> RoutingResult:
+        if target is ComputeTarget.LOCAL_LLAMACPP:
+            return self._route_llamacpp(prompt, reason, reason_code, **generation_kwargs)
+        if target is ComputeTarget.LOCAL_OLLAMA:
+            return self._route_ollama(prompt, reason, reason_code, **generation_kwargs)
+        if target is ComputeTarget.EXTERNAL_OPENAI:
+            return self._route_openai(prompt, reason, reason_code, **generation_kwargs)
+        if target is ComputeTarget.EXTERNAL_ANTHROPIC:
+            return self._route_anthropic(prompt, reason, reason_code, **generation_kwargs)
+        if target is ComputeTarget.EXTERNAL_XAI:
+            return self._route_xai(prompt, reason, reason_code, **generation_kwargs)
+
+        return RoutingResult(
+            target=ComputeTarget.FALLBACK,
+            response="No compute backend available",
+            routing_reason=reason,
+            routing_reason_code=reason_code,
+        )
+
+    def _route_local_stream(
+        self,
+        target: ComputeTarget,
+        prompt: str,
+        reason: str,
+        reason_code: str,
+        **generation_kwargs: Any,
     ) -> tuple[dict[str, Any], Iterator[str]]:
-        if not hasattr(self.llamacpp, "stream_generate"):
-            raise RuntimeError("local llama.cpp client does not support streaming")
-        start = time.perf_counter()
-        if not getattr(self.llamacpp, "opens_stream_before_return", False):
+        client = self._client_for_target(target)
+
+        if client is None:
+            raise RuntimeError(f"{target.value} backend is not configured")
+
+        if not hasattr(client, "stream_generate"):
+            raise RuntimeError(f"{target.value} client does not support streaming")
+
+        if not getattr(client, "opens_stream_before_return", False):
             raise RuntimeError("streaming client must open or fail before returning chunks")
+
+        start = time.perf_counter()
 
         def chunks() -> Iterator[str]:
             try:
-                source_chunks = iter(self.llamacpp.stream_generate(prompt, **generation_kwargs))
+                source_chunks = iter(client.stream_generate(prompt, **generation_kwargs))
                 yield from source_chunks
                 self._track_route(
-                    ComputeTarget.LOCAL_LLAMACPP,
+                    target,
                     reason_code,
                     latency_ms=round((time.perf_counter() - start) * 1000),
                 )
             except Exception as exc:
                 self._track_route(
-                    ComputeTarget.LOCAL_LLAMACPP,
+                    target,
                     reason_code,
                     is_error=True,
                     latency_ms=round((time.perf_counter() - start) * 1000),
                     error_message=str(exc),
                 )
-                raise RuntimeError(f"llama.cpp streaming error: {exc}") from exc
+                raise RuntimeError(f"{target.value} streaming error: {exc}") from exc
 
         return {
-            "target": ComputeTarget.LOCAL_LLAMACPP.value,
+            "target": target.value,
             "reason_code": reason_code,
             "reason": reason,
         }, chunks()
 
-    def _route_llamacpp(self, prompt: str, reason: str, reason_code: str, **generation_kwargs: Any) -> RoutingResult:
+    def _route_llamacpp(
+        self,
+        prompt: str,
+        reason: str,
+        reason_code: str,
+        **generation_kwargs: Any,
+    ) -> RoutingResult:
+        return self._route_generate(
+            ComputeTarget.LOCAL_LLAMACPP,
+            self.llamacpp,
+            prompt,
+            reason,
+            reason_code,
+            "llama.cpp",
+            **generation_kwargs,
+        )
+
+    def _route_ollama(
+        self,
+        prompt: str,
+        reason: str,
+        reason_code: str,
+        **generation_kwargs: Any,
+    ) -> RoutingResult:
+        return self._route_generate(
+            ComputeTarget.LOCAL_OLLAMA,
+            self.ollama,
+            prompt,
+            reason,
+            reason_code,
+            "Ollama",
+            **generation_kwargs,
+        )
+
+    def _route_openai(
+        self,
+        prompt: str,
+        reason: str,
+        reason_code: str,
+        **generation_kwargs: Any,
+    ) -> RoutingResult:
+        return self._route_generate(
+            ComputeTarget.EXTERNAL_OPENAI,
+            self.openai,
+            prompt,
+            reason,
+            reason_code,
+            "OpenAI",
+            **generation_kwargs,
+        )
+
+    def _route_anthropic(
+        self,
+        prompt: str,
+        reason: str,
+        reason_code: str,
+        **generation_kwargs: Any,
+    ) -> RoutingResult:
+        return self._route_generate(
+            ComputeTarget.EXTERNAL_ANTHROPIC,
+            self.anthropic,
+            prompt,
+            reason,
+            reason_code,
+            "Anthropic",
+            **generation_kwargs,
+        )
+
+    def _route_xai(
+        self,
+        prompt: str,
+        reason: str,
+        reason_code: str,
+        **generation_kwargs: Any,
+    ) -> RoutingResult:
+        return self._route_generate(
+            ComputeTarget.EXTERNAL_XAI,
+            self.xai,
+            prompt,
+            reason,
+            reason_code,
+            "xAI",
+            **generation_kwargs,
+        )
+
+    def _route_generate(
+        self,
+        target: ComputeTarget,
+        client: Any,
+        prompt: str,
+        reason: str,
+        reason_code: str,
+        label: str,
+        **generation_kwargs: Any,
+    ) -> RoutingResult:
         start = time.perf_counter()
-        try:
-            response = self.llamacpp.generate(prompt, **generation_kwargs)
+
+        if client is None:
             self._track_route(
-                ComputeTarget.LOCAL_LLAMACPP, reason_code, latency_ms=round((time.perf_counter() - start) * 1000)
-            )
-            return RoutingResult(
-                target=ComputeTarget.LOCAL_LLAMACPP,
-                response=response,
-                routing_reason=reason,
-                routing_reason_code=reason_code,
-            )
-        except Exception as exc:
-            self._track_route(
-                ComputeTarget.LOCAL_LLAMACPP,
+                target,
                 reason_code,
                 is_error=True,
-                latency_ms=round((time.perf_counter() - start) * 1000),
-                error_message=str(exc),
+                latency_ms=0,
+                error_message=f"{label} backend is not configured",
             )
             return RoutingResult(
-                target=ComputeTarget.LOCAL_LLAMACPP,
-                response=f"llama.cpp error: {exc}",
+                target=target,
+                response=f"{label} backend is not configured",
                 routing_reason=f"{reason} - error",
                 routing_reason_code=f"{reason_code}.error",
+                latency_ms=0,
             )
 
-    def _route_openai(self, prompt: str, reason: str, reason_code: str, **generation_kwargs: Any) -> RoutingResult:
-        start = time.perf_counter()
         try:
-            response = self.openai.generate(prompt, **generation_kwargs)
-            self._track_route(
-                ComputeTarget.EXTERNAL_OPENAI, reason_code, latency_ms=round((time.perf_counter() - start) * 1000)
-            )
-            return RoutingResult(
-                target=ComputeTarget.EXTERNAL_OPENAI,
-                response=response,
-                routing_reason=reason,
-                routing_reason_code=reason_code,
-            )
+            response = client.generate(prompt, **generation_kwargs)
+            latency_ms = round((time.perf_counter() - start) * 1000)
+            self._track_route(target, reason_code, latency_ms=latency_ms)
+            result = self._coerce_backend_result(response, target, reason, reason_code)
+            if result.latency_ms is None:
+                result.latency_ms = latency_ms
+            return result
         except Exception as exc:
+            latency_ms = round((time.perf_counter() - start) * 1000)
             self._track_route(
-                ComputeTarget.EXTERNAL_OPENAI,
+                target,
                 reason_code,
                 is_error=True,
-                latency_ms=round((time.perf_counter() - start) * 1000),
+                latency_ms=latency_ms,
                 error_message=str(exc),
             )
             return RoutingResult(
-                target=ComputeTarget.EXTERNAL_OPENAI,
-                response=f"OpenAI error: {exc}",
+                target=target,
+                response=f"{label} error: {exc}",
                 routing_reason=f"{reason} - error",
                 routing_reason_code=f"{reason_code}.error",
-            )
-
-    def _route_anthropic(self, prompt: str, reason: str, reason_code: str, **generation_kwargs: Any) -> RoutingResult:
-        start = time.perf_counter()
-        try:
-            response = self.anthropic.generate(prompt, **generation_kwargs)
-            self._track_route(
-                ComputeTarget.EXTERNAL_ANTHROPIC, reason_code, latency_ms=round((time.perf_counter() - start) * 1000)
-            )
-            return RoutingResult(
-                target=ComputeTarget.EXTERNAL_ANTHROPIC,
-                response=response,
-                routing_reason=reason,
-                routing_reason_code=reason_code,
-            )
-        except Exception as exc:
-            self._track_route(
-                ComputeTarget.EXTERNAL_ANTHROPIC,
-                reason_code,
-                is_error=True,
-                latency_ms=round((time.perf_counter() - start) * 1000),
-                error_message=str(exc),
-            )
-            return RoutingResult(
-                target=ComputeTarget.EXTERNAL_ANTHROPIC,
-                response=f"Anthropic error: {exc}",
-                routing_reason=f"{reason} - error",
-                routing_reason_code=f"{reason_code}.error",
-            )
-
-    def _route_xai(self, prompt: str, reason: str, reason_code: str, **generation_kwargs: Any) -> RoutingResult:
-        start = time.perf_counter()
-        try:
-            response = self.xai.generate(prompt, **generation_kwargs)
-            self._track_route(
-                ComputeTarget.EXTERNAL_XAI, reason_code, latency_ms=round((time.perf_counter() - start) * 1000)
-            )
-            return RoutingResult(
-                target=ComputeTarget.EXTERNAL_XAI,
-                response=response,
-                routing_reason=reason,
-                routing_reason_code=reason_code,
-            )
-        except Exception as exc:
-            self._track_route(
-                ComputeTarget.EXTERNAL_XAI,
-                reason_code,
-                is_error=True,
-                latency_ms=round((time.perf_counter() - start) * 1000),
-                error_message=str(exc),
-            )
-            return RoutingResult(
-                target=ComputeTarget.EXTERNAL_XAI,
-                response=f"xAI error: {exc}",
-                routing_reason=f"{reason} - error",
-                routing_reason_code=f"{reason_code}.error",
+                latency_ms=latency_ms,
             )
 
     @staticmethod
     def _packet_value(packet: Any, snake_name: str, camel_name: str, default: Any) -> Any:
-        snake_value = getattr(packet, snake_name, None)
-        if snake_value is not None:
-            return snake_value
-        camel_value = getattr(packet, camel_name, None)
-        if camel_value is not None:
-            return camel_value
-        return default
+        return _packet_value(packet, snake_name, camel_name, default)
 
     def get_status(self) -> dict[str, bool]:
         return {
             "llamacpp": self.llamacpp is not None,
+            "ollama": self.ollama is not None,
             "openai": self.openai is not None,
             "anthropic": self.anthropic is not None,
             "xai": self.xai is not None,
         }
-
-
-def _packet_destination(glyph_packet: Any) -> str:
-    return str(getattr(glyph_packet, "destination", "") or "").strip().upper()
 
 
 def _select_lane(clients: dict[str, Any], prefix: str, glyph_packet: Any):
@@ -760,22 +1105,37 @@ def _select_lane(clients: dict[str, Any], prefix: str, glyph_packet: Any):
     return clients.get(prefix)
 
 
-def build_router_from_env(config: RoutingConfig | None = None, glyph_packet: Any | None = None) -> AdaptiveRouter:
+def build_router_from_env(
+    config: RoutingConfig | None = None,
+    glyph_packet: Any | None = None,
+) -> AdaptiveRouter:
     clients = create_configured_clients()
+
     selected_llamacpp = (
         _select_lane(clients, "llamacpp", glyph_packet) if glyph_packet is not None else clients.get("llamacpp")
     )
+
+    selected_ollama = (
+        _select_lane(clients, "ollama", glyph_packet) if glyph_packet is not None else clients.get("ollama")
+    )
+
+    preferred_local_backend = str(
+        clients.get("_preferred_local_backend") or os.environ.get("LLAMA_MODEL_GLYPHOS_LOCAL_BACKEND") or "llamacpp"
+    )
+
     return AdaptiveRouter(
         llamacpp_client=selected_llamacpp,
+        ollama_client=selected_ollama,
         openai_client=clients.get("openai"),
         anthropic_client=clients.get("anthropic"),
         xai_client=clients.get("xai"),
+        preferred_local_backend=preferred_local_backend,
         config=config,
     )
 
 
 def route_with_configured_clients(
-    glyph_packet,
+    glyph_packet: Any,
     prompt: str | None = None,
     context_payload: ContextPayload | None = None,
     upstream_context: str | ContextPacket | None = None,
@@ -790,3 +1150,344 @@ def route_with_configured_clients(
         upstream_context=upstream_context,
         **generation_kwargs,
     )
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "GlyphOS AI Compute router. Accepts glyph packets or glyph-encodable "
+            "intent fields and routes them to configured inference backends. "
+            "This CLI is glyph-first; raw prompt text is not accepted as input."
+        )
+    )
+    parser.add_argument(
+        "packet",
+        nargs="?",
+        help=(
+            "Existing glyph packet to decode and route, for example "
+            "'abc123|Ψ8|?H • T07|MDL>'. If omitted, --action and --destination "
+            "must be provided so a packet can be created first."
+        ),
+    )
+    parser.add_argument(
+        "--action",
+        help="Structured intent action used to create a packet when no packet is supplied.",
+    )
+    parser.add_argument(
+        "--destination",
+        help="Structured intent destination used to create a packet when no packet is supplied.",
+    )
+    parser.add_argument(
+        "--psi",
+        type=float,
+        default=0.5,
+        help="Psi coherence value used when creating a packet (default: 0.5).",
+    )
+    parser.add_argument(
+        "--time-slot",
+        type=int,
+        default=7,
+        help="Time slot used when creating a packet (default: 7).",
+    )
+    parser.add_argument(
+        "--instance-id",
+        help="Optional instance id used when creating a packet. Defaults to a short generated id.",
+    )
+    parser.add_argument(
+        "--upstream-context",
+        help="Explicit upstream context string to append via [CONTEXT_ANCHOR].",
+    )
+    parser.add_argument(
+        "--upstream-context-json",
+        help=(
+            "Explicit ContextPacket-compatible JSON string. "
+            'Example: \'{"content":"LANE_STATE(AURORA): healthy","locality":"orion-local"}\''
+        ),
+    )
+    parser.add_argument(
+        "--context-raw",
+        help="Explicit raw ContextPayload.raw_context value for local compression-aware prompt building.",
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Print configured backend availability and exit without routing a request.",
+    )
+    parser.add_argument(
+        "--telemetry",
+        action="store_true",
+        help="Print routing telemetry snapshot and exit.",
+    )
+    parser.add_argument(
+        "--reset-telemetry",
+        action="store_true",
+        help="Reset routing telemetry and exit.",
+    )
+    parser.add_argument(
+        "--show-prompt",
+        action="store_true",
+        help="Include the shaped prompt in the CLI output.",
+    )
+    parser.add_argument(
+        "--show-structured",
+        action="store_true",
+        help="Include the structured glyph JSON view in the CLI output.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of plain text.",
+    )
+    return parser
+
+
+def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    if args.status or args.telemetry or args.reset_telemetry:
+        return
+
+    if args.packet and (args.action or args.destination):
+        parser.error("provide either a glyph packet or structured intent fields, not both")
+
+    if not args.packet and not (args.action and args.destination):
+        parser.error("provide a glyph packet or both --action and --destination")
+
+    if not 0.0 <= float(args.psi) <= 1.0:
+        parser.error("--psi must be between 0.0 and 1.0")
+
+    if int(args.time_slot) < 0:
+        parser.error("--time-slot must be zero or greater")
+
+    if args.upstream_context and args.upstream_context_json:
+        parser.error("provide either --upstream-context or --upstream-context-json, not both")
+
+
+def _resolve_packet(args: argparse.Namespace) -> tuple[str, Any]:
+    if decode_packet_string is None or encode_packet_string is None:
+        raise RuntimeError("glyph encoder helpers are unavailable; CLI packet routing is disabled")
+
+    if args.packet:
+        packet_text = str(args.packet).strip()
+        glyph_packet = decode_packet_string(packet_text)
+        if glyph_packet is None:
+            raise ValueError("invalid glyph packet; expected encoded GlyphOS packet input")
+        return packet_text, glyph_packet
+
+    instance_id = (args.instance_id or uuid.uuid4().hex[:6]).strip()
+    intent = Intent(
+        action=str(args.action).strip().upper(),
+        destination=str(args.destination).strip().upper(),
+        time_slot=int(args.time_slot),
+    )
+    packet_text = encode_packet_string(instance_id, intent, float(args.psi))
+    glyph_packet = decode_packet_string(packet_text)
+
+    if glyph_packet is None:
+        raise ValueError("failed to decode generated glyph packet")
+
+    return packet_text, glyph_packet
+
+
+def _resolve_upstream_context(args: argparse.Namespace) -> str | ContextPacket | None:
+    if args.upstream_context_json:
+        parsed = json.loads(args.upstream_context_json)
+        if not isinstance(parsed, Mapping):
+            raise ValueError("--upstream-context-json must decode to an object")
+        return dict(parsed)
+
+    if args.upstream_context:
+        return str(args.upstream_context)
+
+    return None
+
+
+def _resolve_context_payload(args: argparse.Namespace) -> ContextPayload | None:
+    if not args.context_raw:
+        return None
+
+    raw_context = str(args.context_raw)
+    return ContextPayload(
+        raw_context=raw_context,
+        raw_context_chars=len(raw_context),
+        encoding_status="provided",
+    )
+
+
+def _status_payload() -> dict[str, Any]:
+    clients = create_configured_clients()
+    statuses: dict[str, bool] = {}
+
+    for key, value in clients.items():
+        if key.startswith("_"):
+            continue
+        statuses[key] = bool(value)
+
+    return {
+        "preferred_local_backend": clients.get("_preferred_local_backend", "llamacpp"),
+        "available_backends": statuses,
+    }
+
+
+def _result_payload(
+    packet_text: str,
+    glyph_packet: Any,
+    prompt: str,
+    result: RoutingResult,
+    args: argparse.Namespace,
+    upstream_context: str | ContextPacket | None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "packet": packet_text,
+        "decoded_packet": _packet_to_dict(glyph_packet),
+        "target": result.target.value,
+        "routing_reason": result.routing_reason,
+        "routing_reason_code": result.routing_reason_code,
+        "response": result.response,
+        "upstream_context_provided": upstream_context is not None,
+    }
+
+    if result.latency_ms is not None:
+        payload["latency_ms"] = result.latency_ms
+
+    if result.tokens_used is not None:
+        payload["tokens_used"] = result.tokens_used
+
+    if args.show_prompt:
+        payload["prompt"] = prompt
+
+    if args.show_structured:
+        payload["structured"] = glyph_to_structured_json(
+            glyph_packet,
+            upstream_context=upstream_context,
+        )
+
+    return payload
+
+
+def _print_plain(
+    packet_text: str,
+    glyph_packet: Any,
+    prompt: str,
+    result: RoutingResult,
+    args: argparse.Namespace,
+    upstream_context: str | ContextPacket | None,
+) -> int:
+    print(f"Packet: {packet_text}")
+    print(f"Target: {result.target.value}")
+    print(f"Reason: {result.routing_reason}")
+    print(f"Reason code: {result.routing_reason_code}")
+
+    if result.latency_ms is not None:
+        print(f"Latency: {result.latency_ms} ms")
+
+    print("Decoded:")
+    for key, value in _packet_to_dict(glyph_packet).items():
+        print(f"  {key}: {value}")
+
+    if upstream_context is not None:
+        print("Upstream context: provided")
+
+    if args.show_structured:
+        print("Structured:")
+        print(
+            json.dumps(
+                glyph_to_structured_json(
+                    glyph_packet,
+                    upstream_context=upstream_context,
+                ),
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+
+    if args.show_prompt:
+        print("Prompt:")
+        print(prompt)
+
+    print("Response:")
+    print(result.response)
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _parser()
+    args = parser.parse_args(argv)
+    _validate_args(args, parser)
+
+    if args.reset_telemetry:
+        reset_routing_telemetry()
+        payload = {"ok": True, "message": "routing telemetry reset"}
+        if args.json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(payload["message"])
+        return 0
+
+    if args.telemetry:
+        payload = routing_telemetry_snapshot()
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else payload)
+        return 0
+
+    if args.status:
+        payload = _status_payload()
+        if args.json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(f"Preferred local backend: {payload['preferred_local_backend']}")
+            print("Available backends:")
+            for name, available in payload["available_backends"].items():
+                print(f"  {name}: {'yes' if available else 'no'}")
+        return 0
+
+    try:
+        packet_text, glyph_packet = _resolve_packet(args)
+        upstream_context = _resolve_upstream_context(args)
+        context_payload = _resolve_context_payload(args)
+
+        prompt = _glyph_to_prompt_safe(
+            glyph_packet,
+            upstream_context=upstream_context,
+        )
+
+        router = build_router_from_env(glyph_packet=glyph_packet)
+        result = router.route(
+            glyph_packet,
+            prompt=prompt,
+            context_payload=context_payload,
+            upstream_context=upstream_context,
+        )
+    except Exception as exc:
+        if args.json:
+            print(json.dumps({"ok": False, "error": str(exc)}, indent=2, ensure_ascii=False))
+        else:
+            print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(
+            json.dumps(
+                _result_payload(
+                    packet_text,
+                    glyph_packet,
+                    prompt,
+                    result,
+                    args,
+                    upstream_context,
+                ),
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+    return _print_plain(
+        packet_text,
+        glyph_packet,
+        prompt,
+        result,
+        args,
+        upstream_context,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
