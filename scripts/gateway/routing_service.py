@@ -13,11 +13,31 @@ _client_cache_lock = threading.Lock()
 # Learning Loop persistence store — set by gateway at startup
 _persistence_store: Any = None
 
+# Unified telemetry callback — set by gateway to merge routing events
+# into the gateway telemetry store (closes the architectural gap between
+# GlyphOS routing telemetry and gateway request telemetry).
+_telemetry_callback: Callable[[dict[str, Any]], None] | None = None
+
 
 def set_persistence_store(store: Any) -> None:
     """Set the Learning Loop persistence store for outcome recording."""
     global _persistence_store
     _persistence_store = store
+
+
+def set_telemetry_callback(callback: Callable[[dict[str, Any]], None] | None) -> None:
+    """Set unified telemetry callback to merge routing events into gateway telemetry."""
+    global _telemetry_callback
+    _telemetry_callback = callback
+
+
+def _emit_routing_event(event: dict[str, Any]) -> None:
+    """Emit a routing event to the unified telemetry callback if configured."""
+    if _telemetry_callback is not None:
+        try:
+            _telemetry_callback(event)
+        except Exception:
+            pass
 
 
 def _record_outcome(domain: str, approach: str, success: bool, latency_ms: float) -> None:
@@ -95,10 +115,34 @@ def route_prompt(
     latency_ms = round((time.perf_counter() - start) * 1000)
     if result.target.value == "fallback" or str(result.routing_reason_code).endswith(".error"):
         _record_outcome("routing", result.target.value, success=False, latency_ms=latency_ms)
+        _emit_routing_event({
+            "event": "route",
+            "target": result.target.value,
+            "reason_code": result.routing_reason_code,
+            "reason": result.routing_reason,
+            "success": False,
+            "latency_ms": latency_ms,
+            "model": model,
+            "encoding_status": packet.encoding_status,
+            "encoding_format": packet.encoding_format,
+            "encoding_ratio": packet.encoding_ratio,
+        })
         raise GatewayError(f"{result.target.value} route failed: {result.response}", target=result.target.value)
     _record_outcome("routing", result.target.value, success=True, latency_ms=latency_ms)
     if tools:
         _record_outcome("tool_call", result.target.value, success=bool(result.tool_calls), latency_ms=latency_ms)
+    _emit_routing_event({
+        "event": "route",
+        "target": result.target.value,
+        "reason_code": result.routing_reason_code,
+        "reason": result.routing_reason,
+        "success": True,
+        "latency_ms": latency_ms,
+        "model": model,
+        "encoding_status": packet.encoding_status,
+        "encoding_format": packet.encoding_format,
+        "encoding_ratio": packet.encoding_ratio,
+    })
     headers = {
         "X-LMM-Route-Mode": "routed",
         "X-LMM-GlyphOS-Target": result.target.value,
@@ -141,6 +185,18 @@ def route_prompt_stream(
         max_tokens=max_tokens,
         temperature=temperature,
     )
+    route_duration_ms = round((time.perf_counter() - start) * 1000)
+    _emit_routing_event({
+        "event": "route_stream",
+        "target": str(routed.get("target", "unknown")),
+        "reason_code": str(routed.get("reason_code", "unknown")),
+        "success": True,
+        "latency_ms": route_duration_ms,
+        "model": model,
+        "encoding_status": packet.encoding_status,
+        "encoding_format": packet.encoding_format,
+        "encoding_ratio": packet.encoding_ratio,
+    })
     headers = {
         "X-LMM-Route-Mode": "routed",
         "X-LMM-GlyphOS-Target": str(routed["target"]),
@@ -150,7 +206,7 @@ def route_prompt_stream(
         "X-LMM-Route-Target": str(routed["target"]),
     }
     routed["route_start_ms"] = 0
-    routed["route_duration_ms"] = round((time.perf_counter() - start) * 1000)
+    routed["route_duration_ms"] = route_duration_ms
     return routed, headers, chunks
 
 

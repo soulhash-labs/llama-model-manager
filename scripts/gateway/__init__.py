@@ -26,7 +26,7 @@ from .protocol_normalizers import (
     message_summary,
     messages_to_prompt,
 )
-from .routing_service import create_router, route_prompt, route_prompt_stream
+from .routing_service import create_router, route_prompt, route_prompt_stream, set_telemetry_callback
 from .sse import (
     anthropic_sse_event,
     sse_comment,
@@ -89,4 +89,5 @@ __all__ = [
     "create_router",
     "route_prompt",
     "route_prompt_stream",
+    "set_telemetry_callback",
 ]

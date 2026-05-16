@@ -801,6 +801,8 @@ def create_gateway_server(
     state_path = Path.home() / ".config" / "llama-model-manager" / "agent_state.json"
     try:
         from gateway.routing_service import set_persistence_store  # noqa: E402
+        from gateway.routing_service import set_telemetry_callback  # noqa: E402
+        from gateway.telemetry import safe_record_gateway_request  # noqa: E402
         from persistence import PersistenceStore  # noqa: E402
 
         state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -810,6 +812,7 @@ def create_gateway_server(
         )
         server.persistence_store = store  # type: ignore[attr-defined]
         set_persistence_store(store)
+        set_telemetry_callback(safe_record_gateway_request)
     except Exception:
         server.persistence_store = None  # type: ignore[attr-defined]
 
