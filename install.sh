@@ -436,10 +436,71 @@ build_runtime_during_install() {
     if [[ -t 0 && -t 1 ]]; then
         # Interactive: show what we're doing and ask
         printf 'post-install: host %s backend detected\n' "$primary_backend"
-        if [[ "$primary_backend" == "cuda" ]] && ! command -v nvcc >/dev/null 2>&1; then
-            printf 'post-install: CUDA host detected but nvcc is not in PATH\n'
-            printf 'post-install: installer will attempt to install CUDA toolkit packages before compiling the CUDA runtime\n'
+    if [[ "$primary_backend" == "cuda" ]] && ! command -v nvcc >/dev/null 2>&1; then
+        printf 'post-install: CUDA host detected but nvcc is not in PATH\n'
+        printf 'post-install: installing CUDA toolkit (nvidia-cuda-toolkit)...\n'
+        if [[ -t 0 && -t 1 ]]; then
+            printf 'Would you like to install nvidia-cuda-toolkit now? [Y/n] '
+            local reply
+            read -r reply || reply=""
+            reply="$(to_lower "$reply")"
+            if [[ "$reply" != "n" && "$reply" != "no" ]]; then
+                if command -v apt-get >/dev/null 2>&1; then
+                    (apt-get update -qq && apt-get install -y -qq nvidia-cuda-toolkit) 2>/dev/null || \
+                        (sudo apt-get update -qq && sudo apt-get install -y -qq nvidia-cuda-toolkit) 2>/dev/null || \
+                        printf 'post-install: failed to install nvidia-cuda-toolkit; install manually: sudo apt install nvidia-cuda-toolkit\n'
+                elif command -v dnf >/dev/null 2>&1; then
+                    (dnf install -y cuda-toolkit) 2>/dev/null || \
+                        (sudo dnf install -y cuda-toolkit) 2>/dev/null || \
+                        printf 'post-install: failed to install cuda-toolkit; install manually: sudo dnf install cuda-toolkit\n'
+                fi
+                if command -v nvcc >/dev/null 2>&1; then
+                    printf 'post-install: nvcc installed successfully\n'
+                else
+                    printf 'post-install: nvcc not found after install; falling back to CPU runtime\n'
+                    primary_backend="cpu"
+                fi
+            else
+                printf 'post-install: CUDA toolkit install skipped by user; falling back to CPU runtime\n'
+                primary_backend="cpu"
+            fi
+        else
+            printf 'post-install: non-interactive; install manually: sudo apt install nvidia-cuda-toolkit\n'
+            primary_backend="cpu"
         fi
+    fi
+
+    if [[ -t 0 && -t 1 ]]; then
+        # Interactive: show what we're doing and ask
+        printf 'post-install: host %s backend detected\n' "$primary_backend"
+        printf 'Would you like to check/install build dependencies and compile a local llama.cpp runtime now? [Y/n] '
+        local reply
+        read -r reply || reply=""
+        reply="$(to_lower "$reply")"
+        if [[ "$reply" == "n" || "$reply" == "no" ]]; then
+            printf 'post-install: runtime build skipped by user\n'
+            return 0
+        fi
+    else
+        # Non-interactive / headless: only auto-build if deps are trivially
+        # available (no sudo prompts, no user interaction needed).
+        if [[ "$primary_backend" == "cpu" ]]; then
+            printf 'post-install: non-interactive install on CPU-only host; building CPU runtime\n'
+        elif command -v nvcc >/dev/null 2>&1; then
+            printf 'post-install: CUDA host with nvcc available; building CUDA runtime\n'
+        elif [[ "$primary_backend" == "cuda" ]]; then
+            printf 'post-install: CUDA host but nvcc not in PATH; falling back to CPU runtime\n'
+            primary_backend="cpu"
+        elif [[ "$primary_backend" == "vulkan" ]] && ! command -v glslc >/dev/null 2>&1 && ! command -v glslangValidator >/dev/null 2>&1; then
+            printf 'post-install: Vulkan host detected but SDK tools not in PATH; falling back to CPU runtime\n'
+            primary_backend="cpu"
+        elif [[ "$primary_backend" == "metal" ]] && ! xcode-select -p >/dev/null 2>&1; then
+            printf 'post-install: macOS Metal host detected but Xcode CLT not installed; falling back to CPU runtime\n'
+            primary_backend="cpu"
+        else
+            printf 'post-install: non-interactive install with %s build tools available; building %s runtime\n' "$primary_backend" "$primary_backend"
+        fi
+    fi
         printf 'Would you like to check/install build dependencies and compile a local llama.cpp runtime now? [Y/n] '
         local reply
         read -r reply || reply=""
