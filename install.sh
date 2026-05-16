@@ -352,6 +352,10 @@ build_runtime_during_install() {
             if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
                 has_gpu="yes"
                 primary_backend="cuda"
+            elif [[ -e /dev/nvidia0 ]] || command -v /usr/bin/nvidia-smi >/dev/null 2>&1 || lspci 2>/dev/null | grep -qi 'nvidia\|3d controller'; then
+                has_gpu="yes"
+                primary_backend="cuda"
+                printf 'post-install: GPU detected via device/PCI (nvidia-smi not fully loaded); assuming CUDA backend\n'
             elif ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so'; then
                 has_gpu="yes"
                 primary_backend="vulkan"
@@ -367,6 +371,37 @@ build_runtime_during_install() {
     if [[ "$has_gpu" != "yes" ]]; then
         printf 'post-install: no GPU runtime detected on this host; building CPU fallback only\n'
         primary_backend="cpu"
+    fi
+
+    if [[ "$primary_backend" == "cuda" ]] && ! command -v nvidia-smi >/dev/null 2>&1; then
+        printf 'post-install: NVIDIA GPU detected but nvidia-smi is not installed\n'
+        if [[ -t 0 && -t 1 ]]; then
+            printf 'post-install: nvidia-smi is needed for GPU detection and VRAM reporting\n'
+            printf 'Would you like to install nvidia-smi now? [Y/n] '
+            local reply
+            read -r reply || reply=""
+            reply="$(to_lower "$reply")"
+            if [[ "$reply" != "n" && "$reply" != "no" ]]; then
+                if command -v apt-get >/dev/null 2>&1; then
+                    printf 'post-install: installing nvidia-utils via apt-get...\n'
+                    apt-get update -qq && apt-get install -y -qq nvidia-utils 2>/dev/null || \
+                        sudo apt-get update -qq && sudo apt-get install -y -qq nvidia-utils 2>/dev/null || \
+                        printf 'post-install: failed to install nvidia-utils; install manually: sudo apt install nvidia-utils\n'
+                elif command -v dnf >/dev/null 2>&1; then
+                    printf 'post-install: installing nvidia-modprobe via dnf...\n'
+                    dnf install -y nvidia-modprobe 2>/dev/null || \
+                        sudo dnf install -y nvidia-modprobe 2>/dev/null || \
+                        printf 'post-install: failed to install nvidia-modprobe; install manually: sudo dnf install nvidia-modprobe\n'
+                fi
+                if command -v nvidia-smi >/dev/null 2>&1; then
+                    printf 'post-install: nvidia-smi installed successfully\n'
+                else
+                    printf 'post-install: nvidia-smi not found after install attempt; you may need to reboot or install the full NVIDIA driver\n'
+                fi
+            fi
+        else
+            printf 'post-install: install nvidia-smi manually (sudo apt install nvidia-utils) and rerun: llama-model build-runtime --backend cuda\n'
+        fi
     fi
 
     if [[ -t 0 && -t 1 ]]; then
@@ -556,6 +591,9 @@ ensure_context_mode_mcp_dist() {
     if (
         cd "$mcp_dir"
         npm_hardened_ci omit
+        # esbuild needs its platform binary from optionalDependencies;
+        # --omit=optional skipped it, so install it explicitly without scripts
+        npm install @esbuild/linux-x64 --save-optional --ignore-scripts --no-audit --fund=false 2>/dev/null || true
         npm run build:mcp
     ); then
         printf 'built Context Mode MCP server bundle\n'
