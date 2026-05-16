@@ -398,10 +398,10 @@ build_runtime_during_install() {
             reply="$(to_lower "$reply")"
             if [[ "$reply" != "n" && "$reply" != "no" ]]; then
                 if command -v apt-get >/dev/null 2>&1; then
-                    printf 'post-install: installing nvidia-utils via apt-get...\n'
-                    (apt-get update -qq && apt-get install -y -qq nvidia-utils) 2>/dev/null || \
-                        (sudo apt-get update -qq && sudo apt-get install -y -qq nvidia-utils) 2>/dev/null || \
-                        printf 'post-install: failed to install nvidia-utils; install manually: sudo apt install nvidia-utils\n'
+                    printf 'post-install: installing nvidia-utils-580 via apt-get...\n'
+                    (apt-get update -qq && apt-get install -y -qq nvidia-utils-580) 2>/dev/null || \
+                        (sudo apt-get update -qq && sudo apt-get install -y -qq nvidia-utils-580) 2>/dev/null || \
+                        printf 'post-install: failed to install nvidia-utils-580; install manually: sudo apt install nvidia-utils-580\n'
                 elif command -v dnf >/dev/null 2>&1; then
                     printf 'post-install: installing nvidia-modprobe via dnf...\n'
                     (dnf install -y nvidia-modprobe) 2>/dev/null || \
