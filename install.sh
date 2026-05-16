@@ -454,6 +454,17 @@ build_runtime_during_install() {
                         (sudo dnf install -y cuda-toolkit) 2>/dev/null || \
                         printf 'post-install: failed to install cuda-toolkit; install manually: sudo dnf install cuda-toolkit\n'
                 fi
+                if [[ -d /usr/local/cuda ]]; then
+                    export PATH="/usr/local/cuda/bin:$PATH"
+                    export LD_LIBRARY_PATH="/usr/local/cuda/lib64:$LD_LIBRARY_PATH"
+                    if [[ -r "$HOME/.bashrc" ]]; then
+                        grep -q '/usr/local/cuda' "$HOME/.bashrc" 2>/dev/null || {
+                            printf 'export PATH=/usr/local/cuda/bin:$PATH\n' >> "$HOME/.bashrc"
+                            printf 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH\n' >> "$HOME/.bashrc"
+                            printf 'post-install: added CUDA paths to ~/.bashrc\n'
+                        }
+                    fi
+                fi
                 if command -v nvcc >/dev/null 2>&1; then
                     printf 'post-install: nvcc installed successfully\n'
                 else
