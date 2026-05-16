@@ -178,6 +178,7 @@ Usage:
   llama-model sync-openclaw [--mode routed|direct] [--profile NAME] [alias|/path/to/model.gguf]
   llama-model sync-claude [model-id]
   llama-model sync-glyphos [alias|/path/to/model.gguf]
+  llama-model sync-oh-my-openagent
   llama-model context-mcp status|build
   llama-model update-check [--component lmm|llamacpp|all] [--json]
   llama-model gateway start|stop|restart|status|logs
@@ -5486,6 +5487,7 @@ sync_opencode() {
                 --fast-provider-name llamacpp_fast \
                 --available-models "$openagent_available_models" || return $?
             openagent_status="synced"
+            patch_oh_my_openagent || printf 'warning: oh-my-openagent patch failed (plugin may need restart)\n' >&2
         else
             openagent_status="disabled"
         fi
@@ -6530,6 +6532,66 @@ dashboard_service_uninstall() {
     printf 'removed %s\n' "$DASHBOARD_SERVICE_UNIT_FILE"
 }
 
+patch_oh_my_openagent() {
+    local dist_file=""
+    for candidate in \
+        "${XDG_CACHE_HOME:-$HOME/.cache}/opencode/packages/oh-my-openagent@latest/node_modules/oh-my-openagent/dist/index.js" \
+        "$HOME/.cache/opencode/packages/oh-my-openagent@latest/node_modules/oh-my-openagent/dist/index.js"; do
+        if [[ -f "$candidate" ]]; then
+            dist_file="$candidate"
+            break
+        fi
+    done
+    [[ -n "$dist_file" ]] || return 0
+
+    python3 - "$dist_file" <<'PY'
+import sys, re, os
+
+path = sys.argv[1]
+try:
+    code = open(path, "r", encoding="utf-8").read()
+except OSError:
+    sys.exit(0)
+
+changed = False
+
+# 1. run_in_background defaulting
+old_run = "const runInBackground = args.run_in_background;"
+new_run = "const runInBackground = args.run_in_background === undefined ? false : args.run_in_background;"
+if old_run in code and new_run not in code:
+    code = code.replace(old_run, new_run)
+    changed = True
+
+# 2. Remove throw on missing run_in_background
+throw_run = re.search(
+    r'\s*if \(runInBackground === undefined\) \{\s*throw new Error\("Invalid arguments: \'run_in_background\' parameter is REQUIRED\.[^"]*"\);\s*\}',
+    code,
+)
+if throw_run:
+    code = code[: throw_run.start()] + code[throw_run.end() :]
+    changed = True
+
+# 3. load_skills defaulting: replace throw with default
+old_load_throw = re.search(
+    r'if \(loadSkills === undefined\) \{\s*throw new Error\("Invalid arguments: \'load_skills\' parameter is REQUIRED\.[^"]*"\);\s*\}',
+    code,
+)
+new_load_default = "if (loadSkills === undefined) {\n    loadSkills = [];\n  }"
+if old_load_throw and new_load_default not in code:
+    code = code[: old_load_throw.start()] + new_load_default + code[old_load_throw.end() :]
+    changed = True
+
+if changed:
+    tmp = path + ".lmm-patch-tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(code)
+    os.replace(tmp, path)
+    print("oh-my-openagent task() defaults patch applied.")
+else:
+    print("oh-my-openagent task() defaults patch already applied.")
+PY
+}
+
 opencode_plugin_command() {
     local action="${1:-status}"
     shift || true
@@ -7052,6 +7114,20 @@ main() {
         sync-glyphos)
             shift
             sync_glyphos "$@"
+            ;;
+        sync-oh-my-openagent)
+            shift
+            patch_oh_my_openagent
+            if [[ -f "$OH_MY_OPENAGENT_CONFIG_FILE" ]]; then
+                python3 "$APP_ROOT/scripts/integration_sync.py" oh-my-openagent \
+                    --config-file "$OH_MY_OPENAGENT_CONFIG_FILE" \
+                    --model-name "$(api_current_model_id 2>/dev/null || echo "")" \
+                    --full-provider-name llamacpp \
+                    --fast-provider-name llamacpp_fast || true
+                printf 'oh-my-openagent config synced.\n'
+            else
+                printf 'oh-my-openagent config not found at %s\n' "$OH_MY_OPENAGENT_CONFIG_FILE"
+            fi
             ;;
         context-mcp)
             shift
