@@ -61,3 +61,10 @@ htmlcov/
 .claude/
 .opencode/
 .sisyphus/
+
+# Local session artifacts
+session-*.md
+
+# Local dev/ops directories
+.omx/
+tasks/
