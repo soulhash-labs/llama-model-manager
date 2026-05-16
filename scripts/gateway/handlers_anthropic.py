@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import traceback
@@ -229,7 +230,9 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: Mapping[str, Any]) -> 
                     "status": RunStatus.COMPLETED.value if success else RunStatus.CANCELLED.value,
                     "exit_result": ExitResult.SUCCESS.value if success else ExitResult.USER_CANCELLED.value,
                     "stream_tool_call_detected": bool(tool_call_info),
-                    "stream_tool_call_name": str(tool_call_info.get("name", "")) if isinstance(tool_call_info, dict) else "",
+                    "stream_tool_call_name": str(tool_call_info.get("name", ""))
+                    if isinstance(tool_call_info, dict)
+                    else "",
                     "tool_invocation_mode": tool_report["tool_invocation_mode"],
                     "tool_name": tool_report["tool_name"],
                     "lane": "4011" if record.get("gateway_mode") == "fast" else "4010",
@@ -245,6 +248,33 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: Mapping[str, Any]) -> 
             safe_record_gateway_request(record)
             return
 
+        tools = payload.get("tools")
+        tool_choice = payload.get("tool_choice")
+
+        # Convert Anthropic tools to OpenAI format for the router
+        if tools:
+            openai_tools = []
+            for t in tools:
+                if isinstance(t, dict):
+                    openai_tools.append(
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": t.get("name", ""),
+                                "description": t.get("description", ""),
+                                "parameters": t.get("input_schema", {}),
+                            },
+                        }
+                    )
+            tools = openai_tools
+
+        # Convert Anthropic tool_choice to OpenAI format
+        if tool_choice and isinstance(tool_choice, dict):
+            if tool_choice.get("type") == "function":
+                func_name = tool_choice.get("function", {}).get("name", "")
+                if func_name:
+                    tool_choice = {"type": "function", "function": {"name": func_name}}
+
         routed, _ = invoke_route_prompt(
             route_fn=route_prompt,
             prompt=prompt,
@@ -254,6 +284,8 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: Mapping[str, Any]) -> 
             temperature=temperature,
             context_payload=context_payload,
             upstream_context=pipeline.get("upstream_context"),
+            tools=tools,
+            tool_choice=tool_choice,
         )
 
         record.update(
@@ -301,7 +333,36 @@ def handle_messages(handler: BaseHTTPRequestHandler, api: Mapping[str, Any]) -> 
             routed=routed,
             pipeline=pipeline,
         )
-        response = apply_anthropic_tool_use_response(response, routed.get("text", ""), payload)
+
+        tool_calls = routed.get("tool_calls")
+        if isinstance(tool_calls, list) and tool_calls:
+            response["stop_reason"] = "tool_use"
+            response["content"] = []
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                func = tc.get("function", {})
+                if isinstance(func, dict):
+                    name = str(func.get("name", ""))
+                    args = func.get("arguments", {})
+                else:
+                    name = str(tc.get("name", ""))
+                    args = tc.get("arguments", {})
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except (json.JSONDecodeError, ValueError):
+                        args = {"value": args}
+                response["content"].append(
+                    {
+                        "type": "tool_use",
+                        "id": str(tc.get("id") or f"toolu_{int(started * 1000)}"),
+                        "name": name,
+                        "input": args if isinstance(args, dict) else {},
+                    }
+                )
+        else:
+            response = apply_anthropic_tool_use_response(response, routed.get("text", ""), payload)
 
         safe_record_gateway_request(record)
         json_response(handler, 200, response)

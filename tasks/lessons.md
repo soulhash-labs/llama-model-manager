@@ -15,6 +15,11 @@
 - Recovery paths should be tolerant but not silent. If a JSON store is malformed or has the wrong top-level type, keep the service alive with default state but emit a warning that names the path and failure.
 - Dashboard activation state must come from backend defaults/runtime state, not browser `localStorage`. A local-only activation flag can make the UI say a pipeline is enabled while gateway processes still run with disabled environment variables.
 
+> Lessons annotated with `> **Related concept**:` link patterns in this file to the
+> research concepts in [`docs/self_learning.md`](../docs/self_learning.md). These are
+> cross-references showing where empirical findings validate (or challenge) the
+> theoretical framework.
+
 # Session 2026-05-11: Review Triage and Integration Hardening
 
 ## What we did
@@ -456,6 +461,7 @@
 - **Explore agents consistently fabricate file paths and code patterns.** This session: `bin/llama-server` (doesn't exist), `src/server/process_manager.py` (doesn't exist), `bin/start_server.sh` (doesn't exist), `scripts/monitor_processes.sh` (doesn't exist), `web/admin/api_routes.py` (doesn't exist), `options.mode === 'build' && options.mode === 'deploy'` (doesn't exist in repo).
 - **The ratio of hallucination is consistent with earlier sessions**. Across all sessions, roughly 2/3 of AI-generated bug reports are false positives. The pattern: plausible-sounding file paths, correct-looking but wrong line numbers, and code patterns that appear correct at first glance but reference non-existent code.
 - **The defensible workflow**: Use explore agent output as hypotheses, always verify each finding against actual source code before acting, record false positives with evidence in lessons.md.
+> **Related concept**: [`docs/self_learning.md#5-provider-quality-tracking`](../docs/self_learning.md#5-provider-quality-tracking) — this is direct empirical validation. Agent types have measurably different quality/reliability per task domain (explore agents for code search vs. Oracle for architecture). Tracking per-agent-type success rates would quantify the 2/3 hallucination rate and encode the "verify first" workflow as a learned policy.
 
 ### Command injection in bash GUI scripts
 - **`open_terminal_cmd()` patterns with `bash -lc "..."` are injection-prone**: any user-controlled variable (`$title` containing model alias, file path) interpolated into the double-quoted string enables command injection via `$()`, backticks, `;`, or embedded `"`. The fix: always escape interpolated variables with `printf -v escaped '%q' "$var"` before embedding them.
@@ -549,6 +555,7 @@
 
 ### The same bug repeated across 3 layers
 - **installer** (`install.sh`), **doctor CLI** (`bin/llama-model`), and **gateway health check** (`context_provider.py`) all used `dist/index.js` existence as the sole readiness signal. This is a natural but dangerous abstraction — `dist/index.js` is a build artifact, not a deployment artifact. The correct readiness signal is: "build artifact exists AND runtime deps are installed."
+> **Related concept**: [`docs/self_learning.md#3-intrinsic-motivation-novelty--learning-progress--surprise`](../docs/self_learning.md#3-intrinsic-motivation-novelty--learning-progress--surprise) — the "surprise" component captures why this bug persisted: the outcome (build artifact exists → system ready) had high historical probability, so there was no intrinsic pressure to question the state representation. A surprise signal would trigger re-examination when the same check at 3 independent layers all use the exact same (incomplete) state feature.
 
 ### Explore agents hallucinate paths — always verify
 - Three explore agents in this session fabricated file paths: `mcp/` directory (doesn't exist), `scripts/npm_hardened_ci.py` (doesn't exist), `.cache/opencode/packages/` (not present). The finder reported "found 6 files" for `context_mode_mcp` references but missed the actual code in `bin/llama-model`. Always verify agent-sourced file paths against `ls` before relying on content. Shell scripts (`.sh`) contain critical logic often missed by Python-only searches.
@@ -621,6 +628,7 @@
 - **Every subagent delegation MUST include a `MUST NOT` clause** listing directories and files the agent is forbidden to touch. Without explicit scope boundaries, over-eager subagents wander into unrelated files and corrupt them.
 - **Always `git diff --stat` after every delegation** to catch scope creep before it becomes uncommitted damage. A subagent can silently modify a file in 2 seconds — finding it hours later costs far more.
 - **When deploying/syncing files to runtime**, the prompt must list exactly which files to copy and explicitly forbid touching anything else. Rogue edits to unrelated files (like `config/__init__.py`) are the predictable result of vague scope.
+> **Related concept**: [`docs/self_learning.md#2-state-representation`](../docs/self_learning.md#2-state-representation) — the "action" in a state-action-next_state transition includes the scope constraints of a delegation. Encoding the `MUST NOT` boundaries as part of the state would let the system learn which scope formulations produce correct subagent behavior and which produce scope creep.
 
 ### Duplicate implementation drift
 - **Two files with the same code will inevitably diverge.** If two `config/__init__.py` files have the same implementation, one will get fixed and the other won't. The fix is to make one a shim that re-exports from the canonical source.

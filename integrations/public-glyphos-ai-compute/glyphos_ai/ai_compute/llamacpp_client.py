@@ -32,7 +32,7 @@ class LlamaCppClient(BaseChatClient):
         self,
         base_url: str = DEFAULT_LLAMACPP_BASE_URL,
         model: str = "",
-        max_tokens: int = 1000,
+        max_tokens: int = 65536,
         timeout: int = 300,
         api_key: str = "sk-no-key-required",
         default_system: str | None = None,
@@ -125,6 +125,12 @@ class LlamaCppClient(BaseChatClient):
 
         if "response_format" in kwargs and kwargs["response_format"] is not None:
             payload["response_format"] = kwargs["response_format"]
+
+        if "tools" in kwargs and kwargs["tools"] is not None:
+            payload["tools"] = kwargs["tools"]
+
+        if "tool_choice" in kwargs and kwargs["tool_choice"] is not None:
+            payload["tool_choice"] = kwargs["tool_choice"]
 
         if "extra_body" in kwargs and isinstance(kwargs["extra_body"], Mapping):
             payload.update(dict(kwargs["extra_body"]))

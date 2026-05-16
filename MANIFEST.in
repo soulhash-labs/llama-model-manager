@@ -1,6 +1,6 @@
 include README.md
 include LICENSE
-recursive-include glyphos_ai/glyph *.yaml
+recursive-include integrations/public-glyphos-ai-compute/glyphos_ai/glyph *.yaml
 recursive-include tests *.py
 prune .planning
 prune docs

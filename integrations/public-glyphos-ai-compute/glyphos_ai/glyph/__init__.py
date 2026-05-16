@@ -21,10 +21,12 @@ from .codec import (
     normalize_glyph_stream,
     tokenize_glyph_stream,
 )
+from .glyph_core import SemanticGlyphMap, load_semantic_glyph_map
 from .registry import GlyphEntry, GlyphRegistry, GlyphRegistryError, load_registry
 from .types import (
     ACTION_MAP,
     DEST_MAP,
+    PSI_LEVELS,
     ContextPacket,
     GlyphPacket,
     Glyphs,
@@ -45,6 +47,7 @@ from .types import (
 __all__ = [
     "ACTION_MAP",
     "DEST_MAP",
+    "PSI_LEVELS",
     "ContextPacket",
     "GlyphPacket",
     "Glyphs",
@@ -79,4 +82,6 @@ __all__ = [
     "glyph_stream_to_json",
     "normalize_glyph_stream",
     "tokenize_glyph_stream",
+    "SemanticGlyphMap",
+    "load_semantic_glyph_map",
 ]

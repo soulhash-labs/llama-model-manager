@@ -10,6 +10,25 @@ from lmm_errors import GatewayError
 _client_cache: dict[str, Any] | None = None
 _client_cache_lock = threading.Lock()
 
+# Learning Loop persistence store — set by gateway at startup
+_persistence_store: Any = None
+
+
+def set_persistence_store(store: Any) -> None:
+    """Set the Learning Loop persistence store for outcome recording."""
+    global _persistence_store
+    _persistence_store = store
+
+
+def _record_outcome(domain: str, approach: str, success: bool, latency_ms: float) -> None:
+    """Record routing outcome to persistence store if available."""
+    if _persistence_store is None:
+        return
+    try:
+        _persistence_store.record_outcome(domain, approach, success=success, latency_ms=latency_ms)
+    except Exception:
+        pass
+
 
 def create_router(*, cloud_routing_config_fn: Callable[[], tuple[list[str], str]]):
     from glyphos_ai.ai_compute.api_client import create_configured_clients  # type: ignore
@@ -56,6 +75,8 @@ def route_prompt(
     context_payload: Any = None,
     upstream_context: dict[str, Any] | None = None,
     create_router_fn: Callable[[], Any],
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     packet = _gateway_packet(model, context_payload)
     start = time.perf_counter()
@@ -68,10 +89,16 @@ def route_prompt(
         model=model,
         max_tokens=max_tokens,
         temperature=temperature,
+        tools=tools,
+        tool_choice=tool_choice,
     )
     latency_ms = round((time.perf_counter() - start) * 1000)
     if result.target.value == "fallback" or str(result.routing_reason_code).endswith(".error"):
+        _record_outcome("routing", result.target.value, success=False, latency_ms=latency_ms)
         raise GatewayError(f"{result.target.value} route failed: {result.response}", target=result.target.value)
+    _record_outcome("routing", result.target.value, success=True, latency_ms=latency_ms)
+    if tools:
+        _record_outcome("tool_call", result.target.value, success=bool(result.tool_calls), latency_ms=latency_ms)
     headers = {
         "X-LMM-Route-Mode": "routed",
         "X-LMM-GlyphOS-Target": result.target.value,
@@ -88,6 +115,7 @@ def route_prompt(
         "latency_ms": latency_ms,
         "route_start_ms": 0,
         "route_duration_ms": latency_ms,
+        "tool_calls": result.tool_calls,
     }, headers
 
 

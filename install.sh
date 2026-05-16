@@ -424,7 +424,7 @@ build_runtime_during_install() {
     # location.
     LLAMA_SERVER_RUNTIME_DIR="${APP_SHARE_DIR}/runtime" \
     LLAMA_AUTO_INSTALL_DEPS=1 \
-        "$bin" build-runtime --backend "$primary_backend" 2>&1 || true
+        "$bin" build-runtime --backend "$primary_backend" || true
 
     # Post-build validation: ldd + --version checks
     local runtime_dir="${APP_SHARE_DIR}/runtime/llama-server"
@@ -450,7 +450,7 @@ build_runtime_during_install() {
         for b in "${runtime_binaries[@]}"; do
             payload_binary="${b}.bin"
             if [[ -x "$payload_binary" ]]; then
-                missing="$(ldd "$payload_binary" 2>&1 | grep 'not found' | grep -E 'lib(ggml|llama|mtmd)' || true)"
+                missing="$(ldd "$payload_binary" 2>&1 | grep 'not found' | grep -E 'lib(ggml|llama|mtmd|cuda|cudart|cublas|vulkan|MoltenVK|metal)' || true)"
                 if [[ -n "$missing" ]]; then
                     printf 'post-install: runtime bundle %s has missing libs: %s\n' "$b" "$missing"
                     continue
@@ -816,6 +816,31 @@ cp -a "$ROOT_DIR/integrations" "$APP_SHARE_DIR/integrations"
 clean_python_cache "$APP_SHARE_DIR/integrations"
 printf 'refreshed bundled integrations under %s/integrations\n' "$(compact_home_path "$APP_SHARE_DIR")"
 
+# Learning Loop — initialize config directory and seed lessons
+LMM_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/llama-model-manager"
+mkdir -p "$LMM_CONFIG_DIR"
+if [[ ! -f "$LMM_CONFIG_DIR/lessons.md" ]] && [[ -f "$APP_SHARE_DIR/integrations/learning-loop/templates/lessons.md" ]]; then
+    cp "$APP_SHARE_DIR/integrations/learning-loop/templates/lessons.md" "$LMM_CONFIG_DIR/lessons.md"
+    printf 'initialized Learning Loop lessons: %s/lessons.md\n' "$(compact_home_path "$LMM_CONFIG_DIR")"
+fi
+if [[ ! -f "$LMM_CONFIG_DIR/agent_state.json" ]]; then
+    python3 -c "
+import json, time, os
+state = {
+    'per_domain_strategies': {},
+    'novelty_scores': {},
+    'session_count': 0,
+    'total_tasks': 0,
+    'created_at': time.time(),
+    'updated_at': time.time()
+}
+os.makedirs('$LMM_CONFIG_DIR', exist_ok=True)
+with open('$LMM_CONFIG_DIR/agent_state.json', 'w') as f:
+    json.dump(state, f, indent=2)
+"
+    printf 'initialized Learning Loop persistence: %s/agent_state.json\n' "$(compact_home_path "$LMM_CONFIG_DIR")"
+fi
+
 # Step 1: Build bundled llama.cpp runtime for the host.  This replaces the old
 # "no runtime shipped" gap — we now compile GPU/CPU binaries during install so
 # fresh installs can actually run models on their hardware.
@@ -864,7 +889,7 @@ migrate_models_tsv_deprecated_flags() {
     local tmp
     local modified=0
     local line
-    local alias_field
+    local row_alias
     local path_field
     local extra_field
     local rest
@@ -878,7 +903,7 @@ migrate_models_tsv_deprecated_flags() {
         fi
 
         # TSV: alias \t path \t extra_args \t context \t ngl \t batch \t threads \t parallel \t device \t notes
-        alias="${line%%$'\t'*}"
+        row_alias="${line%%$'\t'*}"
         rest="${line#*$'\t'}"
         path_field="${rest%%$'\t'*}"
         rest="${rest#*$'\t'}"
@@ -890,7 +915,7 @@ migrate_models_tsv_deprecated_flags() {
             modified=1
         fi
 
-        printf '%s\t%s\t%s\t%s\n' "$alias" "$path_field" "$extra_field" "$rest" >>"$tmp"
+        printf '%s\t%s\t%s\t%s\n' "$row_alias" "$path_field" "$extra_field" "$rest" >>"$tmp"
     done <"$file"
 
     if [[ "$modified" -eq 1 ]]; then
@@ -912,16 +937,20 @@ else
     printf 'kept existing %s\n' "$CONFIG_DIR/models.tsv"
     migrate_models_tsv_deprecated_flags "$CONFIG_DIR/models.tsv"
 fi
-sed -e "s|^Exec=.*$|Exec=$BIN_DIR/llama-model-gui|" \
-    -e "s|^Icon=.*$|Icon=$APP_SHARE_DIR/branding/llama-model-manager-icon.svg|" \
-    "$ROOT_DIR/desktop/llama-model-manager.desktop" >"$APP_DIR/llama-model-manager.desktop"
-chmod 0644 "$APP_DIR/llama-model-manager.desktop"
-
-if [[ -d "$DESKTOP_DIR" ]]; then
+if [[ -f "$ROOT_DIR/desktop/llama-model-manager.desktop" ]]; then
     sed -e "s|^Exec=.*$|Exec=$BIN_DIR/llama-model-gui|" \
         -e "s|^Icon=.*$|Icon=$APP_SHARE_DIR/branding/llama-model-manager-icon.svg|" \
-        "$ROOT_DIR/desktop/llama-model-manager.desktop" >"$DESKTOP_DIR/Llama Model Manager.desktop"
-    chmod 0755 "$DESKTOP_DIR/Llama Model Manager.desktop"
+        "$ROOT_DIR/desktop/llama-model-manager.desktop" >"$APP_DIR/llama-model-manager.desktop"
+    chmod 0644 "$APP_DIR/llama-model-manager.desktop"
+
+    if [[ -d "$DESKTOP_DIR" ]]; then
+        sed -e "s|^Exec=.*$|Exec=$BIN_DIR/llama-model-gui|" \
+            -e "s|^Icon=.*$|Icon=$APP_SHARE_DIR/branding/llama-model-manager-icon.svg|" \
+            "$ROOT_DIR/desktop/llama-model-manager.desktop" >"$DESKTOP_DIR/Llama Model Manager.desktop"
+        chmod 0755 "$DESKTOP_DIR/Llama Model Manager.desktop"
+    fi
+else
+    printf 'warning: desktop file not found at %s, skipping desktop integration\n' "$ROOT_DIR/desktop/llama-model-manager.desktop" >&2
 fi
 
 post_install_sync_clients

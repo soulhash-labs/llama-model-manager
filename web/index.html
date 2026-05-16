@@ -82,9 +82,8 @@
           <a href="#models-editor" data-page="models-editor">Model Editor</a>
           <a href="#models-discovery" data-page="models-discovery">Discovery (add new models)</a>
           <a href="#settings-defaults" data-page="settings-defaults">Settings</a>
-          <a href="#integrations-panel" data-page="integrations-panel">Integrations</a>
-          <a href="#gateways-panel" data-page="gateways-panel">Gateways (harness / LLM)</a>
-          <a href="#pipelines-panel" data-page="pipelines-panel">Pipelines</a>
+          <a href="#integrations-panel" data-page="integrations-panel">Integrations & Pipelines</a>
+          <a href="#learning-loop-panel" data-page="learning-loop-panel">Repo Learning Loops</a>
           <a href="#cloud-providers-panel" data-page="cloud-providers-panel">Cloud providers</a>
         </nav>
 
@@ -615,6 +614,51 @@
               <span class="field-note">Activate the bundled combined workflow view for retrieved context plus glyph-routed local inference.</span>
               </div>
             </label>
+            <span class="section-label span-2" style="margin-top: 0.5rem;">Cloud Fallback</span>
+            <label class="span-2 checkbox-field" title="Enable cloud provider fallback when local models are unavailable or overloaded. Requires gateway restart to take effect.">
+              Enable Cloud Fallback
+              <div class="checkbox-row">
+                <input name="GLYPHOS_CLOUD_ENABLED" id="default-cloud-enabled" type="checkbox" aria-label="Enable cloud provider fallback">
+                <span class="field-note">Route to cloud providers when local inference is unavailable. Gateway restart required after changes.</span>
+              </div>
+            </label>
+            <label class="span-2" title="Preferred cloud provider when multiple are configured.">
+              Preferred Provider
+              <select name="GLYPHOS_CLOUD_PREFERRED_PROVIDER" id="default-cloud-preferred-provider">
+                <option value="">auto (first available)</option>
+                <option value="openai">OpenAI</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="xai">xAI (Grok)</option>
+              </select>
+              <span class="field-note">Which cloud provider to try first. Auto picks the first configured and available provider.</span>
+            </label>
+            <label class="span-2" title="OpenAI API key for cloud fallback. Stored in defaults.env; gateway reads it at startup.">
+              OpenAI API Key
+              <input name="GLYPHOS_CLOUD_OPENAI_API_KEY" id="default-cloud-openai-key" type="password" placeholder="sk-..." autocomplete="off">
+              <span class="field-note">OpenAI API key. Value is masked; changes require gateway restart.</span>
+            </label>
+            <label class="span-2" title="OpenAI model to use for cloud fallback requests.">
+              OpenAI Model
+              <input name="GLYPHOS_CLOUD_OPENAI_MODEL" id="default-cloud-openai-model" placeholder="gpt-4o">
+            </label>
+            <label class="span-2" title="Anthropic API key for cloud fallback. Stored in defaults.env; gateway reads it at startup.">
+              Anthropic API Key
+              <input name="GLYPHOS_CLOUD_ANTHROPIC_API_KEY" id="default-cloud-anthropic-key" type="password" placeholder="sk-ant-..." autocomplete="off">
+              <span class="field-note">Anthropic API key. Value is masked; changes require gateway restart.</span>
+            </label>
+            <label class="span-2" title="Anthropic model to use for cloud fallback requests.">
+              Anthropic Model
+              <input name="GLYPHOS_CLOUD_ANTHROPIC_MODEL" id="default-cloud-anthropic-model" placeholder="claude-sonnet-4-20250514">
+            </label>
+            <label class="span-2" title="xAI API key for cloud fallback. Stored in defaults.env; gateway reads it at startup.">
+              xAI (Grok) API Key
+              <input name="GLYPHOS_CLOUD_XAI_API_KEY" id="default-cloud-xai-key" type="password" placeholder="xai-..." autocomplete="off">
+              <span class="field-note">xAI API key. Value is masked; changes require gateway restart.</span>
+            </label>
+            <label class="span-2" title="xAI model to use for cloud fallback requests.">
+              xAI Model
+              <input name="GLYPHOS_CLOUD_XAI_MODEL" id="default-cloud-xai-model" placeholder="grok-3">
+            </label>
             <label class="span-2 checkbox-field" title="Opt-in. Checks GitHub release metadata periodically and shows notify-only update status. It never installs updates automatically.">
               Update Watcher
               <div class="checkbox-row">
@@ -638,24 +682,12 @@
               OpenClaw API Key
               <input name="OPENCLAW_API_KEY" id="default-openclaw-api-key" placeholder="llama-local">
             </label>
-            <label title="Host used by the local Claude gateway service.">
-              Claude Gateway Host
-              <input name="CLAUDE_GATEWAY_HOST" id="default-claude-gateway-host" placeholder="127.0.0.1">
-            </label>
-            <label title="Port used by the local Claude gateway service.">
-              Claude Gateway Port
-              <input name="CLAUDE_GATEWAY_PORT" id="default-claude-gateway-port" placeholder="4000">
-            </label>
-            <label class="span-2" title="Log path for the local Claude gateway service.">
-              Claude Gateway Log
-              <input name="CLAUDE_GATEWAY_LOG" id="default-claude-gateway-log" placeholder="$HOME/models/claude-gateway.log">
-            </label>
-            <label class="span-2" title="Base URL written into Claude Code settings. Leave blank to follow the local gateway host and port.">
+            <label class="span-2" title="Base URL written into Claude Code settings. Points to the GlyphOS gateway.">
               Claude Base URL
-              <input name="CLAUDE_BASE_URL" id="default-claude-base-url" placeholder="http://127.0.0.1:4000">
+              <input name="CLAUDE_BASE_URL" id="default-claude-base-url" placeholder="http://127.0.0.1:4010">
             </label>
-            <label title="Maximum seconds the local Claude gateway will wait for a slow llama.cpp request before aborting it. Increase this for long local coding sessions.">
-              Claude Gateway Timeout (s)
+            <label title="Maximum seconds the GlyphOS gateway will wait for a slow llama.cpp request before aborting it.">
+              GlyphOS Gateway Timeout (s)
               <input name="CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS" id="default-claude-gateway-timeout" placeholder="1800">
             </label>
             <label title="Claude model id to advertise and sync. Leave blank to follow the active alias.">
@@ -704,238 +736,264 @@
         <section id="integrations-panel" class="panel dashboard-page">
           <div class="panel-head">
             <div>
-              <span class="panel-tag">Wiring</span>
-              <h2>Integrations</h2>
-              <p>Keep editor/runtime integrations in sync with the active local llama.cpp model.</p>
+              <span class="panel-tag">Unified</span>
+              <h2>Integrations & Pipelines</h2>
+              <p>Harness sync, gateway controls, and AI routing pipelines in one view.</p>
             </div>
-          </div>
-          <div class="integration-grid">
-            <article class="integration-card">
-              <span class="metric-label">LMM Gateway Endpoints</span>
-              <div class="integration-chip-row">
-                <span id="lmm-gateway-formats" class="integration-badge">-</span>
-              </div>
-              <div>
-                <span class="metric-label" style="font-size: 0.75rem; opacity: 0.7;">Full lane OpenAI</span>
-                <code id="api-base">-</code>
-              </div>
-              <div>
-                <span class="metric-label" style="font-size: 0.75rem; opacity: 0.7;">Full lane Anthropic</span>
-                <code id="anthropic-api-base">-</code>
-              </div>
-              <div>
-                <span class="metric-label" style="font-size: 0.75rem; opacity: 0.7;">Fast lane OpenAI</span>
-                <code id="fast-api-base">-</code>
-              </div>
-              <div>
-                <span class="metric-label" style="font-size: 0.75rem; opacity: 0.7;">Fast lane Anthropic</span>
-                <code id="fast-anthropic-api-base">-</code>
-              </div>
-              <span id="integration-endpoint-note" class="metric-note">-</span>
-            </article>
-            <article class="integration-card">
-              <span class="metric-label">opencode</span>
-              <div class="integration-chip-row">
-                <span id="opencode-preset-badge" class="integration-badge integration-badge-long-run hidden">Long Run</span>
-              </div>
-              <code id="opencode-model">-</code>
-              <span id="opencode-path" class="metric-note">-</span>
-              <span id="opencode-state" class="metric-note">-</span>
-              <div class="inline-actions integration-actions">
-                <button id="sync-opencode-balanced" class="button button-small button-primary" title="Sync opencode with the balanced local preset.">Balanced</button>
-                <button id="sync-opencode-long-run" class="button button-small" title="Sync opencode with the long-run local preset.">Long Run</button>
-              </div>
-            </article>
-            <article class="integration-card">
-              <span class="metric-label">OpenClaw</span>
-              <code id="openclaw-model">-</code>
-              <span id="openclaw-path" class="metric-note">-</span>
-              <span id="openclaw-state" class="metric-note">-</span>
-              <div class="inline-actions integration-actions">
-                <button id="sync-openclaw" class="button button-small button-primary" title="Sync OpenClaw to the currently served llama.cpp model.">Sync OpenClaw</button>
-              </div>
-            </article>
-            <article class="integration-card">
-              <span class="metric-label">Claude Code</span>
-              <code id="claude-model">-</code>
-              <span id="claude-path" class="metric-note">-</span>
-              <div class="inline-actions integration-actions">
-                <button id="sync-claude" class="button button-small button-primary" title="Sync Claude Code settings to the local Claude gateway.">Sync Claude</button>
-              </div>
-            </article>
-          </div>
-        </section>
-
-        <section id="gateways-panel" class="panel dashboard-page">
-          <div class="panel-head">
-            <div>
-              <span class="panel-tag">Gateways</span>
-              <h2>Gateways</h2>
-              <p>Start and observe the OpenAI-compatible LMM and Anthropic-compatible Claude gateway services.</p>
-            </div>
-          </div>
-          <div class="integration-grid">
-            <article class="integration-card">
-              <span class="metric-label">Full Harness Gateway</span>
-              <div class="integration-chip-row">
-                <span id="lmm-gateway-badge" class="integration-badge integration-badge-muted">-</span>
-                <span class="integration-badge">OpenAI</span>
-                <span class="integration-badge">Anthropic</span>
-              </div>
-              <code id="gateway-status">-</code>
-              <span id="gateway-route" class="metric-note">-</span>
-              <div class="inline-actions integration-actions">
-                <button id="gateway-start" class="button button-small button-primary" title="Start the LMM OpenAI-compatible gateway.">Start Gateway</button>
-                <button id="gateway-restart" class="button button-small" title="Restart the LMM gateway.">Restart</button>
-                <button id="gateway-stop" class="button button-small button-danger" title="Stop the LMM gateway.">Stop</button>
-                <button id="gateway-logs" class="button button-small" title="Show recent LMM gateway logs.">Logs</button>
-              </div>
-            </article>
-            <article class="integration-card">
-              <span class="metric-label">Fast Harness Gateway</span>
-              <div class="integration-chip-row">
-                <span id="lmm-gateway-fast-badge" class="integration-badge integration-badge-muted">-</span>
-                <span class="integration-badge">OpenAI</span>
-                <span class="integration-badge">Anthropic</span>
-              </div>
-              <code id="gateway-fast-status">-</code>
-              <span id="gateway-fast-route" class="metric-note">-</span>
-              <div class="inline-actions integration-actions">
-                <button id="gateway-fast-start" class="button button-small button-primary" title="Start the bounded fast GlyphOS gateway.">Start Fast</button>
-                <button id="gateway-fast-restart" class="button button-small" title="Restart the fast GlyphOS gateway.">Restart</button>
-                <button id="gateway-fast-stop" class="button button-small button-danger" title="Stop the fast GlyphOS gateway.">Stop</button>
-                <button id="gateway-fast-logs" class="button button-small" title="Show recent fast gateway logs.">Logs</button>
-              </div>
-            </article>
-            <article class="integration-card">
-              <span class="metric-label">Claude Gateway</span>
-              <code id="claude-gateway-status">-</code>
-              <span id="claude-gateway-url" class="metric-note">-</span>
-              <div class="inline-actions integration-actions">
-                <button id="claude-gateway-start" class="button button-small button-primary" title="Start the local Anthropic-compatible Claude gateway.">Start</button>
-                <button id="claude-gateway-restart" class="button button-small" title="Restart the Claude gateway.">Restart</button>
-                <button id="claude-gateway-stop" class="button button-small button-danger" title="Stop the Claude gateway.">Stop</button>
-                <button id="claude-gateway-logs" class="button button-small" title="Show recent Claude gateway logs.">Logs</button>
-              </div>
-            </article>
-            <article class="integration-card">
-              <span class="metric-label">Effective Gateway Policy</span>
-              <code id="gateway-policy-status">-</code>
-              <span id="gateway-policy-route" class="metric-note">-</span>
-              <span id="gateway-policy-cloud" class="metric-note">-</span>
-            </article>
-          </div>
-
-          <pre id="gateway-logs-output" class="log-box hidden"></pre>
-          <pre id="gateway-fast-logs-output" class="log-box hidden"></pre>
-          <pre id="claude-gateway-logs-output" class="log-box hidden"></pre>
-        </section>
-
-        <section id="pipelines-panel" class="panel dashboard-page">
-          <div class="panel-head">
-            <div>
-              <span class="panel-tag">Pipelines</span>
-              <h2>Pipelines</h2>
-              <p>Inspect local-first routing, fallback policy, and routed request trace for the active pipeline.</p>
-            </div>
-          </div>
-          <div id="integration-local-first-banner" class="notice-integration-banner hidden">
-            <strong>Local-First Architecture Active</strong>
-            All local <code>llama.cpp</code> inference routes through the <strong>Unified GlyphOS Pipeline</strong> — with Ψ encoding, context awareness, and intelligent routing.
-          </div>
-          <div class="integration-grid">
-            <article id="glyphos-card" class="integration-card pipeline-card">
-              <span class="metric-label">GlyphOS AI Compute</span>
-              <div class="integration-chip-row">
-                <span id="glyphos-badge" class="integration-badge integration-badge-muted">-</span>
-                <span id="glyphos-enforced-badge" class="integration-badge integration-badge-enforced hidden">Enforced</span>
-              </div>
-              <code id="glyphos-status">-</code>
-              <code id="glyphos-model">-</code>
-              <span id="glyphos-path" class="metric-note">-</span>
-              <div id="glyphos-pipeline-components" class="chip-row"></div>
-              <span id="glyphos-telemetry-summary" class="metric-note">-</span>
-              <div id="glyphos-telemetry-reasons" class="chip-row"></div>
-              <div id="glyphos-telemetry-recent" class="telemetry-list"></div>
-              <div class="inline-actions integration-actions">
-                <button id="sync-glyphos" class="button button-small button-primary" title="Sync GlyphOS AI Compute to the active local llama.cpp runtime.">Sync GlyphOS</button>
-              </div>
-            </article>
-            <article id="context-glyphos-card" class="integration-card pipeline-card">
-              <span class="metric-label">Context + GlyphOS Pipeline</span>
-              <div class="integration-chip-row">
-                <span id="context-glyphos-badge" class="integration-badge">Off</span>
-              </div>
-              <code id="context-glyphos-status">-</code>
-              <span id="context-glyphos-path" class="metric-note">-</span>
-              <span id="context-glyphos-benefit" class="metric-note">-</span>
-              <div id="context-glyphos-quality" class="metric-note"></div>
-              <div id="context-glyphos-blockers" class="chip-row"></div>
-              <div class="inline-actions integration-actions">
-                <button id="sync-glyphos-combined" class="button button-small button-primary" title="Activate the combined Context + GlyphOS pipeline: enables the setting, syncs GlyphOS, and refreshes the readiness card.">Activate Feature</button>
-              </div>
-            </article>
           </div>
 
           <div class="panel-subpanel">
             <div class="panel-head panel-head-anchored">
               <div>
-                <span class="panel-tag">Observed Traffic</span>
-                <h3>Observed Glyph Routes</h3>
-                <p>Actual GlyphOS-routed traffic observed by this dashboard session. Sync and activation only change configuration.</p>
+                <span class="panel-tag">Harness Sync</span>
+                <h3>Editor Integrations</h3>
+                <p>Keep editor/runtime integrations in sync with the active local llama.cpp model.</p>
               </div>
             </div>
-            <div class="observed-grid">
-              <article class="observed-card">
-                <span class="metric-label">Last Route</span>
-                <strong id="observed-glyph-last-status">Never observed</strong>
-                <span id="observed-glyph-last-detail" class="metric-note">No glyph-routed traffic has been seen by this dashboard session yet.</span>
+            <div class="integration-grid">
+              <article class="integration-card">
+                <span class="metric-label">LMM Gateway Endpoints</span>
+                <div class="integration-chip-row">
+                  <span id="lmm-gateway-formats" class="integration-badge">-</span>
+                </div>
+                <div>
+                  <span class="metric-label" style="font-size: 0.75rem; opacity: 0.7;">Full lane OpenAI</span>
+                  <code id="api-base">-</code>
+                </div>
+                <div>
+                  <span class="metric-label" style="font-size: 0.75rem; opacity: 0.7;">Full lane Anthropic</span>
+                  <code id="anthropic-api-base">-</code>
+                </div>
+                <div>
+                  <span class="metric-label" style="font-size: 0.75rem; opacity: 0.7;">Fast lane OpenAI</span>
+                  <code id="fast-api-base">-</code>
+                </div>
+                <div>
+                  <span class="metric-label" style="font-size: 0.75rem; opacity: 0.7;">Fast lane Anthropic</span>
+                  <code id="fast-anthropic-api-base">-</code>
+                </div>
+                <span id="integration-endpoint-note" class="metric-note">-</span>
               </article>
-              <article class="observed-card">
-                <span class="metric-label">Observed This Session</span>
-                <strong id="observed-glyph-total">0</strong>
-                <span id="observed-glyph-total-detail" class="metric-note">No glyph route attempts observed in this dashboard session.</span>
+              <article class="integration-card">
+                <span class="metric-label">opencode</span>
+                <div class="integration-chip-row">
+                  <span id="opencode-preset-badge" class="integration-badge integration-badge-long-run hidden">Long Run</span>
+                </div>
+                <code id="opencode-model">-</code>
+                <span id="opencode-path" class="metric-note">-</span>
+                <span id="opencode-state" class="metric-note">-</span>
+                <div class="inline-actions integration-actions">
+                  <button id="sync-opencode-balanced" class="button button-small button-primary" title="Sync opencode with the balanced local preset.">Balanced</button>
+                  <button id="sync-opencode-long-run" class="button button-small" title="Sync opencode with the long-run local preset.">Long Run</button>
+                </div>
               </article>
-              <article class="observed-card">
-                <span class="metric-label">Recent Targets</span>
-                <strong id="observed-glyph-targets">None yet</strong>
-                <span id="observed-glyph-targets-detail" class="metric-note">Targets will appear here after the first observed glyph route.</span>
+              <article class="integration-card">
+                <span class="metric-label">OpenClaw</span>
+                <code id="openclaw-model">-</code>
+                <span id="openclaw-path" class="metric-note">-</span>
+                <span id="openclaw-state" class="metric-note">-</span>
+                <div class="inline-actions integration-actions">
+                  <button id="sync-openclaw" class="button button-small button-primary" title="Sync OpenClaw to the currently served llama.cpp model.">Sync OpenClaw</button>
+                </div>
+              </article>
+              <article class="integration-card">
+                <span class="metric-label">Claude Code</span>
+                <code id="claude-model">-</code>
+                <span id="claude-path" class="metric-note">-</span>
+                <div class="inline-actions integration-actions">
+                  <button id="sync-claude" class="button button-small button-primary" title="Sync Claude Code settings to the local Claude gateway.">Sync Claude</button>
+                </div>
               </article>
             </div>
-
-            <div id="observed-glyph-feed" class="telemetry-list observed-feed" aria-live="polite"></div>
           </div>
 
           <div class="panel-subpanel">
             <div class="panel-head panel-head-anchored">
               <div>
-                <span class="panel-tag">Gateway Trace</span>
-                <h3>Context + Glyph Encoding + GlyphOS</h3>
-                <p>Latest routed gateway request stages: context enrichment, glyph compression, GlyphOS routing, and backend completion.</p>
+                <span class="panel-tag">Gateways</span>
+                <h3>GlyphOS Gateways</h3>
+                <p>Start and observe the OpenAI/Anthropic-compatible GlyphOS gateway services.</p>
               </div>
             </div>
-            <div class="observed-grid">
-              <article class="observed-card">
-                <span class="metric-label">Gateway Request</span>
-                <strong id="context-trace-status">Not observed</strong>
-                <span id="context-trace-latency" class="metric-note">No LMM gateway request observed yet.</span>
+            <div class="integration-grid">
+              <article class="integration-card">
+                <span class="metric-label">Full Harness Gateway</span>
+                <div class="integration-chip-row">
+                  <span id="lmm-gateway-badge" class="integration-badge integration-badge-muted">-</span>
+                  <span class="integration-badge">OpenAI</span>
+                  <span class="integration-badge">Anthropic</span>
+                </div>
+                <code id="gateway-status">-</code>
+                <span id="gateway-route" class="metric-note">-</span>
+                <div class="inline-actions integration-actions">
+                  <button id="gateway-start" class="button button-small button-primary" title="Start the LMM OpenAI-compatible gateway.">Start Gateway</button>
+                  <button id="gateway-restart" class="button button-small" title="Restart the LMM gateway.">Restart</button>
+                  <button id="gateway-stop" class="button button-small button-danger" title="Stop the LMM gateway.">Stop</button>
+                  <button id="gateway-logs" class="button button-small" title="Show recent LMM gateway logs.">Logs</button>
+                </div>
               </article>
-              <article class="observed-card">
-                <span class="metric-label">Context MCP</span>
-                <strong id="context-trace-context">Skipped</strong>
-                <span id="context-trace-context-detail" class="metric-note">Context status appears after the next routed request.</span>
+              <article class="integration-card">
+                <span class="metric-label">Fast Harness Gateway</span>
+                <div class="integration-chip-row">
+                  <span id="lmm-gateway-fast-badge" class="integration-badge integration-badge-muted">-</span>
+                  <span class="integration-badge">OpenAI</span>
+                  <span class="integration-badge">Anthropic</span>
+                </div>
+                <code id="gateway-fast-status">-</code>
+                <span id="gateway-fast-route" class="metric-note">-</span>
+                <div class="inline-actions integration-actions">
+                  <button id="gateway-fast-start" class="button button-small button-primary" title="Start the bounded fast GlyphOS gateway.">Start Fast</button>
+                  <button id="gateway-fast-restart" class="button button-small" title="Restart the fast GlyphOS gateway.">Restart</button>
+                  <button id="gateway-fast-stop" class="button button-small button-danger" title="Stop the fast GlyphOS gateway.">Stop</button>
+                  <button id="gateway-fast-logs" class="button button-small" title="Show recent fast gateway logs.">Logs</button>
+                </div>
               </article>
-              <article class="observed-card">
-                <span class="metric-label">Glyph Encoding</span>
-                <strong id="context-trace-encoding">Skipped</strong>
-                <span id="context-trace-encoding-detail" class="metric-note">Compression ratio appears when structured context is encoded.</span>
-              </article>
-              <article class="observed-card">
-                <span class="metric-label">Route + Backend</span>
-                <strong id="context-trace-route">Not routed</strong>
-                <span id="context-trace-route-detail" class="metric-note">GlyphOS target and backend result appear here.</span>
+              <article class="integration-card">
+                <span class="metric-label">Effective Gateway Policy</span>
+                <code id="gateway-policy-status">-</code>
+                <span id="gateway-policy-route" class="metric-note">-</span>
+                <span id="gateway-policy-cloud" class="metric-note">-</span>
               </article>
             </div>
+            <pre id="gateway-logs-output" class="log-box hidden"></pre>
+            <pre id="gateway-fast-logs-output" class="log-box hidden"></pre>
+          </div>
+
+          <div class="panel-subpanel">
+            <div class="panel-head panel-head-anchored">
+              <div>
+                <span class="panel-tag">Pipelines</span>
+                <h3>AI Routing Pipelines</h3>
+                <p>Inspect local-first routing, fallback policy, and routed request trace for the active pipeline.</p>
+              </div>
+            </div>
+            <div id="integration-local-first-banner" class="notice-integration-banner hidden">
+              <strong>Local-First Architecture Active</strong>
+              All local <code>llama.cpp</code> inference routes through the <strong>Unified GlyphOS Pipeline</strong> — with Ψ encoding, context awareness, and intelligent routing.
+            </div>
+            <div class="integration-grid">
+              <article id="glyphos-card" class="integration-card pipeline-card">
+                <span class="metric-label">GlyphOS AI Compute</span>
+                <div class="integration-chip-row">
+                  <span id="glyphos-badge" class="integration-badge integration-badge-muted">-</span>
+                  <span id="glyphos-enforced-badge" class="integration-badge integration-badge-enforced hidden">Enforced</span>
+                </div>
+                <code id="glyphos-status">-</code>
+                <code id="glyphos-model">-</code>
+                <span id="glyphos-path" class="metric-note">-</span>
+                <div id="glyphos-pipeline-components" class="chip-row"></div>
+                <span id="glyphos-telemetry-summary" class="metric-note">-</span>
+                <div id="glyphos-telemetry-reasons" class="chip-row"></div>
+                <div id="glyphos-telemetry-recent" class="telemetry-list"></div>
+                <div class="inline-actions integration-actions">
+                  <button id="sync-glyphos" class="button button-small button-primary" title="Sync GlyphOS AI Compute to the active local llama.cpp runtime.">Sync GlyphOS</button>
+                </div>
+              </article>
+              <article id="context-glyphos-card" class="integration-card pipeline-card">
+                <span class="metric-label">Context + GlyphOS Pipeline</span>
+                <div class="integration-chip-row">
+                  <span id="context-glyphos-badge" class="integration-badge">Off</span>
+                </div>
+                <code id="context-glyphos-status">-</code>
+                <span id="context-glyphos-path" class="metric-note">-</span>
+                <span id="context-glyphos-benefit" class="metric-note">-</span>
+                <div id="context-glyphos-quality" class="metric-note"></div>
+                <div id="context-glyphos-blockers" class="chip-row"></div>
+                <div class="inline-actions integration-actions">
+                  <button id="sync-glyphos-combined" class="button button-small button-primary" title="Activate the combined Context + GlyphOS pipeline: enables the setting, syncs GlyphOS, and refreshes the readiness card.">Activate Feature</button>
+                </div>
+              </article>
+            </div>
+
+            <div class="panel-subpanel" style="margin-top: 1rem;">
+              <div class="panel-head panel-head-anchored">
+                <div>
+                  <span class="panel-tag">Observed Traffic</span>
+                  <h4>Observed Glyph Routes</h4>
+                  <p>Actual GlyphOS-routed traffic observed by this dashboard session.</p>
+                </div>
+              </div>
+              <div class="observed-grid">
+                <article class="observed-card">
+                  <span class="metric-label">Last Route</span>
+                  <strong id="observed-glyph-last-status">Never observed</strong>
+                  <span id="observed-glyph-last-detail" class="metric-note">No glyph-routed traffic has been seen by this dashboard session yet.</span>
+                </article>
+                <article class="observed-card">
+                  <span class="metric-label">Observed This Session</span>
+                  <strong id="observed-glyph-total">0</strong>
+                  <span id="observed-glyph-total-detail" class="metric-note">No glyph route attempts observed in this dashboard session.</span>
+                </article>
+                <article class="observed-card">
+                  <span class="metric-label">Recent Targets</span>
+                  <strong id="observed-glyph-targets">None yet</strong>
+                  <span id="observed-glyph-targets-detail" class="metric-note">Targets will appear here after the first observed glyph route.</span>
+                </article>
+              </div>
+              <div id="observed-glyph-feed" class="telemetry-list observed-feed" aria-live="polite"></div>
+            </div>
+
+            <div class="panel-subpanel" style="margin-top: 1rem;">
+              <div class="panel-head panel-head-anchored">
+                <div>
+                  <span class="panel-tag">Gateway Trace</span>
+                  <h4>Context + Glyph Encoding + GlyphOS</h4>
+                  <p>Latest routed gateway request stages: context enrichment, glyph compression, GlyphOS routing, and backend completion.</p>
+                </div>
+              </div>
+              <div class="observed-grid">
+                <article class="observed-card">
+                  <span class="metric-label">Gateway Request</span>
+                  <strong id="context-trace-status">Not observed</strong>
+                  <span id="context-trace-latency" class="metric-note">No LMM gateway request observed yet.</span>
+                </article>
+                <article class="observed-card">
+                  <span class="metric-label">Context MCP</span>
+                  <strong id="context-trace-context">Skipped</strong>
+                  <span id="context-trace-context-detail" class="metric-note">Context status appears after the next routed request.</span>
+                </article>
+                <article class="observed-card">
+                  <span class="metric-label">Glyph Encoding</span>
+                  <strong id="context-trace-encoding">Skipped</strong>
+                  <span id="context-trace-encoding-detail" class="metric-note">Compression ratio appears when structured context is encoded.</span>
+                </article>
+                <article class="observed-card">
+                  <span class="metric-label">Route + Backend</span>
+                  <strong id="context-trace-route">Not routed</strong>
+                  <span id="context-trace-route-detail" class="metric-note">GlyphOS target and backend result appear here.</span>
+                </article>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="learning-loop-panel" class="panel dashboard-page">
+          <div class="panel-head">
+            <div>
+              <span class="panel-tag">Learning</span>
+              <h2>Repo Learning Loops</h2>
+              <p>Deploy Learning Loop files to project repositories. Global strategies compound across all projects; project-specific lessons stay isolated.</p>
+            </div>
+          </div>
+          <div class="integration-grid">
+            <article id="learning-loop-card" class="integration-card">
+              <span class="metric-label">Learning Loop</span>
+              <div class="integration-chip-row">
+                <span id="learning-loop-badge" class="integration-badge integration-badge-muted">-</span>
+              </div>
+              <code id="learning-loop-status">-</code>
+              <span id="learning-loop-tier" class="metric-note">-</span>
+              <span id="learning-loop-tasks" class="metric-note">-</span>
+              <span id="learning-loop-lessons" class="metric-note">-</span>
+              <label class="metric-label" style="margin-top: 0.5rem;" title="Project directory to deploy Learning Loop files into.">
+                Project Path
+                <input id="learning-loop-project-path" type="text" placeholder="/home/user/projects/my-app" autocomplete="off">
+              </label>
+              <div class="inline-actions integration-actions">
+                <button id="learning-loop-init-project" class="button button-small button-primary" title="Deploy AGENTS.md and tasks/lessons.md to the specified project directory.">Init Project</button>
+                <button id="learning-loop-init-global" class="button button-small" title="Initialize global Learning Loop store (one-time setup).">Init Global</button>
+              </div>
+            </article>
           </div>
         </section>
 

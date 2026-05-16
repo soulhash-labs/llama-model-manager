@@ -75,6 +75,14 @@ KNOWN_DEFAULT_KEYS = [
     "LLAMA_MODEL_GATEWAY_LOG",
     "LLAMA_MODEL_GATEWAY_FAST_LOG",
     "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE",
+    "GLYPHOS_CLOUD_ENABLED",
+    "GLYPHOS_CLOUD_PREFERRED_PROVIDER",
+    "GLYPHOS_CLOUD_OPENAI_API_KEY",
+    "GLYPHOS_CLOUD_OPENAI_MODEL",
+    "GLYPHOS_CLOUD_ANTHROPIC_API_KEY",
+    "GLYPHOS_CLOUD_ANTHROPIC_MODEL",
+    "GLYPHOS_CLOUD_XAI_API_KEY",
+    "GLYPHOS_CLOUD_XAI_MODEL",
     "LMM_UPDATE_WATCHER_ENABLED",
     "LMM_UPDATE_CHECK_INTERVAL_HOURS",
     "LMM_UPDATE_LMM_REPO",
@@ -2877,6 +2885,7 @@ class Manager:
             "cloud_providers": glyphos_telemetry.get("cloud_providers", {}),
             "context_mode_mcp": context_mode_mcp,
             "context_glyphos_pipeline": context_glyphos_pipeline,
+            "learning_loop": self.learning_loop_status(),
         }
 
     def update_status(self, defaults: dict[str, str]) -> dict[str, Any]:
@@ -2894,6 +2903,45 @@ class Manager:
             return {"enabled": False, "error": "invalid_response", "url": url}
         payload.setdefault("url", url)
         return payload
+
+    def learning_loop_status(self) -> dict[str, Any]:
+        state_dir = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "llama-model-manager"
+        tier_file = state_dir / "agent-tier.yaml"
+        state_file = state_dir / "agent_state.json"
+        lessons_file = state_dir / "lessons.md"
+
+        tier = None
+        if tier_file.exists():
+            try:
+                for line in tier_file.read_text().splitlines():
+                    line = line.strip()
+                    if line.lower().startswith("tier:"):
+                        tier = int(line.split(":", 1)[1].strip().split("#")[0].strip())
+                        break
+            except (ValueError, OSError):
+                pass
+
+        total_tasks = 0
+        if state_file.exists():
+            try:
+                state = json.loads(state_file.read_text())
+                total_tasks = int(state.get("total_tasks", 0))
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        lesson_count = 0
+        if lessons_file.exists():
+            try:
+                lesson_count = sum(1 for line in lessons_file.read_text().splitlines() if line.startswith("### "))
+            except OSError:
+                pass
+
+        return {
+            "tier": tier,
+            "total_tasks": total_tasks,
+            "lesson_count": lesson_count,
+            "initialized": tier is not None or total_tasks > 0 or lesson_count > 0,
+        }
 
     def context_mode_mcp_state(self) -> dict[str, Any]:
         package_json = self.context_mode_mcp_root / "package.json"
@@ -3123,6 +3171,27 @@ class Manager:
     def sync_glyphos(self) -> dict[str, str]:
         return self.parse_key_values(self.run_cli("sync-glyphos"))
 
+    def get_learning_loop_status(self) -> dict[str, Any]:
+        try:
+            result = self.parse_key_values(self.run_cli("learn", "status"))
+        except Exception:
+            return {"ok": True, "status": "not-initialized", "tier": None, "tasks": 0, "lessons": 0}
+        return {"ok": True, **result}
+
+    def learn_init_project(self, project_path: str) -> dict[str, Any]:
+        import os
+
+        if not os.path.isdir(project_path):
+            raise ValidationError("invalid_path", f"Directory not found: {project_path}")
+        result = self.run_cli("learn", "init-project", cwd=project_path)
+        parsed = self.parse_key_values(result)
+        return {"ok": True, "result": parsed}
+
+    def learn_init_global(self) -> dict[str, Any]:
+        result = self.run_cli("learn", "init")
+        parsed = self.parse_key_values(result)
+        return {"ok": True, "result": parsed}
+
     def activate_context_glyphos_pipeline(self) -> dict[str, Any]:
         defaults = self.defaults()
         defaults["LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE"] = "1"
@@ -3238,7 +3307,6 @@ class Manager:
                 inserted = True
             try:
                 from lmm_handoff import HandoffSummary  # type: ignore
-
                 from lmm_storage import JsonRunRecordStore  # type: ignore[import-not-found]
             finally:
                 if inserted:
@@ -3762,7 +3830,18 @@ class AppHandler(BaseHTTPRequestHandler):
         if route == "/api/defaults/save":
             updates = {key: str(payload.get(key, "")) for key in KNOWN_DEFAULT_KEYS if key in payload}
             self.manager.save_defaults(updates)
-            return {"ok": True}
+            cloud_keys = {
+                "GLYPHOS_CLOUD_ENABLED",
+                "GLYPHOS_CLOUD_PREFERRED_PROVIDER",
+                "GLYPHOS_CLOUD_OPENAI_API_KEY",
+                "GLYPHOS_CLOUD_OPENAI_MODEL",
+                "GLYPHOS_CLOUD_ANTHROPIC_API_KEY",
+                "GLYPHOS_CLOUD_ANTHROPIC_MODEL",
+                "GLYPHOS_CLOUD_XAI_API_KEY",
+                "GLYPHOS_CLOUD_XAI_MODEL",
+            }
+            cloud_changed = any(key in updates and updates[key] for key in cloud_keys)
+            return {"ok": True, "requires_gateway_restart": cloud_changed}
         if route == "/api/dashboard-service":
             action = str(payload.get("action", "status")).strip()
             if action not in ALLOWED_SERVICE_ACTIONS:
@@ -3786,6 +3865,15 @@ class AppHandler(BaseHTTPRequestHandler):
             return {"ok": True, "result": result}
         if route == "/api/context-glyphos/activate":
             return {"ok": True, **self.manager.activate_context_glyphos_pipeline()}
+        if route == "/api/learning-loop/status":
+            return self.manager.get_learning_loop_status()
+        if route == "/api/learning-loop/init-project":
+            project_path = str(payload.get("path", "")).strip()
+            if not project_path:
+                raise ValidationError("missing_path", "Project path is required")
+            return self.manager.learn_init_project(project_path)
+        if route == "/api/learning-loop/init-global":
+            return self.manager.learn_init_global()
         if route == "/api/claude-gateway":
             action = str(payload.get("action", "status")).strip()
             if action not in ALLOWED_GATEWAY_ACTIONS:

@@ -52,6 +52,16 @@ class BaseChatClient:
     def is_available(self) -> bool:
         raise NotImplementedError
 
+    def close(self) -> None:
+        """Close the underlying HTTP session to free connection pool resources."""
+        self._session.close()
+
+    def __del__(self) -> None:
+        try:
+            self._session.close()
+        except Exception:
+            pass
+
 
 __all__ = [
     "BaseChatClient",

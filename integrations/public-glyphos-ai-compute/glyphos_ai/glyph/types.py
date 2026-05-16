@@ -77,14 +77,14 @@ class Glyphs:
     ACTION_SPLIT = "⊔"
     ACTION_VERIFY = "✓"
     ACTION_REJECT = "✗"
-    ACTION_APPROVE = "✓"
+    ACTION_APPROVE = "☑"
     ACTION_DENY = "⊘"
     ACTION_GRANT = "⊕"
     ACTION_REVOKE = "⊖"
     ACTION_SUSPEND = "⊝"
     ACTION_RESUME = "⊜"
-    ACTION_LOCK = "⊘"
-    ACTION_UNLOCK = "⊚"
+    ACTION_LOCK = "🔒"
+    ACTION_UNLOCK = "🔓"
     ACTION_ARCHIVE = "⊰"
     ACTION_RESTORE = "⊱"
     ACTION_EXPORT = "⤓"
@@ -98,10 +98,10 @@ class Glyphs:
     ACTION_PUBLISH = "⊳"
     ACTION_ENCRYPT = "⊛"
     ACTION_DECRYPT = "⊚"
-    ACTION_COMPRESS = "⊜"
-    ACTION_DECOMPRESS = "⊝"
+    ACTION_COMPRESS = "⊞"
+    ACTION_DECOMPRESS = "⊟"
     ACTION_VALIDATE = "⊠"
-    ACTION_CALCULATE = "⊟"
+    ACTION_CALCULATE = "⊡"
     ACTION_PREDICT = "⊦"
     ACTION_LEARN = "⊧"
     ACTION_TEACH = "⊨"
@@ -112,10 +112,10 @@ class Glyphs:
     ACTION_SORT = "⊭"
     ACTION_AGGREGATE = "⊮"
     ACTION_DISAGGREGATE = "⊯"
-    ACTION_TRACK = "⊰"
-    ACTION_MONITOR = "⊱"
-    ACTION_ALERT = "⊲"
-    ACTION_LOG = "⊳"
+    ACTION_TRACK = "◎"
+    ACTION_MONITOR = "⊡"
+    ACTION_ALERT = "⚠"
+    ACTION_LOG = "📋"
     ACTION_REPORT = "⊴"
     ACTION_NOTIFY = "⊵"
     ACTION_REQUEST = "⊶"
@@ -299,6 +299,10 @@ class ContextPayload:
     estimated_token_delta: int = 0
     error: str = ""
 
+    def __post_init__(self) -> None:
+        if self.raw_context_chars == 0 and self.raw_context:
+            self.raw_context_chars = len(self.raw_context)
+
 
 @dataclass
 class GlyphPacket:
@@ -433,7 +437,7 @@ def normalize_time_slot(slot: str | int) -> str:
     return time_to_slot(slot_to_time(str(slot)))
 
 
-def validate_context_packet_shape(value: Any) -> ContextPacket:
+def validate_context_packet_shape(value: Any) -> ContextPacket | dict[str, Any]:
     """
     Validate explicit upstream harness context.
 

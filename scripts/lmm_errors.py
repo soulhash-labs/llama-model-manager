@@ -48,6 +48,32 @@ class ProviderTimeoutError(ProviderError):
         )
 
 
+class ProviderAuthError(ProviderError):
+    """HTTP 401 / authentication failure from a provider."""
+
+    error_type = "provider_auth_error"
+
+    def __init__(self, provider: str, message: str | None = None, **details: Any) -> None:
+        super().__init__(
+            message or f"{provider} returned authentication error (401)",
+            provider=provider,
+            **details,
+        )
+
+
+class ProviderRateLimitError(ProviderError):
+    """HTTP 429 / rate limit hit from a provider."""
+
+    error_type = "provider_rate_limit_error"
+
+    def __init__(self, provider: str, message: str | None = None, **details: Any) -> None:
+        super().__init__(
+            message or f"{provider} returned rate limit error (429)",
+            provider=provider,
+            **details,
+        )
+
+
 class RoutingError(LMMError):
     error_type = "routing_error"
 

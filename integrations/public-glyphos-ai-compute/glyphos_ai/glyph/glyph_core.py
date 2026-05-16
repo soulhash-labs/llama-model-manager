@@ -37,6 +37,112 @@ class GlyphMap:
             raise GlyphEncodingError("glyph map contains duplicate glyph values")
 
 
+@dataclass(frozen=True)
+class SemanticGlyphMap:
+    """Bucket-aware semantic glyph mapping parsed from glyph_map.yaml.
+
+    Four buckets (2-bit prefix × 64 entries):
+      00xxxxxx → actions        (0x00–0x3F)
+      01xxxxxx → destinations   (0x40–0x7F)
+      10xxxxxx → time/quantity  (0x80–0xBF)
+      11xxxxxx → sacred mods    (0xC0–0xFF)
+    """
+
+    actions: dict[str, tuple[int, str]]  # name → (byte_code, glyph)
+    destinations: dict[str, tuple[int, str]]  # name → (byte_code, glyph)
+    time_quantity: dict[str, tuple[int, str]]  # name → (byte_code, glyph)
+    sacred_mods: dict[str, tuple[int, str]]  # name → (byte_code, glyph)
+    glyph_to_semantic: dict[str, tuple[str, str]]  # glyph → (bucket, name)
+
+    def encode_field(self, bucket: str, name: str) -> tuple[int, str] | None:
+        bucket_map = {
+            "actions": self.actions,
+            "destinations": self.destinations,
+            "time_quantity": self.time_quantity,
+            "sacred_mods": self.sacred_mods,
+        }.get(bucket)
+        if bucket_map is None:
+            return None
+        return bucket_map.get(str(name).strip().lower())
+
+    def decode_glyph(self, glyph: str) -> tuple[str, str] | None:
+        return self.glyph_to_semantic.get(glyph)
+
+
+def _load_semantic_map(data: Any) -> SemanticGlyphMap:
+    """Parse glyph_map.yaml structure into SemanticGlyphMap."""
+    if not isinstance(data, Mapping):
+        raise GlyphEncodingError("glyph_map.yaml must be a mapping")
+
+    actions: dict[str, tuple[int, str]] = {}
+    destinations: dict[str, tuple[int, str]] = {}
+    time_quantity: dict[str, tuple[int, str]] = {}
+    sacred_mods: dict[str, tuple[int, str]] = {}
+
+    bucket_names = {
+        "actions": actions,
+        "destinations": destinations,
+        "time_quantity": time_quantity,
+        "sacred_mods": sacred_mods,
+    }
+
+    for section_key, target_dict in bucket_names.items():
+        entries = data.get(section_key, [])
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            code = entry.get("code")
+            glyph = entry.get("glyph")
+            name = entry.get("name")
+            if code is not None and glyph and name:
+                byte_code = _coerce_byte_key(code)
+                if byte_code is not None:
+                    target_dict[str(name).strip().lower()] = (byte_code, str(glyph))
+
+    glyph_to_semantic: dict[str, tuple[str, str]] = {}
+    for bucket_name, bucket_dict in [
+        ("actions", actions),
+        ("destinations", destinations),
+        ("time_quantity", time_quantity),
+        ("sacred_mods", sacred_mods),
+    ]:
+        for name, (_code, glyph) in bucket_dict.items():
+            glyph_to_semantic[glyph] = (bucket_name, name)
+
+    return SemanticGlyphMap(
+        actions=actions,
+        destinations=destinations,
+        time_quantity=time_quantity,
+        sacred_mods=sacred_mods,
+        glyph_to_semantic=glyph_to_semantic,
+    )
+
+
+_semantic_map_cache: dict[str, SemanticGlyphMap] = {}
+
+
+def load_semantic_glyph_map(path: str | Path | None = None) -> SemanticGlyphMap:
+    """Load semantic glyph map from glyph_map.yaml (cached)."""
+    if path is None:
+        path = Path(__file__).with_name(DEFAULT_MAP_NAME)
+    else:
+        path = Path(path)
+
+    cache_key = str(path.resolve())
+    if cache_key in _semantic_map_cache:
+        return _semantic_map_cache[cache_key]
+
+    if not path.exists():
+        raise GlyphEncodingError(f"semantic glyph map not found: {path}")
+
+    data = _load_structured_file(path)
+    semantic_map = _load_semantic_map(data)
+    _semantic_map_cache[cache_key] = semantic_map
+    return semantic_map
+
+
 def _builtin_private_use_map() -> GlyphMap:
     """
     Deterministic fallback map:

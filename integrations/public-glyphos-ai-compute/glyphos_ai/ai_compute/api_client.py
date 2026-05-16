@@ -74,120 +74,6 @@ def _as_int(value: str | int | None, default: int) -> int:
         return default
 
 
-# ---------------------------------------------------------------------------
-# Ollama
-# -----------------------------------------------------------------------------
-
-
-class OllamaClient(BaseChatClient):
-    """
-    Ollama client for local or cloud inference.
-
-    Accepts base_url as either:
-    - http://localhost:11434
-    - http://localhost:11434/api
-    - https://ollama.com
-    - https://ollama.com/api
-    """
-
-    def __init__(
-        self,
-        base_url: str = "http://localhost:11434",
-        model: str = "llama3:8b",
-        max_tokens: int = 500,
-        timeout: int = 60,
-        api_key: str | None = None,
-        default_system: str | None = None,
-    ):
-        super().__init__(model=model, max_tokens=max_tokens, timeout=timeout)
-        self.base_url = base_url.rstrip("/")
-        self.api_key = api_key or os.environ.get("OLLAMA_API_KEY", "")
-        self.default_system = default_system
-
-    @property
-    def _api_base(self) -> str:
-        return self.base_url if self.base_url.endswith("/api") else f"{self.base_url}/api"
-
-    def _headers(self) -> dict[str, str]:
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        return headers
-
-    def is_available(self) -> bool:
-        try:
-            response = self._session.get(f"{self._api_base}/tags", headers=self._headers(), timeout=5)
-            return response.status_code == 200
-        except Exception:
-            return False
-
-    def list_models(self) -> dict[str, Any]:
-        try:
-            response = self._session.get(f"{self._api_base}/tags", headers=self._headers(), timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except Exception as exc:
-            return {"models": [], "error": str(exc)}
-
-    def generate(self, prompt: str, **kwargs) -> dict[str, Any]:
-        started = time.perf_counter()
-
-        payload: dict[str, Any] = {
-            "model": kwargs.get("model", self.model),
-            "prompt": prompt,
-            "stream": kwargs.get("stream", False),
-            "raw": kwargs.get("raw", False),
-            "options": {
-                "temperature": kwargs.get("temperature", 0.7),
-                "num_predict": kwargs.get("max_tokens", self.max_tokens),
-            },
-        }
-
-        system = kwargs.get("system", self.default_system)
-        if system:
-            payload["system"] = system
-        if "format" in kwargs and kwargs["format"] is not None:
-            payload["format"] = kwargs["format"]
-        if "think" in kwargs and kwargs["think"] is not None:
-            payload["think"] = kwargs["think"]
-        if "keep_alive" in kwargs and kwargs["keep_alive"] is not None:
-            payload["keep_alive"] = kwargs["keep_alive"]
-        if "options" in kwargs and isinstance(kwargs["options"], Mapping):
-            payload["options"].update(dict(kwargs["options"]))
-
-        try:
-            response = self._session.post(
-                f"{self._api_base}/generate",
-                json=payload,
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            data = response.json()
-
-            return _result(
-                response=data.get("response", ""),
-                latency_ms=int((time.perf_counter() - started) * 1000),
-                tokens_used=data.get("eval_count"),
-                raw=data,
-                prompt_tokens=data.get("prompt_eval_count"),
-                thinking=data.get("thinking"),
-                done=data.get("done"),
-                done_reason=data.get("done_reason"),
-                total_duration_ns=data.get("total_duration"),
-                load_duration_ns=data.get("load_duration"),
-                prompt_eval_duration_ns=data.get("prompt_eval_duration"),
-                eval_duration_ns=data.get("eval_duration"),
-                model=data.get("model", payload["model"]),
-            )
-        except Exception as exc:
-            return _result(
-                response=f"Ollama error: {exc}",
-                latency_ms=int((time.perf_counter() - started) * 1000),
-                raw={"error": str(exc)},
-            )
-
-
 # -----------------------------------------------------------------------------
 # OpenAI
 # -----------------------------------------------------------------------------
@@ -577,69 +463,6 @@ def create_configured_clients(
         if client.is_available():
             clients[f"llamacpp-{lane}"] = client
 
-    # ----------------- Ollama -----------------
-    ollama_url = _env_first(
-        "GLYPHOS_OLLAMA_URL",
-        "QRBT_OLLAMA_BASE_URL",
-        default=_config_value(effective_config, "ai_compute.ollama.url", default="http://localhost:11434"),
-    )
-    ollama_model = _env_first(
-        "GLYPHOS_OLLAMA_MODEL",
-        default=_config_value(effective_config, "ai_compute.ollama.model", default="llama3:8b"),
-    )
-    ollama_timeout = _as_int(
-        _env_first(
-            "GLYPHOS_OLLAMA_TIMEOUT",
-            default=_config_value(effective_config, "ai_compute.ollama.timeout", default="60"),
-        ),
-        60,
-    )
-    ollama_enabled = (
-        _env_first(
-            "GLYPHOS_OLLAMA_ENABLED",
-            default=_config_value(effective_config, "ai_compute.ollama.enabled", default="true"),
-        ).lower()
-        != "false"
-    )
-
-    if ollama_enabled:
-        ollama = OllamaClient(
-            base_url=ollama_url,
-            model=ollama_model,
-            timeout=ollama_timeout,
-            api_key=_env_first("OLLAMA_API_KEY", default=""),
-        )
-        if ollama.is_available():
-            clients["ollama"] = ollama
-
-    for lane in lane_keys:
-        base_url = _env_first(
-            f"GLYPHOS_OLLAMA_{lane.upper()}_URL",
-            f"QRBT_COUNCIL_OLLAMA_{lane.upper()}_URL",
-            default=_config_value(effective_config, f"ai_compute.lanes.{lane}.ollama_url", default=""),
-        )
-        if not base_url:
-            continue
-        model = _env_first(
-            f"GLYPHOS_OLLAMA_{lane.upper()}_MODEL",
-            default=_config_value(effective_config, f"ai_compute.lanes.{lane}.ollama_model", default="llama3:8b"),
-        )
-        timeout = _as_int(
-            _env_first(
-                f"GLYPHOS_OLLAMA_{lane.upper()}_TIMEOUT",
-                default=_config_value(effective_config, f"ai_compute.lanes.{lane}.ollama_timeout", default="60"),
-            ),
-            60,
-        )
-        client = OllamaClient(
-            base_url=base_url,
-            model=model,
-            timeout=timeout,
-            api_key=_env_first("OLLAMA_API_KEY", default=""),
-        )
-        if client.is_available():
-            clients[f"ollama-{lane}"] = client
-
     # ----------------- OpenAI -----------------
     openai_enabled = (
         _env_first(
@@ -757,7 +580,6 @@ def create_configured_clients(
 __all__ = [
     "BaseChatClient",
     "LlamaCppClient",
-    "OllamaClient",
     "OpenAIClient",
     "AnthropicClient",
     "XAIClient",

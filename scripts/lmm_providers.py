@@ -16,7 +16,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from lmm_errors import ProviderError, ProviderTimeoutError  # noqa: E402
+from lmm_errors import ProviderAuthError, ProviderError, ProviderRateLimitError, ProviderTimeoutError  # noqa: E402
 
 
 class Provider(Protocol):
@@ -76,6 +76,25 @@ def _error_message(payload: dict[str, Any], status: int) -> str:
         return error
     msg = payload.get("message")
     return str(msg) if msg else f"HTTP {status}"
+
+
+def _raise_for_status(context: str, status: int, provider: str, response: dict[str, Any] | str) -> None:
+    """Raise a typed ProviderError based on HTTP status code.
+
+    Maps 401 -> ProviderAuthError, 429 -> ProviderRateLimitError,
+    all other non-2xx -> ProviderError.
+    """
+    message: str
+    if isinstance(response, dict):
+        message = _error_message(response, status)
+    else:
+        message = str(response) if response else f"HTTP {status}"
+    full = f"{context} failed ({status}): {message}"
+    if status == 401:
+        raise ProviderAuthError(provider, message=full)
+    if status == 429:
+        raise ProviderRateLimitError(provider, message=full)
+    raise ProviderError(full, provider=provider, status=status)
 
 
 def _sse_content(line: str) -> str | None:
@@ -189,8 +208,7 @@ class LlamaCppProvider:
             raise ProviderError(f"generate response JSON malformed: {exc.msg}", provider=self.name) from exc
 
         if status != 200:
-            message = _error_message(response, status) if isinstance(response, dict) else f"HTTP {status}"
-            raise ProviderError(f"generate failed ({status}): {message}", provider=self.name, status=status)
+            _raise_for_status("generate", status, self.name, response)
 
         choices = response.get("choices") if isinstance(response, dict) else None
         if not isinstance(choices, list) or not choices:
@@ -234,22 +252,14 @@ class LlamaCppProvider:
             with request.urlopen(req, timeout=self.timeout) as response:
                 if int(response.status) != 200:
                     raw = response.read().decode("utf-8", errors="replace")
-                    raise ProviderError(
-                        f"generate_stream failed ({response.status}): {raw or 'non-200 response'}",
-                        provider=self.name,
-                        status=response.status,
-                    )
+                    _raise_for_status("generate_stream", response.status, self.name, raw or "non-200 response")
                 for raw_line in response:
                     token = _sse_content(raw_line.decode("utf-8", errors="replace"))
                     if token:
                         yield token
         except urerror.HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
-            raise ProviderError(
-                f"generate_stream failed ({exc.code}): {raw}",
-                provider=self.name,
-                status=exc.code,
-            ) from exc
+            _raise_for_status("generate_stream", exc.code, self.name, raw)
         except urerror.URLError as exc:
             if _is_timeout_error(exc):
                 raise ProviderTimeoutError(self.name, self.timeout) from exc

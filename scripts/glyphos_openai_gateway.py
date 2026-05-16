@@ -21,6 +21,9 @@ if str(SCRIPT_ROOT) not in sys.path:
 INTEGRATION_ROOT = APP_ROOT / "integrations" / "public-glyphos-ai-compute"
 if str(INTEGRATION_ROOT) not in sys.path:
     sys.path.insert(0, str(INTEGRATION_ROOT))
+LEARNING_LOOP_TEMPLATES = APP_ROOT / "integrations" / "learning-loop" / "templates"
+if str(LEARNING_LOOP_TEMPLATES) not in sys.path:
+    sys.path.insert(0, str(LEARNING_LOOP_TEMPLATES))
 
 from gateway import context_provider as _context_provider  # noqa: E402
 from gateway.context_provider import assemble_prompt as _context_assemble_prompt  # noqa: E402
@@ -83,7 +86,6 @@ from gateway.telemetry import run_record_from_dict as _telemetry_run_record_from
 from gateway.telemetry import run_record_store as _run_record_store  # noqa: E402
 from gateway.telemetry import safe_record_run_record as _safe_record_run_record  # noqa: E402
 from gateway.telemetry import telemetry_store as _telemetry_store  # noqa: E402
-
 from lmm_config import load_lmm_config_from_env  # noqa: E402
 from lmm_notifications import create_notification_manager  # noqa: E402
 from lmm_types import RunRecord  # noqa: E402
@@ -436,6 +438,8 @@ def route_prompt(
     temperature: float,
     context_payload=None,
     upstream_context: dict[str, Any] | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     return _routing_route_prompt(
         prompt,
@@ -445,6 +449,8 @@ def route_prompt(
         context_payload=context_payload,
         upstream_context=upstream_context,
         create_router_fn=create_router,
+        tools=tools,
+        tool_choice=tool_choice,
     )
 
 
@@ -455,6 +461,8 @@ def route_prompt_stream(
     temperature: float,
     context_payload=None,
     upstream_context: dict[str, Any] | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str], Iterator[str]]:
     return _routing_route_prompt_stream(
         prompt,
@@ -477,6 +485,8 @@ def _invoke_route_prompt(
     temperature: float,
     context_payload: Any,
     upstream_context: dict[str, Any] | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Invoke a route prompt callable with backward-compatible args.
 
@@ -492,11 +502,19 @@ def _invoke_route_prompt(
     accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values())
     accepts_context_payload = accepts_kwargs or "context_payload" in parameters
     accepts_upstream_context = accepts_kwargs or "upstream_context" in parameters
+    accepts_tools = accepts_kwargs or "tools" in parameters
+    accepts_tool_choice = accepts_kwargs or "tool_choice" in parameters
 
     if not accepts_context_payload:
         return route_fn(fallback_prompt or prompt, model, max_tokens, temperature)
     if not accepts_upstream_context:
         return route_fn(prompt, model, max_tokens, temperature, context_payload=context_payload)
+
+    extra_kwargs: dict[str, Any] = {}
+    if accepts_tools:
+        extra_kwargs["tools"] = tools
+    if accepts_tool_choice:
+        extra_kwargs["tool_choice"] = tool_choice
 
     try:
         return route_fn(
@@ -506,6 +524,7 @@ def _invoke_route_prompt(
             temperature,
             context_payload=context_payload,
             upstream_context=upstream_context,
+            **extra_kwargs,
         )
     except TypeError as exc:
         message = str(exc)
@@ -776,6 +795,23 @@ def create_gateway_server(
     server.gateway = LMMOpenAIGateway(backend_base_url=backend_base_url, model_id=model_id)  # type: ignore[attr-defined]
     server.gateway.gateway_mode = gateway_mode  # type: ignore[attr-defined]
     server.health_checker = server.gateway.health_checker  # type: ignore[attr-defined]
+
+    # Learning Loop persistence store
+    tier_config = Path.home() / ".config" / "llama-model-manager" / "agent-tier.yaml"
+    state_path = Path.home() / ".config" / "llama-model-manager" / "agent_state.json"
+    try:
+        from gateway.routing_service import set_persistence_store  # noqa: E402
+        from persistence import PersistenceStore  # noqa: E402
+
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        store = PersistenceStore(
+            path=str(state_path),
+            tier_config_path=str(tier_config) if tier_config.exists() else None,
+        )
+        server.persistence_store = store  # type: ignore[attr-defined]
+        set_persistence_store(store)
+    except Exception:
+        server.persistence_store = None  # type: ignore[attr-defined]
 
     if getattr(watcher_config, "enabled", False):
         start_update_watcher(

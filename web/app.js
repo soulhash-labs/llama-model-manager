@@ -723,6 +723,7 @@ function renderStatus(data) {
   renderContextPipelineTrace(data.gateway_requests || {});
   renderContextGlyphosPipeline(deriveContextGlyphosPipeline(data), deriveContextModeMcp(data), data.glyphos_telemetry || {});
   renderCloudProviders(data);
+  renderLearningLoop(data);
 
   // Show local-first architecture banner when GlyphOS is available and configured
   const glyphosAvailable = Boolean(data.glyphos_telemetry?.available);
@@ -898,13 +899,6 @@ function renderStatus(data) {
     data.claude_settings_exists ? "settings present" : "settings missing",
     displayPath(data.claude_settings_file || ""),
     data.claude_base_url || "",
-  ]) || "-");
-  const claudeGateway = data.claude_gateway || {};
-  setText("#claude-gateway-status", (claudeGateway.running || "") === "yes" ? "Running" : "Stopped");
-  setText("#claude-gateway-url", joinNotes([
-    claudeGateway.url || "-",
-    claudeGateway.model_id ? `model ${claudeGateway.model_id}` : "",
-    claudeGateway.upstream_timeout_seconds ? `timeout ${claudeGateway.upstream_timeout_seconds}s` : "",
   ]) || "-");
   setText("#glyphos-model", data.glyphos_model || "-");
   setText("#glyphos-path", joinNotes([
@@ -1179,6 +1173,39 @@ function renderContextGlyphosPipeline(pipeline, contextModeMcp, glyphosTelemetry
     chip.textContent = blocker;
     blockersNode.append(chip);
   });
+}
+
+function renderLearningLoop(data) {
+  const badge = $("#learning-loop-badge");
+  const status = $("#learning-loop-status");
+  const tier = $("#learning-loop-tier");
+  const tasks = $("#learning-loop-tasks");
+  const lessons = $("#learning-loop-lessons");
+  if (!badge || !status) return;
+
+  const ll = data.learning_loop || {};
+  const tierVal = ll.tier || ll.tier_config?.tier;
+  const taskCount = ll.total_tasks || 0;
+  const lessonCount = ll.lesson_count || 0;
+  const initialized = !!tierVal || taskCount > 0 || lessonCount > 0;
+
+  if (initialized) {
+    badge.textContent = `Tier ${tierVal || "?"}`;
+    badge.classList.remove("integration-badge-muted");
+    badge.classList.add("integration-badge-ready");
+    status.textContent = "Initialized";
+    setText(tier, `Hardware tier: ${tierVal}`);
+    setText(tasks, `Tasks recorded: ${taskCount}`);
+    setText(lessons, `Lessons: ${lessonCount}`);
+  } else {
+    badge.textContent = "Not initialized";
+    badge.classList.add("integration-badge-muted");
+    badge.classList.remove("integration-badge-ready");
+    status.textContent = "Run Init Global to start tracking";
+    setText(tier, "-");
+    setText(tasks, "-");
+    setText(lessons, "-");
+  }
 }
 
 function renderCloudProviders(data) {
@@ -2078,14 +2105,19 @@ function renderDefaults(defaults) {
   $("#default-gateway-log").value = defaults.LLAMA_MODEL_GATEWAY_LOG || "$HOME/models/lmm-gateway.log";
   $("#default-gateway-fast-log").value = defaults.LLAMA_MODEL_GATEWAY_FAST_LOG || "$HOME/models/lmm-gateway-fast.log";
   $("#default-context-glyphos-pipeline").checked = isTruthySetting(defaults.LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE);
+  $("#default-cloud-enabled").checked = isTruthySetting(defaults.GLYPHOS_CLOUD_ENABLED);
+  $("#default-cloud-preferred-provider").value = defaults.GLYPHOS_CLOUD_PREFERRED_PROVIDER || "";
+  $("#default-cloud-openai-key").value = defaults.GLYPHOS_CLOUD_OPENAI_API_KEY || "";
+  $("#default-cloud-openai-model").value = defaults.GLYPHOS_CLOUD_OPENAI_MODEL || "";
+  $("#default-cloud-anthropic-key").value = defaults.GLYPHOS_CLOUD_ANTHROPIC_API_KEY || "";
+  $("#default-cloud-anthropic-model").value = defaults.GLYPHOS_CLOUD_ANTHROPIC_MODEL || "";
+  $("#default-cloud-xai-key").value = defaults.GLYPHOS_CLOUD_XAI_API_KEY || "";
+  $("#default-cloud-xai-model").value = defaults.GLYPHOS_CLOUD_XAI_MODEL || "";
   $("#default-update-watcher-enabled").checked = isTruthySetting(defaults.LMM_UPDATE_WATCHER_ENABLED);
   $("#default-update-interval").value = defaults.LMM_UPDATE_CHECK_INTERVAL_HOURS || "12";
   $("#default-update-timeout").value = defaults.LMM_UPDATE_TIMEOUT_SECONDS || "5";
   $("#default-openclaw-profile").value = defaults.OPENCLAW_PROFILE || "";
   $("#default-openclaw-api-key").value = defaults.OPENCLAW_API_KEY || "";
-  $("#default-claude-gateway-host").value = defaults.CLAUDE_GATEWAY_HOST || "";
-  $("#default-claude-gateway-port").value = defaults.CLAUDE_GATEWAY_PORT || "";
-  $("#default-claude-gateway-log").value = defaults.CLAUDE_GATEWAY_LOG || "";
   $("#default-claude-gateway-timeout").value = defaults.CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS || "";
   $("#default-claude-base-url").value = defaults.CLAUDE_BASE_URL || "";
   $("#default-claude-model-id").value = defaults.CLAUDE_MODEL_ID || "";
@@ -2252,14 +2284,19 @@ function collectDefaultsPayload() {
     LLAMA_MODEL_GATEWAY_LOG: $("#default-gateway-log").value.trim(),
     LLAMA_MODEL_GATEWAY_FAST_LOG: $("#default-gateway-fast-log").value.trim(),
     LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE: $("#default-context-glyphos-pipeline").checked ? "1" : "",
+    GLYPHOS_CLOUD_ENABLED: $("#default-cloud-enabled").checked ? "1" : "",
+    GLYPHOS_CLOUD_PREFERRED_PROVIDER: $("#default-cloud-preferred-provider").value.trim(),
+    GLYPHOS_CLOUD_OPENAI_API_KEY: $("#default-cloud-openai-key").value.trim(),
+    GLYPHOS_CLOUD_OPENAI_MODEL: $("#default-cloud-openai-model").value.trim(),
+    GLYPHOS_CLOUD_ANTHROPIC_API_KEY: $("#default-cloud-anthropic-key").value.trim(),
+    GLYPHOS_CLOUD_ANTHROPIC_MODEL: $("#default-cloud-anthropic-model").value.trim(),
+    GLYPHOS_CLOUD_XAI_API_KEY: $("#default-cloud-xai-key").value.trim(),
+    GLYPHOS_CLOUD_XAI_MODEL: $("#default-cloud-xai-model").value.trim(),
     LMM_UPDATE_WATCHER_ENABLED: $("#default-update-watcher-enabled").checked ? "1" : "",
     LMM_UPDATE_CHECK_INTERVAL_HOURS: $("#default-update-interval").value.trim(),
     LMM_UPDATE_TIMEOUT_SECONDS: $("#default-update-timeout").value.trim(),
     OPENCLAW_PROFILE: $("#default-openclaw-profile").value.trim(),
     OPENCLAW_API_KEY: $("#default-openclaw-api-key").value.trim(),
-    CLAUDE_GATEWAY_HOST: $("#default-claude-gateway-host").value.trim(),
-    CLAUDE_GATEWAY_PORT: $("#default-claude-gateway-port").value.trim(),
-    CLAUDE_GATEWAY_LOG: $("#default-claude-gateway-log").value.trim(),
     CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS: $("#default-claude-gateway-timeout").value.trim(),
     CLAUDE_BASE_URL: $("#default-claude-base-url").value.trim(),
     CLAUDE_MODEL_ID: $("#default-claude-model-id").value.trim(),
@@ -2305,16 +2342,32 @@ async function activateContextGlyphos(button) {
   });
 }
 
-async function performClaudeGatewayAction(action, button, options = {}) {
-  await withButtonBusy(button, options.pendingLabel || "Working...", async () => {
-    await api("/api/claude-gateway", {
+async function learningLoopInitProject(button) {
+  const projectPath = $("#learning-loop-project-path")?.value?.trim();
+  if (!projectPath) {
+    showToast("Enter a project directory path first.", "warning");
+    return;
+  }
+  await withButtonBusy(button, "Deploying...", async () => {
+    await api("/api/learning-loop/init-project", {
       method: "POST",
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ path: projectPath }),
     });
     await refreshState();
   }, {
-    successMessage: options.successMessage,
-    successKind: options.successKind || "info",
+    successMessage: `Learning Loop deployed to ${projectPath}.`,
+  });
+}
+
+async function learningLoopInitGlobal(button) {
+  await withButtonBusy(button, "Initializing...", async () => {
+    await api("/api/learning-loop/init-global", {
+      method: "POST",
+      body: "{}",
+    });
+    await refreshState();
+  }, {
+    successMessage: "Global Learning Loop store initialized.",
   });
 }
 
@@ -2348,19 +2401,6 @@ async function loadGatewayLogs(button) {
   });
 }
 
-async function loadClaudeGatewayLogs(button) {
-  await withButtonBusy(button, "Loading...", async () => {
-    const payload = await api("/api/claude-gateway/logs?lines=100");
-    const output = $("#claude-gateway-logs-output");
-    output.classList.remove("hidden");
-    output.textContent = payload.content || "";
-    output.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, {
-    successMessage: "Loaded Claude gateway logs.",
-    successKind: "info",
-  });
-}
-
 async function saveDefaults(event) {
   event.preventDefault();
   const submitButton = event.submitter || $("#defaults-form button[type='submit']");
@@ -2368,11 +2408,14 @@ async function saveDefaults(event) {
   validateNoContextFlags(payload.LLAMA_SERVER_EXTRA_ARGS, "Global extra args");
 
   await withButtonBusy(submitButton, "Saving...", async () => {
-    await api("/api/defaults/save", {
+    const result = await api("/api/defaults/save", {
       method: "POST",
       body: JSON.stringify(payload),
     });
     await refreshState();
+    if (result.requires_gateway_restart) {
+      showToast("Cloud configuration updated. Restart the LMM gateway for changes to take effect.", "info", { timeout: 8000 });
+    }
   }, {
     successMessage: "Global defaults updated.",
   });
@@ -2831,6 +2874,8 @@ function bindEvents() {
   $("#sync-claude").addEventListener("click", (event) => performIntegrationSync("/api/claude/sync", event.currentTarget, "Syncing...", "Claude Code settings synced.").catch(showError));
   $("#sync-glyphos").addEventListener("click", (event) => performIntegrationSync("/api/glyphos/sync", event.currentTarget, "Syncing...", "GlyphOS config synced.").catch(showError));
   $("#sync-glyphos-combined").addEventListener("click", (event) => activateContextGlyphos(event.currentTarget).catch(showError));
+  $("#learning-loop-init-project").addEventListener("click", (event) => learningLoopInitProject(event.currentTarget).catch(showError));
+  $("#learning-loop-init-global").addEventListener("click", (event) => learningLoopInitGlobal(event.currentTarget).catch(showError));
   $("#gateway-start").addEventListener("click", (event) => performGatewayAction("start", event.currentTarget, { pendingLabel: "Starting...", successMessage: "LMM gateway started." }).catch(showError));
   $("#gateway-restart").addEventListener("click", (event) => performGatewayAction("restart", event.currentTarget, { pendingLabel: "Restarting...", successMessage: "LMM gateway restarted." }).catch(showError));
   $("#gateway-stop").addEventListener("click", (event) => performGatewayAction("stop", event.currentTarget, { pendingLabel: "Stopping...", successMessage: "LMM gateway stopped." }).catch(showError));
@@ -2840,10 +2885,6 @@ function bindEvents() {
   $("#gateway-fast-stop").addEventListener("click", (event) => performGatewayAction("stop", event.currentTarget, { lane: "fast", pendingLabel: "Stopping...", successMessage: "Fast LMM gateway stopped." }).catch(showError));
   $("#gateway-fast-logs").dataset.lane = "fast";
   $("#gateway-fast-logs").addEventListener("click", (event) => loadGatewayLogs(event.currentTarget).catch(showError));
-  $("#claude-gateway-start").addEventListener("click", (event) => performClaudeGatewayAction("start", event.currentTarget, { pendingLabel: "Starting...", successMessage: "Claude gateway started." }).catch(showError));
-  $("#claude-gateway-restart").addEventListener("click", (event) => performClaudeGatewayAction("restart", event.currentTarget, { pendingLabel: "Restarting...", successMessage: "Claude gateway restarted." }).catch(showError));
-  $("#claude-gateway-stop").addEventListener("click", (event) => performClaudeGatewayAction("stop", event.currentTarget, { pendingLabel: "Stopping...", successMessage: "Claude gateway stopped." }).catch(showError));
-  $("#claude-gateway-logs").addEventListener("click", (event) => loadClaudeGatewayLogs(event.currentTarget).catch(showError));
   $("#scan-models").addEventListener("click", (event) => withButtonBusy(event.currentTarget, "Scanning...", async () => {
     const items = await scanModels();
     showToast(items.length ? `Found ${items.length} model candidate${items.length === 1 ? "" : "s"}.` : "No model candidates found in this root.", items.length ? "success" : "info");

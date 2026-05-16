@@ -22,7 +22,7 @@ try:
         decode_to_bytes,
         decode_utf8,
     )
-except ImportError:
+except ModuleNotFoundError:
     from decoder import (  # type: ignore
         GlyphDecoder,
         GlyphDecodingError,
@@ -49,7 +49,7 @@ __all__ = [
 def main() -> int:
     try:
         from .decoder import _main
-    except ImportError:
+    except ModuleNotFoundError:
         from decoder import _main  # type: ignore
     return _main()
 

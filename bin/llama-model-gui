@@ -56,7 +56,7 @@ show_text() {
     tmp="$(mktemp)" || die "Failed to create temp file"
     trap 'rm -f "$tmp"' EXIT
     printf '%s\n' "$body" >"$tmp"
-    zenity --text-info --title="$title" --width=980 --height=720 --filename="$tmp"
+    zenity --text-info --title="$title" --width=980 --height=720 --filename="$tmp" || true
     rm -f "$tmp"
     trap - EXIT
 }
@@ -64,19 +64,20 @@ show_text() {
 open_terminal_cmd() {
     local title="$1"
     local cmd="$2"
-    local escaped_title
-    local term_base
 
     [[ -n "$TERMINAL_BIN" ]] || die "No terminal emulator found"
 
-    printf -v escaped_title '%q' "$title"
+    local term_base
     term_base="$(basename "$TERMINAL_BIN")"
+    # Use bash -c with positional args to avoid quoting/escape expansion bugs
+    local inner_script='printf "%s\n\n" "$1"; eval "$2"; status=$?; printf "\nExit status: %s\n" "$status"; printf "Press Enter to close..."; read -r; exit $status'
+
     case "$term_base" in
         gnome-terminal)
-            "$TERMINAL_BIN" -- bash -lc "printf '%s\n\n' $escaped_title; $cmd; status=\$?; printf '\nExit status: %s\n' \"\$status\"; printf 'Press Enter to close...'; read -r; exit \$status"
+            "$TERMINAL_BIN" -- bash -c "$inner_script" _ "$title" "$cmd"
             ;;
         *)
-            "$TERMINAL_BIN" -e bash -lc "printf '%s\n\n' $escaped_title; $cmd; status=\$?; printf '\nExit status: %s\n' \"\$status\"; printf 'Press Enter to close...'; read -r; exit \$status"
+            "$TERMINAL_BIN" -e bash -c "$inner_script" _ "$title" "$cmd"
             ;;
     esac
 }
@@ -247,7 +248,7 @@ open_file() {
 
 show_help() {
     if [[ -f "$HELP_FILE" ]]; then
-        zenity --text-info --title="$APP_TITLE Help" --width=980 --height=720 --filename="$HELP_FILE"
+        zenity --text-info --title="$APP_TITLE Help" --width=980 --height=720 --filename="$HELP_FILE" || true
     else
         show_text "$APP_TITLE Help" "No help file found at:
 

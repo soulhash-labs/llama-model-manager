@@ -31,6 +31,25 @@ from .router import (
     build_router_from_env,
     route_with_configured_clients,
 )
+from .semantic_decoder import (
+    SemanticDecodingError,
+    decode_intent_dict_from_glyphs,
+    decode_intent_from_glyphs,
+    parse_semantic_wire,
+    semantic_decoding_manifest,
+)
+from .semantic_decoder import (
+    SemanticIntentPayload as DecodedSemanticPayload,
+)
+from .semantic_encoder import (
+    SemanticEncodingError,
+    SemanticIntentPayload,
+    encode_intent_to_glyphs,
+    encode_packet_to_glyphs,
+    semantic_encoding_manifest,
+    semantic_payload_from_intent,
+    semantic_payload_from_packet,
+)
 
 __all__ = [
     "glyph_to_prompt",
@@ -47,6 +66,19 @@ __all__ = [
     "AnthropicClient",
     "XAIClient",
     "create_configured_clients",
+    "SemanticIntentPayload",
+    "DecodedSemanticPayload",
+    "SemanticEncodingError",
+    "SemanticDecodingError",
+    "semantic_payload_from_intent",
+    "semantic_payload_from_packet",
+    "encode_intent_to_glyphs",
+    "encode_packet_to_glyphs",
+    "decode_intent_from_glyphs",
+    "decode_intent_dict_from_glyphs",
+    "parse_semantic_wire",
+    "semantic_encoding_manifest",
+    "semantic_decoding_manifest",
 ]
 
 

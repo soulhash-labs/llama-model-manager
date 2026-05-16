@@ -11,7 +11,20 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
-import yaml
+_yaml: Any = None
+
+
+def _get_yaml() -> Any:
+    global _yaml
+    if _yaml is None:
+        try:
+            import yaml as _yaml  # type: ignore
+        except ImportError as exc:
+            raise GlyphRegistryError(
+                "PyYAML is required to load glyph_map.yaml. Install with: pip install pyyaml"
+            ) from exc
+    return _yaml
+
 
 BUCKET_NAMES: tuple[str, ...] = (
     "actions",
@@ -173,7 +186,7 @@ class GlyphRegistry:
 
     @classmethod
     def from_yaml_text(cls, text: str) -> GlyphRegistry:
-        data = yaml.safe_load(text)
+        data = _get_yaml().safe_load(text)
         if not isinstance(data, Mapping):
             raise GlyphRegistryError("glyph_map.yaml must decode to a mapping")
         return cls.from_mapping(data)

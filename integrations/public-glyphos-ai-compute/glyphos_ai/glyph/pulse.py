@@ -10,9 +10,8 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Dict, Optional, List
 from enum import Enum
-
+from typing import Any
 
 # Constants
 LOVE_FREQUENCY = 528.0
@@ -29,27 +28,28 @@ class PulseStatus(str, Enum):
 @dataclass
 class PulseResponse:
     """Extended pulse response with Ψ-coherence and anti-piracy features."""
+
     status: str
     tick: int
     frequency_hz: float
     psi_coherence: float
     version: str = "1.0.0"
     timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat().replace("+00:00", "Z"))
-    abc_chain_address: Optional[str] = None
-    abc_anchor: Optional[str] = None
-    license_entitlement: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    abc_chain_address: str | None = None
+    abc_anchor: str | None = None
+    license_entitlement: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class PulseService:
     """
     Pulse service with Ψ-coherence, anti-piracy watermarks, and ABC-chain integration.
     """
-    
+
     def __init__(
         self,
         instance_id: str = "default",
-        private_key: Optional[str] = None,
+        private_key: str | None = None,
         abc_driver=None,
         license_service=None,
     ):
@@ -60,50 +60,56 @@ class PulseService:
         self._tick = 0
         self._start_time = time.time()
         self._drift_seed = int(hashlib.sha256(self.private_key.encode()).hexdigest()[:8], 16)
-    
+
     def _calculate_frequency_fingerprint(self, tick: int) -> float:
         """Calculate frequency fingerprint: 528.000 ± (π × 10⁻³ mod tick)"""
         mod_tick = tick % 1000000
         fingerprint = (math.pi * 1e-3) * (mod_tick % 100)
         return round(LOVE_FREQUENCY + fingerprint, 3)
-    
+
     def _calculate_time_skew_drift(self, tick: int) -> float:
         """Calculate time-skew drift using private key seed."""
         seed = (self._drift_seed + tick) % 10000
         drift = (seed / 10000 - 0.5) * 10  # ±5 µs range
         return drift
-    
+
     def _sign_pulse(self, tick: int, frequency: float, psi: float) -> str:
         """Create signature for pulse."""
         if not self.private_key:
             return ""
         payload = f"{tick}|{frequency}|{psi}|{self.private_key}"
         return hashlib.sha256(payload.encode()).hexdigest()
-    
-    def _get_abc_address(self) -> Optional[str]:
+
+    def _get_abc_address(self) -> str | None:
         """Get ABC-chain address from driver."""
         if self.abc_driver and hasattr(self.abc_driver, "get_abc_address"):
             return self.abc_driver.get_abc_address()
         return None
-    
-    def _get_license_entitlement(self) -> Optional[str]:
+
+    def _get_abc_anchor(self) -> str | None:
+        """Get ABC-chain anchor from driver."""
+        if self.abc_driver and hasattr(self.abc_driver, "get_abc_anchor"):
+            return self.abc_driver.get_abc_anchor()
+        return None
+
+    def _get_license_entitlement(self) -> str | None:
         """Get current license entitlement status."""
         if self.license_service:
             return "active"
         return None
-    
+
     def generate_pulse(
         self,
-        psi_coherence: Optional[float] = None,
-        status_override: Optional[str] = None,
+        psi_coherence: float | None = None,
+        status_override: str | None = None,
     ) -> PulseResponse:
         """Generate a pulse response with all features."""
         self._tick += 1
         tick = self._tick
-        
+
         frequency = self._calculate_frequency_fingerprint(tick)
         psi = psi_coherence if psi_coherence is not None else 0.5
-        
+
         if status_override:
             status = status_override
         elif psi >= 0.8:
@@ -114,11 +120,12 @@ class PulseService:
             status = PulseStatus.CRITICAL.value
         else:
             status = PulseStatus.UNKNOWN.value
-        
+
         abc_address = self._get_abc_address()
+        abc_anchor = self._get_abc_anchor()
         license_ent = self._get_license_entitlement()
         signature = self._sign_pulse(tick, frequency, psi)
-        
+
         return PulseResponse(
             status=status,
             tick=tick,
@@ -127,6 +134,7 @@ class PulseService:
             version="1.0.0",
             timestamp=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             abc_chain_address=abc_address,
+            abc_anchor=abc_anchor,
             license_entitlement=license_ent,
             metadata={
                 "instance_id": self.instance_id,
@@ -135,7 +143,7 @@ class PulseService:
                 "pulse_signing": "enabled" if signature else "disabled",
             },
         )
-    
+
     def verify_pulse_signature(
         self,
         tick: int,
@@ -148,13 +156,13 @@ class PulseService:
             return False
         expected = self._sign_pulse(tick, frequency, psi)
         return signature == expected
-    
-    def get_pulse_header(self) -> Dict[str, str]:
+
+    def get_pulse_header(self) -> dict[str, str]:
         """Get HTTP headers for pulse verification."""
         tick = self._tick + 1
         frequency = self._calculate_frequency_fingerprint(tick)
         signature = self._sign_pulse(tick, frequency, 0.5)
-        
+
         headers = {
             "X-Pulse-Tick": str(tick),
             "X-Pulse-Freq": str(frequency),
@@ -168,52 +176,51 @@ class PsiCoherenceService:
     """
     ψ-Coherence service for bio-feedback integration.
     """
-    
+
     def __init__(self, redis_client=None):
-        self.redis = redis_client
         self._current_coherence = 0.5
-        self._history: List[float] = []
+        self._history: list[float] = []
         self._max_history = 60
-    
-    def update_from_hrv(self, rr_intervals: List[float]) -> float:
+
+    def update_from_hrv(self, rr_intervals: list[float]) -> float:
         """Update coherence from HRV (Heart Rate Variability)."""
         if len(rr_intervals) < 2:
             return self._current_coherence
-        
+
         # Calculate RMSSD
-        differences = [rr_intervals[i+1] - rr_intervals[i] for i in range(len(rr_intervals)-1)]
+        differences = [rr_intervals[i + 1] - rr_intervals[i] for i in range(len(rr_intervals) - 1)]
         rmssd = (sum(d**2 for d in differences) / len(differences)) ** 0.5
-        
+
         # Map RMSSD to coherence (0-1)
         # Typical RMSSD range: 20-80ms
         coherence = min(max((rmssd - 20) / 60, 0), 1)
-        
+
         return self._update_coherence(coherence)
-    
+
     def update_from_eeg(self, alpha_theta_ratio: float) -> float:
         """Update coherence from EEG (alpha/theta ratio)."""
         # Typical ratio range: 0.5-3.0
         coherence = min(max((alpha_theta_ratio - 0.5) / 2.5, 0), 1)
         return self._update_coherence(coherence)
-    
+
     def _update_coherence(self, value: float) -> float:
         """Update coherence with smoothing."""
         # Exponential moving average
         alpha = 0.3
         self._current_coherence = alpha * value + (1 - alpha) * self._current_coherence
-        
+
         # Update history
         self._history.append(self._current_coherence)
         if len(self._history) > self._max_history:
             self._history.pop(0)
-        
+
         return self._current_coherence
-    
+
     def get_current_coherence(self) -> float:
         """Get current coherence value."""
         return self._current_coherence
-    
-    def get_coherence_history(self) -> List[float]:
+
+    def get_coherence_history(self) -> list[float]:
         """Get coherence history."""
         return self._history.copy()
 

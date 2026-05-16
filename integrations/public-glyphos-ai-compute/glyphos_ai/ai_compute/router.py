@@ -88,7 +88,7 @@ except Exception:  # pragma: no cover - compatibility fallback
     class Intent:
         action: str
         destination: str
-        time_slot: int
+        time_slot: str
 
     def validate_context_packet_shape(packet: dict[str, Any]) -> ContextPacket:
         return packet  # type: ignore[return-value]
@@ -96,7 +96,6 @@ except Exception:  # pragma: no cover - compatibility fallback
 
 class ComputeTarget(Enum):
     LOCAL_LLAMACPP = "llamacpp"
-    LOCAL_OLLAMA = "ollama"
     EXTERNAL_OPENAI = "openai"
     EXTERNAL_ANTHROPIC = "anthropic"
     EXTERNAL_XAI = "xai"
@@ -152,8 +151,8 @@ class RoutingConfig:
     @staticmethod
     def _normalize_local_provider(name: str) -> str:
         provider = str(name or "").strip().lower()
-        if provider in {"ollama", "llamacpp", "llama.cpp"}:
-            return "ollama" if provider == "ollama" else "llamacpp"
+        if provider in {"llamacpp", "llama.cpp"}:
+            return "llamacpp"
         return "llamacpp"
 
 
@@ -165,6 +164,7 @@ class RoutingResult:
     routing_reason_code: str
     latency_ms: int | None = None
     tokens_used: int | None = None
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 _GLOBAL_ROUTING_HISTORY_LIMIT = 40
@@ -240,7 +240,7 @@ def _telemetry_file() -> Path:
     if configured:
         return Path(configured).expanduser()
 
-    state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")).expanduser()
+    state_home = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))).expanduser()
     return state_home / "llama-server" / "glyphos-routing.json"
 
 
@@ -446,7 +446,6 @@ class AdaptiveRouter:
     def __init__(
         self,
         llamacpp_client=None,
-        ollama_client=None,
         openai_client=None,
         anthropic_client=None,
         xai_client=None,
@@ -454,7 +453,6 @@ class AdaptiveRouter:
         config: RoutingConfig | None = None,
     ):
         self.llamacpp = llamacpp_client
-        self.ollama = ollama_client
         self.openai = openai_client
         self.anthropic = anthropic_client
         self.xai = xai_client
@@ -514,9 +512,7 @@ class AdaptiveRouter:
         return str(action or "").strip().upper() in {name.upper() for name in complex_actions}
 
     def _ordered_local_targets(self) -> list[ComputeTarget]:
-        if self.config.preferred_local_backend == "ollama":
-            return [ComputeTarget.LOCAL_OLLAMA, ComputeTarget.LOCAL_LLAMACPP]
-        return [ComputeTarget.LOCAL_LLAMACPP, ComputeTarget.LOCAL_OLLAMA]
+        return [ComputeTarget.LOCAL_LLAMACPP]
 
     def _cloud_fallback_order(self) -> list[str]:
         return list(self.config.cloud_fallback_order or ["xai", "openai", "anthropic"])
@@ -529,8 +525,6 @@ class AdaptiveRouter:
 
         if name in {"llamacpp", "llama.cpp"}:
             return ComputeTarget.LOCAL_LLAMACPP
-        if name == "ollama":
-            return ComputeTarget.LOCAL_OLLAMA
         if name == "openai":
             return ComputeTarget.EXTERNAL_OPENAI
         if name == "anthropic":
@@ -552,7 +546,6 @@ class AdaptiveRouter:
     def _has_target(self, target: ComputeTarget) -> bool:
         return {
             ComputeTarget.LOCAL_LLAMACPP: self.llamacpp is not None,
-            ComputeTarget.LOCAL_OLLAMA: self.ollama is not None,
             ComputeTarget.EXTERNAL_OPENAI: self.openai is not None,
             ComputeTarget.EXTERNAL_ANTHROPIC: self.anthropic is not None,
             ComputeTarget.EXTERNAL_XAI: self.xai is not None,
@@ -560,29 +553,25 @@ class AdaptiveRouter:
         }[target]
 
     def _local_routing_reason(self, action: str, psi: float, target: ComputeTarget) -> tuple[str, str]:
-        backend = "Ollama" if target is ComputeTarget.LOCAL_OLLAMA else "llama.cpp"
-
         if psi >= self.config.high_coherence_threshold:
-            return f"high coherence - Unified GlyphOS pipeline via {backend}", f"high_coherence_{target.value}"
+            return "high coherence - Unified GlyphOS pipeline via llama.cpp", f"high_coherence_{target.value}"
 
         if self._is_complex_action(action, self.config.complex_actions):
-            return f"complex action - local {backend} fallback", f"complex_action_{target.value}"
+            return "complex action - local llama.cpp fallback", f"complex_action_{target.value}"
 
-        return f"default - use local {backend}", f"default_{target.value}"
+        return "default - use local llama.cpp", f"default_{target.value}"
 
     def _local_routing_reason_stream(self, action: str, psi: float, target: ComputeTarget) -> tuple[str, str]:
-        backend = "Ollama" if target is ComputeTarget.LOCAL_OLLAMA else "llama.cpp"
-
         if psi >= self.config.high_coherence_threshold:
             return (
-                f"high coherence - Unified GlyphOS pipeline stream via {backend}",
+                "high coherence - Unified GlyphOS pipeline stream via llama.cpp",
                 f"high_coherence_{target.value}_stream",
             )
 
         if self._is_complex_action(action, self.config.complex_actions):
-            return f"complex action - local {backend} stream", f"complex_action_{target.value}_stream"
+            return "complex action - local llama.cpp stream", f"complex_action_{target.value}_stream"
 
-        return f"default - use local {backend} stream", f"default_{target.value}_stream"
+        return "default - use local llama.cpp stream", f"default_{target.value}_stream"
 
     def _cloud_base_reason_code(self, action: str, provider: str) -> str:
         provider = str(provider or "").strip().lower()
@@ -609,7 +598,12 @@ class AdaptiveRouter:
         prompt: str | None,
         context_payload: ContextPayload | None = None,
         upstream_context: str | ContextPacket | None = None,
+        **generation_kwargs: Any,
     ) -> str:
+        # Skip glyph prompt building when tools are present - models need clean prompts for tool calls
+        if generation_kwargs.get("tools"):
+            return prompt if prompt is not None else _glyph_to_prompt_safe(glyph_packet)
+
         if context_payload is None and upstream_context is None:
             return prompt if prompt is not None else _glyph_to_prompt_safe(glyph_packet)
 
@@ -681,6 +675,24 @@ class AdaptiveRouter:
             latency = raw_result.get("latency_ms")
             tokens = raw_result.get("tokens_used")
 
+            # Extract tool_calls from raw upstream response
+            tool_calls = raw_result.get("tool_calls")
+            if not tool_calls:
+                raw_data = raw_result.get("raw")
+                if isinstance(raw_data, Mapping):
+                    choices = raw_data.get("choices")
+                    if isinstance(choices, list) and choices:
+                        first_choice = choices[0]
+                        if isinstance(first_choice, dict):
+                            message = first_choice.get("message")
+                            if isinstance(message, dict):
+                                tool_calls = message.get("tool_calls")
+
+            if isinstance(tool_calls, list) and tool_calls:
+                tool_calls = [tc for tc in tool_calls if isinstance(tc, dict)]
+            else:
+                tool_calls = None
+
             return RoutingResult(
                 target=target,
                 response=response,
@@ -688,6 +700,7 @@ class AdaptiveRouter:
                 routing_reason_code=reason_code,
                 latency_ms=int(latency) if latency is not None else None,
                 tokens_used=int(tokens) if tokens is not None else None,
+                tool_calls=tool_calls,
             )
 
         return RoutingResult(
@@ -700,16 +713,19 @@ class AdaptiveRouter:
     def _route_cloud(self, prompt: str, action: str, **generation_kwargs: Any) -> RoutingResult:
         last_error: RoutingResult | None = None
 
+        cloud_kwargs = dict(generation_kwargs)
+        cloud_kwargs["glyph_action"] = action
+
         for provider in self._cloud_fallback_order():
             if provider == "openai" and self.openai:
                 reason, reason_code = self._cloud_reason(action, provider)
-                result = self._route_openai(prompt, reason, reason_code, **generation_kwargs)
+                result = self._route_openai(prompt, reason, reason_code, **cloud_kwargs)
             elif provider == "anthropic" and self.anthropic:
                 reason, reason_code = self._cloud_reason(action, provider)
-                result = self._route_anthropic(prompt, reason, reason_code, **generation_kwargs)
+                result = self._route_anthropic(prompt, reason, reason_code, **cloud_kwargs)
             elif provider == "xai" and self.xai:
                 reason, reason_code = self._cloud_reason(action, provider)
-                result = self._route_xai(prompt, reason, reason_code, **generation_kwargs)
+                result = self._route_xai(prompt, reason, reason_code, **cloud_kwargs)
             else:
                 continue
 
@@ -749,12 +765,13 @@ class AdaptiveRouter:
         preferred_target = self._preferred_backend_target(preferred_backend)
 
         if preferred_target is not None and self._has_target(preferred_target):
-            if preferred_target in {ComputeTarget.LOCAL_LLAMACPP, ComputeTarget.LOCAL_OLLAMA}:
+            if preferred_target is ComputeTarget.LOCAL_LLAMACPP:
                 built_prompt = self._build_local_prompt(
                     glyph_packet,
                     prompt,
                     context_payload=context_payload,
                     upstream_context=upstream_context,
+                    **generation_kwargs,
                 )
                 return self._route_target(
                     preferred_target,
@@ -770,12 +787,16 @@ class AdaptiveRouter:
                 context_payload=context_payload,
                 upstream_context=upstream_context,
             )
+            cloud_kwargs = dict(generation_kwargs)
+            cloud_kwargs["glyph_action"] = action
+            cloud_kwargs["glyph_destination"] = _packet_destination(glyph_packet)
+            cloud_kwargs["psi_coherence"] = psi
             return self._route_target(
                 preferred_target,
                 built_prompt,
                 f"routing_hints - prefer {preferred_target.value}",
                 f"context_hint_{preferred_target.value}",
-                **generation_kwargs,
+                **cloud_kwargs,
             )
 
         locality = _context_locality(ctx)
@@ -786,7 +807,11 @@ class AdaptiveRouter:
                 context_payload=context_payload,
                 upstream_context=upstream_context,
             )
-            cloud_result = self._route_cloud(built_prompt, action=action, **generation_kwargs)
+            cloud_kwargs = dict(generation_kwargs)
+            cloud_kwargs["glyph_action"] = action
+            cloud_kwargs["glyph_destination"] = _packet_destination(glyph_packet)
+            cloud_kwargs["psi_coherence"] = psi
+            cloud_result = self._route_cloud(built_prompt, action=action, **cloud_kwargs)
             if cloud_result.target is not ComputeTarget.FALLBACK:
                 return cloud_result
 
@@ -800,6 +825,7 @@ class AdaptiveRouter:
                 prompt,
                 context_payload=context_payload,
                 upstream_context=upstream_context,
+                **generation_kwargs,
             )
             return self._route_target(local_target, built_prompt, reason, reason_code, **generation_kwargs)
 
@@ -834,7 +860,7 @@ class AdaptiveRouter:
         preferred_target = self._preferred_backend_target(_context_preferred_backend(ctx))
 
         local_candidates: list[ComputeTarget]
-        if preferred_target in {ComputeTarget.LOCAL_LLAMACPP, ComputeTarget.LOCAL_OLLAMA}:
+        if preferred_target is ComputeTarget.LOCAL_LLAMACPP:
             local_candidates = [preferred_target]
         else:
             local_candidates = self._ordered_local_targets()
@@ -850,6 +876,7 @@ class AdaptiveRouter:
                 prompt,
                 context_payload=context_payload,
                 upstream_context=upstream_context,
+                **generation_kwargs,
             )
             return self._route_local_stream(target, built_prompt, reason, reason_code, **generation_kwargs)
 
@@ -858,8 +885,6 @@ class AdaptiveRouter:
     def _client_for_target(self, target: ComputeTarget):
         if target is ComputeTarget.LOCAL_LLAMACPP:
             return self.llamacpp
-        if target is ComputeTarget.LOCAL_OLLAMA:
-            return self.ollama
         if target is ComputeTarget.EXTERNAL_OPENAI:
             return self.openai
         if target is ComputeTarget.EXTERNAL_ANTHROPIC:
@@ -878,8 +903,6 @@ class AdaptiveRouter:
     ) -> RoutingResult:
         if target is ComputeTarget.LOCAL_LLAMACPP:
             return self._route_llamacpp(prompt, reason, reason_code, **generation_kwargs)
-        if target is ComputeTarget.LOCAL_OLLAMA:
-            return self._route_ollama(prompt, reason, reason_code, **generation_kwargs)
         if target is ComputeTarget.EXTERNAL_OPENAI:
             return self._route_openai(prompt, reason, reason_code, **generation_kwargs)
         if target is ComputeTarget.EXTERNAL_ANTHROPIC:
@@ -954,23 +977,6 @@ class AdaptiveRouter:
             reason,
             reason_code,
             "llama.cpp",
-            **generation_kwargs,
-        )
-
-    def _route_ollama(
-        self,
-        prompt: str,
-        reason: str,
-        reason_code: str,
-        **generation_kwargs: Any,
-    ) -> RoutingResult:
-        return self._route_generate(
-            ComputeTarget.LOCAL_OLLAMA,
-            self.ollama,
-            prompt,
-            reason,
-            reason_code,
-            "Ollama",
             **generation_kwargs,
         )
 
@@ -1054,7 +1060,8 @@ class AdaptiveRouter:
             )
 
         try:
-            response = client.generate(prompt, **generation_kwargs)
+            injected_prompt = self._inject_cloud_glyph_context(target, prompt, **generation_kwargs)
+            response = client.generate(injected_prompt, **generation_kwargs)
             latency_ms = round((time.perf_counter() - start) * 1000)
             self._track_route(target, reason_code, latency_ms=latency_ms)
             result = self._coerce_backend_result(response, target, reason, reason_code)
@@ -1078,6 +1085,78 @@ class AdaptiveRouter:
                 latency_ms=latency_ms,
             )
 
+    def _inject_cloud_glyph_context(self, target: ComputeTarget, prompt: str, **generation_kwargs: Any) -> str:
+        cloud_targets = {ComputeTarget.EXTERNAL_OPENAI, ComputeTarget.EXTERNAL_ANTHROPIC, ComputeTarget.EXTERNAL_XAI}
+        if target not in cloud_targets:
+            return prompt
+
+        psi = generation_kwargs.get("psi_coherence", 0.5)
+        action = generation_kwargs.get("glyph_action", "QUERY")
+        destination = generation_kwargs.get("glyph_destination", "UNKNOWN")
+        instance_id = generation_kwargs.get("instance_id", uuid.uuid4().hex[:12])
+        hour = time.localtime().tm_hour
+
+        gis1 = f"GIS1|a={action}|d={destination}|t=T{hour:02d}|p={psi:.2f}|i={instance_id}"
+
+        learning_context = self._build_anonymized_learning_context(action, destination)
+
+        parts = [
+            "You are a cloud co-processor in a GlyphOS AI Compute pipeline.",
+            f"Intent glyph: {gis1}",
+            f"Action: {action} | Confidence: {psi:.0%}",
+            "",
+        ]
+
+        if learning_context:
+            parts.append(learning_context)
+            parts.append("")
+
+        parts.append(prompt)
+        return "\n".join(parts)
+
+    def _build_anonymized_learning_context(self, action: str, destination: str) -> str:
+        state_path = Path.home() / ".config" / "llama-model-manager" / "agent_state.json"
+        if not state_path.exists():
+            return ""
+
+        try:
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return ""
+
+        strategies = data.get("per_domain_strategies", {})
+        if not strategies:
+            return ""
+
+        lines = ["[LEARNING_CONTEXT]"]
+        total_sessions = data.get("session_count", 0)
+        total_tasks = data.get("total_tasks", 0)
+        lines.append(f"session_count:{total_sessions} total_tasks:{total_tasks}")
+
+        best_overall = None
+        best_score = 0.0
+        for key, stats in strategies.items():
+            score = stats.get("success_rate", 0) * 0.7 + max(0, 1 - stats.get("avg_latency_ms", 0) / 30000) * 0.3
+            if score > best_score and stats.get("samples", 0) >= 2:
+                best_score = score
+                best_overall = (key, stats)
+
+        if best_overall:
+            key, stats = best_overall
+            domain = key.split(":")[0]
+            approach = key.split(":")[-1]
+            lines.append(f"proven:{domain}→{approach} success:{stats['success_rate']:.0%} samples:{stats['samples']}")
+
+        action_keys = [k for k in strategies if action.lower() in k.lower()]
+        for key in action_keys[:3]:
+            stats = strategies[key]
+            if stats.get("samples", 0) >= 1:
+                approach = key.split(":")[-1]
+                lines.append(f"action:{action}→{approach} success:{stats['success_rate']:.0%}")
+
+        lines.append("[/LEARNING_CONTEXT]")
+        return "\n".join(lines)
+
     @staticmethod
     def _packet_value(packet: Any, snake_name: str, camel_name: str, default: Any) -> Any:
         return _packet_value(packet, snake_name, camel_name, default)
@@ -1085,7 +1164,6 @@ class AdaptiveRouter:
     def get_status(self) -> dict[str, bool]:
         return {
             "llamacpp": self.llamacpp is not None,
-            "ollama": self.ollama is not None,
             "openai": self.openai is not None,
             "anthropic": self.anthropic is not None,
             "xai": self.xai is not None,
@@ -1115,17 +1193,12 @@ def build_router_from_env(
         _select_lane(clients, "llamacpp", glyph_packet) if glyph_packet is not None else clients.get("llamacpp")
     )
 
-    selected_ollama = (
-        _select_lane(clients, "ollama", glyph_packet) if glyph_packet is not None else clients.get("ollama")
-    )
-
     preferred_local_backend = str(
         clients.get("_preferred_local_backend") or os.environ.get("LLAMA_MODEL_GLYPHOS_LOCAL_BACKEND") or "llamacpp"
     )
 
     return AdaptiveRouter(
         llamacpp_client=selected_llamacpp,
-        ollama_client=selected_ollama,
         openai_client=clients.get("openai"),
         anthropic_client=clients.get("anthropic"),
         xai_client=clients.get("xai"),
@@ -1276,7 +1349,7 @@ def _resolve_packet(args: argparse.Namespace) -> tuple[str, Any]:
     intent = Intent(
         action=str(args.action).strip().upper(),
         destination=str(args.destination).strip().upper(),
-        time_slot=int(args.time_slot),
+        time_slot=f"T{int(args.time_slot):02d}",
     )
     packet_text = encode_packet_string(instance_id, intent, float(args.psi))
     glyph_packet = decode_packet_string(packet_text)
@@ -1289,7 +1362,10 @@ def _resolve_packet(args: argparse.Namespace) -> tuple[str, Any]:
 
 def _resolve_upstream_context(args: argparse.Namespace) -> str | ContextPacket | None:
     if args.upstream_context_json:
-        parsed = json.loads(args.upstream_context_json)
+        try:
+            parsed = json.loads(args.upstream_context_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"--upstream-context-json contains invalid JSON: {exc}") from exc
         if not isinstance(parsed, Mapping):
             raise ValueError("--upstream-context-json must decode to an object")
         return dict(parsed)

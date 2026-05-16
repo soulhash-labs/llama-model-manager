@@ -22,7 +22,7 @@ ignore = [
 "bin/**" = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["lmm_config", "lmm_errors", "lmm_storage", "lmm_types", "lmm_health", "lmm_receipts", "lmm_notifications", "lmm_providers"]
+known-first-party = ["glyphos_ai"]
 
 
 [build-system]
@@ -80,6 +80,7 @@ glyph-route = "glyphos_ai.ai_compute.router:main"
 include-package-data = true
 
 [tool.setuptools.packages.find]
+where = ["integrations/public-glyphos-ai-compute"]
 include = ["glyphos_ai*"]
 exclude = ["tests*", "docs*", ".planning*"]
 
