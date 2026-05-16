@@ -339,9 +339,6 @@ build_runtime_during_install() {
 
     printf 'post-install: detecting host GPU capabilities for runtime build...\n'
 
-    # Fast-path: check for any GPU runtime signal.  We probe for the common
-    # indicators that detect_host_backends() would use, without invoking
-    # the full doctor output.
     local has_gpu="no"
     local primary_backend=""
     local os
@@ -349,32 +346,39 @@ build_runtime_during_install() {
 
     case "$os" in
         Linux)
+            # Phase 1: Direct runtime checks
             if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
                 has_gpu="yes"
                 primary_backend="cuda"
-            elif [[ -e /dev/nvidia0 ]] || command -v /usr/bin/nvidia-smi >/dev/null 2>&1 || lspci 2>/dev/null | grep -qi 'nvidia\|3d controller\|vga compatible'; then
+                printf 'post-install: NVIDIA GPU detected via nvidia-smi\n'
+            elif [[ -e /dev/nvidia0 ]] || [[ -e /dev/nvidiactl ]]; then
                 has_gpu="yes"
                 primary_backend="cuda"
-                printf 'post-install: NVIDIA GPU detected via device/PCI; nvidia-smi not fully loaded\n'
+                printf 'post-install: NVIDIA GPU detected via /dev/nvidia* device nodes\n'
+            elif lspci 2>/dev/null | grep -qi 'nvidia\|3d controller\|vga compatible.*nvidia'; then
+                has_gpu="yes"
+                primary_backend="cuda"
+                printf 'post-install: NVIDIA GPU detected via lspci\n'
             elif ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so'; then
                 has_gpu="yes"
                 primary_backend="vulkan"
+                printf 'post-install: Vulkan GPU detected via ldconfig\n'
             fi
 
-            # If no GPU signal yet, try harder: check for NVIDIA packages or kernel modules
+            # Phase 2: Package/kernel fallbacks
             if [[ "$has_gpu" != "yes" ]]; then
-                local nvidia_hint=""
-                if modprobe -n nvidia 2>/dev/null; then
-                    nvidia_hint="nvidia kernel module available"
-                elif dpkg -l 2>/dev/null | grep -q 'nvidia'; then
-                    nvidia_hint="nvidia packages installed but not loaded"
-                elif ls /sys/bus/pci/drivers/nvidia/ 2>/dev/null | grep -q .; then
-                    nvidia_hint="nvidia driver bound to PCI device"
-                fi
-                if [[ -n "$nvidia_hint" ]]; then
+                if dpkg -l 2>/dev/null | grep -qi 'nvidia'; then
                     has_gpu="yes"
                     primary_backend="cuda"
-                    printf 'post-install: NVIDIA GPU found (%s)\n' "$nvidia_hint"
+                    printf 'post-install: NVIDIA GPU detected via installed packages\n'
+                elif ls /sys/bus/pci/drivers/nvidia/ 2>/dev/null | grep -q .; then
+                    has_gpu="yes"
+                    primary_backend="cuda"
+                    printf 'post-install: NVIDIA GPU detected via sysfs driver binding\n'
+                elif modprobe -n nvidia 2>/dev/null; then
+                    has_gpu="yes"
+                    primary_backend="cuda"
+                    printf 'post-install: NVIDIA GPU detected via available kernel module\n'
                 fi
             fi
             ;;
@@ -384,9 +388,9 @@ build_runtime_during_install() {
             ;;
     esac
 
-    # Offer to install nvidia-smi when CUDA backend detected but tool missing
+    # Install nvidia-smi if CUDA detected but tool missing
     if [[ "$primary_backend" == "cuda" ]] && ! command -v nvidia-smi >/dev/null 2>&1; then
-        printf 'post-install: nvidia-smi not found; needed for GPU detection and VRAM reporting\n'
+        printf 'post-install: nvidia-smi not found; installing for GPU detection...\n'
         if [[ -t 0 && -t 1 ]]; then
             printf 'Would you like to install nvidia-smi now? [Y/n] '
             local reply
