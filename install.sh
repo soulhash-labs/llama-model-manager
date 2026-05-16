@@ -323,6 +323,179 @@ interactive_harness_setup_wizard() {
     fi
 }
 
+# CUDA architecture detection for llama.cpp / GGML.
+#
+# Converts NVIDIA compute capability to the CMake/llama.cpp architecture number:
+#   5.0  -> 50
+#   7.5  -> 75
+#   8.9  -> 89
+#   12.0 -> 120
+#
+# This prevents the installer from blindly building "CUDA" without targeting the
+# actual GPU generation. It also protects newer GPUs like Ada/Hopper/Blackwell.
+detect_cuda_architectures() {
+    local caps=""
+    local cap=""
+    local arch=""
+    local arches=()
+    local unique_arches=""
+
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        printf ''
+        return 1
+    fi
+
+    caps="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null || true)"
+    [[ -n "$caps" ]] || {
+        printf ''
+        return 1
+    }
+
+    while IFS= read -r cap; do
+        cap="$(printf '%s' "$cap" | tr -d '[:space:]')"
+        [[ -n "$cap" ]] || continue
+
+        case "$cap" in
+            # Maxwell
+            5.0|50)   arch="50" ;;
+            5.2|52)   arch="52" ;;
+            5.3|53)   arch="53" ;;
+
+            # Pascal
+            6.0|60)   arch="60" ;;
+            6.1|61)   arch="61" ;;
+            6.2|62)   arch="62" ;;
+
+            # Volta / Xavier
+            7.0|70)   arch="70" ;;
+            7.2|72)   arch="72" ;;
+
+            # Turing
+            7.5|75)   arch="75" ;;
+
+            # Ampere
+            8.0|80)   arch="80" ;;
+            8.6|86)   arch="86" ;;
+            8.7|87)   arch="87" ;;
+
+            # Ada Lovelace
+            8.9|89)   arch="89" ;;
+
+            # Hopper
+            9.0|90)   arch="90" ;;
+
+            # Blackwell
+            10.0|100) arch="100" ;;
+            10.1|101) arch="101" ;;
+            12.0|120) arch="120" ;;
+
+            *)
+                printf 'post-install warning: unrecognised CUDA compute capability: %s\n' "$cap" >&2
+                continue
+                ;;
+        esac
+
+        case " $unique_arches " in
+            *" $arch "*) ;;
+            *)
+                unique_arches="${unique_arches:+$unique_arches }$arch"
+                arches+=("$arch")
+                ;;
+        esac
+    done <<< "$caps"
+
+    if ((${#arches[@]} == 0)); then
+        printf ''
+        return 1
+    fi
+
+    local IFS=';'
+    printf '%s\n' "${arches[*]}"
+}
+
+
+nvcc_supports_cuda_architecture() {
+    local arch="$1"
+
+    command -v nvcc >/dev/null 2>&1 || return 1
+
+    # nvcc --list-gpu-arch usually emits lines like:
+    #   compute_75
+    #   compute_89
+    #   compute_120
+    #
+    # Some older nvcc versions may not support this flag cleanly, so failure
+    # means "unknown", not always fatal.
+    if nvcc --list-gpu-arch >/dev/null 2>&1; then
+        nvcc --list-gpu-arch 2>/dev/null | grep -qx "compute_${arch}"
+        return $?
+    fi
+
+    return 2
+}
+
+
+configure_cuda_architectures_for_build() {
+    local cuda_arches=""
+    local arch=""
+    local unsupported=()
+    local support_status=0
+
+    [[ "${primary_backend:-}" == "cuda" ]] || return 0
+
+    cuda_arches="$(detect_cuda_architectures || true)"
+
+    if [[ -z "$cuda_arches" ]]; then
+        printf 'post-install warning: could not detect CUDA compute capability; leaving GGML_CUDA_ARCHITECTURES unset\n' >&2
+        printf 'post-install warning: llama.cpp/CMake will attempt CUDA architecture auto-detection\n' >&2
+        return 0
+    fi
+
+    export GGML_CUDA_ARCHITECTURES="$cuda_arches"
+    export CMAKE_ARGS="${CMAKE_ARGS:-} -DGGML_CUDA_ARCHITECTURES=${cuda_arches}"
+
+    printf 'post-install: detected CUDA architecture(s): %s\n' "$cuda_arches"
+    printf 'post-install: exported GGML_CUDA_ARCHITECTURES=%s\n' "$GGML_CUDA_ARCHITECTURES"
+
+    IFS=';' read -r -a _cuda_arch_array <<< "$cuda_arches"
+    for arch in "${_cuda_arch_array[@]}"; do
+        nvcc_supports_cuda_architecture "$arch"
+        support_status=$?
+
+        if [[ "$support_status" -eq 1 ]]; then
+            unsupported+=("$arch")
+        elif [[ "$support_status" -eq 2 ]]; then
+            printf 'post-install warning: nvcc cannot report supported GPU architectures; skipping strict sm_%s validation\n' "$arch" >&2
+        fi
+    done
+
+    if ((${#unsupported[@]} > 0)); then
+        printf 'post-install error: installed nvcc does not support required CUDA architecture(s): %s\n' "${unsupported[*]}" >&2
+        printf 'post-install error: install a newer CUDA toolkit or force CPU fallback.\n' >&2
+
+        # Blackwell and future GPUs should not silently build the wrong CUDA target.
+        for arch in "${unsupported[@]}"; do
+            case "$arch" in
+                100|101|120)
+                    printf 'post-install error: Blackwell/future GPU detected but current nvcc lacks required support.\n' >&2
+                    printf 'post-install error: refusing CUDA build; falling back to CPU runtime.\n' >&2
+                    primary_backend="cpu"
+                    unset GGML_CUDA_ARCHITECTURES
+                    export CMAKE_ARGS="${CMAKE_ARGS//-DGGML_CUDA_ARCHITECTURES=${cuda_arches}/}"
+                    return 0
+                    ;;
+            esac
+        done
+
+        printf 'post-install warning: CUDA arch validation failed; continuing may fail. Falling back to CPU for safety.\n' >&2
+        primary_backend="cpu"
+        unset GGML_CUDA_ARCHITECTURES
+        export CMAKE_ARGS="${CMAKE_ARGS//-DGGML_CUDA_ARCHITECTURES=${cuda_arches}/}"
+        return 0
+    fi
+}
+
+
 # build_runtime_during_install — auto-build a bundled llama.cpp runtime after
 # the installer binaries are in place.  Replaces the old interactive-only prompt
 # at the end of the script so fresh installs get GPU offload out of the box.
@@ -553,6 +726,8 @@ build_runtime_during_install() {
             printf 'post-install: non-interactive install with %s build tools available; building %s runtime\n' "$primary_backend" "$primary_backend"
         fi
     fi
+
+    configure_cuda_architectures_for_build
 
     # Force the build to write into the installed app share, not the source
     # checkout.  Without this, build-runtime resolves APP_ROOT to the repo
