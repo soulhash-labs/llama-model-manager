@@ -346,23 +346,32 @@ build_runtime_during_install() {
 
     case "$os" in
         Linux)
-            # Phase 1: Direct runtime checks
-            if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+            # Phase 0: Physical hardware check (works with zero drivers installed)
+            if grep -q '0x10de' /sys/bus/pci/devices/*/vendor 2>/dev/null; then
                 has_gpu="yes"
                 primary_backend="cuda"
-                printf 'post-install: NVIDIA GPU detected via nvidia-smi\n'
-            elif [[ -e /dev/nvidia0 ]] || [[ -e /dev/nvidiactl ]]; then
-                has_gpu="yes"
-                primary_backend="cuda"
-                printf 'post-install: NVIDIA GPU detected via /dev/nvidia* device nodes\n'
-            elif lspci 2>/dev/null | grep -qi 'nvidia\|3d controller\|vga compatible.*nvidia'; then
+                printf 'post-install: NVIDIA GPU detected via PCI vendor ID (0x10de)\n'
+            elif command -v lspci >/dev/null 2>&1 && lspci 2>/dev/null | grep -qi 'nvidia\|3d controller\|vga compatible.*nvidia'; then
                 has_gpu="yes"
                 primary_backend="cuda"
                 printf 'post-install: NVIDIA GPU detected via lspci\n'
-            elif ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so'; then
-                has_gpu="yes"
-                primary_backend="vulkan"
-                printf 'post-install: Vulkan GPU detected via ldconfig\n'
+            fi
+
+            # Phase 1: Driver/runtime checks
+            if [[ "$has_gpu" != "yes" ]]; then
+                if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+                    has_gpu="yes"
+                    primary_backend="cuda"
+                    printf 'post-install: NVIDIA GPU detected via nvidia-smi\n'
+                elif [[ -e /dev/nvidia0 ]] || [[ -e /dev/nvidiactl ]]; then
+                    has_gpu="yes"
+                    primary_backend="cuda"
+                    printf 'post-install: NVIDIA GPU detected via /dev/nvidia* device nodes\n'
+                elif ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so'; then
+                    has_gpu="yes"
+                    primary_backend="vulkan"
+                    printf 'post-install: Vulkan GPU detected via ldconfig\n'
+                fi
             fi
 
             # Phase 2: Package/kernel fallbacks
