@@ -450,6 +450,86 @@ detect_cuda_deb_repo_arch() {
     esac
 }
 
+cuda_repo_slug_fallbacks() {
+    local primary="$1"
+
+    case "$primary" in
+        ubuntu2604) printf 'ubuntu2604 ubuntu2404\n' ;;
+        debian13)   printf 'debian13 debian12\n' ;;
+        *)          printf '%s\n' "$primary" ;;
+    esac
+}
+
+cuda_toolkit_package_candidate_visible() {
+    local pkg=""
+
+    command -v apt-cache >/dev/null 2>&1 || return 1
+
+    for pkg in \
+        cuda-toolkit-13-1 \
+        cuda-nvcc-13-1 \
+        cuda-toolkit-12-9 \
+        cuda-nvcc-12-9 \
+        cuda-toolkit-12-8 \
+        cuda-nvcc-12-8 \
+        cuda-toolkit \
+        cuda-nvcc \
+        cuda-compiler \
+        libcublas-dev
+    do
+        if apt_package_available "$pkg"; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+bootstrap_nvidia_cuda_apt_repo_for_slug() {
+    local repo_slug="$1"
+    local repo_arch="$2"
+    local keyring_deb="cuda-keyring_1.1-1_all.deb"
+    local keyring_url="https://developer.download.nvidia.com/compute/cuda/repos/${repo_slug}/${repo_arch}/${keyring_deb}"
+    local tmp_deb=""
+
+    tmp_deb="$(mktemp "${TMPDIR:-/tmp}/cuda-keyring.XXXXXX.deb")"
+
+    printf 'post-install: bootstrapping NVIDIA CUDA apt repo: %s/%s\n' "$repo_slug" "$repo_arch"
+
+    if command -v curl >/dev/null 2>&1; then
+        if ! curl -fsSL "$keyring_url" -o "$tmp_deb"; then
+            printf 'post-install warning: failed to download CUDA keyring: %s\n' "$keyring_url" >&2
+            rm -f "$tmp_deb"
+            return 1
+        fi
+    elif command -v wget >/dev/null 2>&1; then
+        if ! wget -qO "$tmp_deb" "$keyring_url"; then
+            printf 'post-install warning: failed to download CUDA keyring: %s\n' "$keyring_url" >&2
+            rm -f "$tmp_deb"
+            return 1
+        fi
+    else
+        printf 'post-install warning: curl/wget unavailable; cannot download CUDA keyring\n' >&2
+        rm -f "$tmp_deb"
+        return 1
+    fi
+
+    if ! run_root_cmd dpkg -i "$tmp_deb"; then
+        printf 'post-install warning: failed to install CUDA keyring package from %s/%s\n' "$repo_slug" "$repo_arch" >&2
+        rm -f "$tmp_deb"
+        return 1
+    fi
+
+    rm -f "$tmp_deb"
+
+    if ! run_root_cmd apt-get update -qq; then
+        printf 'post-install warning: apt-get update failed after CUDA repo bootstrap for %s/%s\n' "$repo_slug" "$repo_arch" >&2
+        return 1
+    fi
+
+    return 0
+}
+
 bootstrap_nvidia_cuda_apt_repo() {
     [[ "${primary_backend:-}" == "cuda" ]] || return 0
     command -v apt-get >/dev/null 2>&1 || return 0
@@ -458,23 +538,13 @@ bootstrap_nvidia_cuda_apt_repo() {
         return 0
     }
 
+    local primary_slug=""
+    local repo_slugs=""
     local repo_slug=""
     local repo_arch=""
-    local fallback_slug=""
-    local keyring_deb="cuda-keyring_1.1-1_all.deb"
-    local keyring_url=""
-    local tmp_deb=""
 
-    if dpkg -s cuda-keyring >/dev/null 2>&1; then
-        printf 'post-install: NVIDIA CUDA apt keyring already installed; refreshing apt cache\n'
-        run_root_cmd apt-get update -qq || {
-            printf 'post-install warning: apt-get update failed after existing CUDA keyring check\n' >&2
-        }
-        return 0
-    fi
-
-    repo_slug="$(detect_cuda_deb_repo_slug || true)"
-    if [[ -z "$repo_slug" ]]; then
+    primary_slug="$(detect_cuda_deb_repo_slug || true)"
+    if [[ -z "$primary_slug" ]]; then
         printf 'post-install warning: unsupported Debian/Ubuntu release for automatic NVIDIA CUDA apt repo setup\n' >&2
         printf 'post-install warning: skipping CUDA apt repo bootstrap; existing apt sources will be used\n' >&2
         return 0
@@ -486,58 +556,44 @@ bootstrap_nvidia_cuda_apt_repo() {
         return 0
     fi
 
-    tmp_deb="$(mktemp "${TMPDIR:-/tmp}/cuda-keyring.XXXXXX.deb")"
+    repo_slugs="$(cuda_repo_slug_fallbacks "$primary_slug")"
 
-    download_cuda_keyring() {
-        local slug="$1"
-
-        keyring_url="https://developer.download.nvidia.com/compute/cuda/repos/${slug}/${repo_arch}/${keyring_deb}"
-        printf 'post-install: bootstrapping NVIDIA CUDA apt repo: %s/%s\n' "$slug" "$repo_arch"
-
-        if command -v curl >/dev/null 2>&1; then
-            curl -fsSL "$keyring_url" -o "$tmp_deb"
-        elif command -v wget >/dev/null 2>&1; then
-            wget -qO "$tmp_deb" "$keyring_url"
-        else
-            printf 'post-install warning: curl/wget unavailable; cannot download CUDA keyring\n' >&2
-            return 2
-        fi
-    }
-
-    if ! download_cuda_keyring "$repo_slug"; then
-        printf 'post-install warning: failed to download CUDA keyring: %s\n' "$keyring_url" >&2
-
-        case "$repo_slug" in
-            ubuntu2604) fallback_slug="ubuntu2404" ;;
-        esac
-
-        if [[ -n "$fallback_slug" ]]; then
-            printf 'post-install warning: Ubuntu 26.04 detected; NVIDIA ubuntu2604 CUDA repo was unavailable or failed to download.\n' >&2
-            printf 'post-install warning: using NVIDIA ubuntu2404 CUDA repo as compatibility fallback.\n' >&2
-            if ! download_cuda_keyring "$fallback_slug"; then
-                printf 'post-install warning: failed to download CUDA keyring fallback: %s\n' "$keyring_url" >&2
-                rm -f "$tmp_deb"
-                return 0
-            fi
-        else
-            rm -f "$tmp_deb"
+    if dpkg -s cuda-keyring >/dev/null 2>&1; then
+        printf 'post-install: NVIDIA CUDA apt keyring already installed; refreshing apt cache\n'
+        run_root_cmd apt-get update -qq || {
+            printf 'post-install warning: apt-get update failed after existing CUDA keyring check\n' >&2
+        }
+        if cuda_toolkit_package_candidate_visible; then
             return 0
         fi
+        printf 'post-install warning: CUDA apt keyring exists, but no CUDA toolkit package candidates are visible; trying compatibility repo fallback\n' >&2
     fi
 
-    if ! run_root_cmd dpkg -i "$tmp_deb"; then
-        printf 'post-install warning: failed to install CUDA keyring package\n' >&2
-        rm -f "$tmp_deb"
-        return 0
-    fi
+    for repo_slug in $repo_slugs; do
+        if [[ "$repo_slug" != "$primary_slug" ]]; then
+            case "$primary_slug:$repo_slug" in
+                ubuntu2604:ubuntu2404)
+                    printf 'post-install warning: Ubuntu 26.04 native CUDA repo did not expose toolkit packages; trying NVIDIA ubuntu2404 compatibility repo.\n' >&2
+                    ;;
+                debian13:debian12)
+                    printf 'post-install warning: Debian 13 native CUDA repo did not expose toolkit packages; trying NVIDIA debian12 compatibility repo.\n' >&2
+                    ;;
+            esac
+        fi
 
-    rm -f "$tmp_deb"
+        if ! bootstrap_nvidia_cuda_apt_repo_for_slug "$repo_slug" "$repo_arch"; then
+            continue
+        fi
 
-    if run_root_cmd apt-get update -qq; then
-        printf 'post-install: NVIDIA CUDA apt repo ready\n'
-    else
-        printf 'post-install warning: apt-get update failed after CUDA repo bootstrap\n' >&2
-    fi
+        if cuda_toolkit_package_candidate_visible; then
+            printf 'post-install: NVIDIA CUDA apt repo ready via %s/%s\n' "$repo_slug" "$repo_arch"
+            return 0
+        fi
+
+        printf 'post-install warning: NVIDIA CUDA apt repo %s/%s did not expose CUDA toolkit package candidates\n' "$repo_slug" "$repo_arch" >&2
+    done
+
+    printf 'post-install warning: failed to bootstrap a NVIDIA CUDA apt repo with visible toolkit packages: %s\n' "$repo_slugs" >&2
 }
 
 warn_cuda_apt_visibility_if_nvcc_missing() {
@@ -546,7 +602,7 @@ warn_cuda_apt_visibility_if_nvcc_missing() {
     command -v apt-cache >/dev/null 2>&1 || return 0
 
     printf 'post-install warning: nvcc is still unavailable. Your apt sources may not expose NVIDIA CUDA toolkit packages.\n' >&2
-    printf 'post-install warning: check with: apt-cache policy cuda-toolkit-12-9 cuda-nvcc-12-9 cuda-toolkit-12-8 cuda-nvcc-12-8\n' >&2
+    printf 'post-install warning: check with: apt-cache policy cuda-toolkit-12-9 cuda-nvcc-12-9 cuda-toolkit-12-8 cuda-nvcc-12-8 cuda-toolkit cuda-nvcc cuda-compiler libcublas-dev\n' >&2
     printf 'post-install warning: CPU runtime fallback will be used unless CUDA toolkit is installed manually.\n' >&2
 }
 
@@ -785,6 +841,25 @@ select_cuda_alternative_if_present() {
     nvcc --version || true
 }
 
+select_default_cuda_if_present() {
+    local cuda_path="${CUDA_DEFAULT_PATH:-/usr/local/cuda}"
+
+    [[ -d "$cuda_path" ]] || return 1
+
+    case ":$PATH:" in
+        *":$cuda_path/bin:"*) ;;
+        *) export PATH="$cuda_path/bin:$PATH" ;;
+    esac
+
+    case ":${LD_LIBRARY_PATH:-}:" in
+        *":$cuda_path/lib64:"*) ;;
+        *) export LD_LIBRARY_PATH="$cuda_path/lib64:${LD_LIBRARY_PATH:-}" ;;
+    esac
+
+    hash -r 2>/dev/null || true
+    printf 'post-install: selected default CUDA toolkit path: %s\n' "$cuda_path"
+}
+
 nvcc_supports_any_detected_cuda_architecture() {
     local cuda_arches=""
     local arch=""
@@ -893,6 +968,20 @@ configure_cuda_toolkit_for_build() {
             install_apt_packages_best_effort cuda-toolkit-12-8 cuda-nvcc-12-8
         fi
         select_cuda_alternative_if_present "12.8" || true
+    fi
+
+    if ! command -v nvcc >/dev/null 2>&1; then
+        printf 'post-install: version-pinned CUDA toolkit packages unavailable; trying generic/current CUDA toolkit packages\n'
+
+        if command -v apt-get >/dev/null 2>&1; then
+            install_apt_packages_best_effort \
+                cuda-toolkit \
+                cuda-nvcc \
+                cuda-compiler \
+                libcublas-dev
+        fi
+
+        select_default_cuda_if_present || true
     fi
 
     configure_cuda_host_compiler

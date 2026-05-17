@@ -24,7 +24,7 @@ assert_not_contains() {
 
 write_install_cuda_helper_block() {
     local target="$1"
-    sed -n '/^run_root_cmd() {/,/^detect_cuda_architectures() {/p' "$ROOT_DIR/install.sh" | sed '$d' >"$target"
+    sed -n '/^run_root_cmd() {/,/^nvcc_supports_any_detected_cuda_architecture() {/p' "$ROOT_DIR/install.sh" | sed '$d' >"$target"
 }
 
 make_env() {
@@ -510,6 +510,9 @@ test_installer_cuda_apt_bootstrap_contract() {
     installer="$(cat "$ROOT_DIR/install.sh")"
     assert_contains "$installer" "detect_cuda_deb_repo_slug"
     assert_contains "$installer" "bootstrap_nvidia_cuda_apt_repo"
+    assert_contains "$installer" "bootstrap_nvidia_cuda_apt_repo_for_slug"
+    assert_contains "$installer" "cuda_repo_slug_fallbacks"
+    assert_contains "$installer" "cuda_toolkit_package_candidate_visible"
     assert_contains "$installer" "cuda-keyring_1.1-1_all.deb"
     assert_contains "$installer" "developer.download.nvidia.com/compute/cuda/repos"
     assert_contains "$installer" "dpkg -s cuda-keyring"
@@ -518,6 +521,10 @@ test_installer_cuda_apt_bootstrap_contract() {
     assert_contains "$installer" "Candidate:"
     assert_contains "$installer" 'apt-get install -y -qq "${available[@]}"'
     assert_contains "$installer" "warn_cuda_apt_visibility_if_nvcc_missing"
+    assert_contains "$installer" "select_default_cuda_if_present"
+    assert_contains "$installer" "version-pinned CUDA toolkit packages unavailable; trying generic/current CUDA toolkit packages"
+    assert_contains "$installer" "cuda-compiler"
+    assert_contains "$installer" "libcublas-dev"
     assert_contains "$installer" 'cuda_arches_need_modern_toolkit "$cuda_arches"'
     assert_contains "$installer" '*":$cuda_path/bin:"*)'
     assert_contains "$installer" '*":$cuda_path/lib64:"*)'
@@ -659,6 +666,19 @@ exit 0
 EOF
     chmod +x "$fake_bin/curl"
 
+    cat >"$fake_bin/apt-cache" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "show" && "${2:-}" == "cuda-toolkit" ]]; then
+    exit 0
+fi
+if [[ "${1:-}" == "policy" ]]; then
+    printf 'Candidate: (none)\n'
+    exit 0
+fi
+exit 1
+EOF
+    chmod +x "$fake_bin/apt-cache"
+
     cat >"$fake_bin/apt-get" <<EOF
 #!/usr/bin/env bash
 printf 'apt-get %s\n' "\$*" >>"$command_log"
@@ -691,8 +711,6 @@ EOF
 
     bootstrap_nvidia_cuda_apt_repo
     assert_contains "$(cat "$command_log")" "apt-get update -qq"
-    assert_not_contains "$(cat "$command_log")" "curl"
-    assert_not_contains "$(cat "$command_log")" "dpkg -i"
 }
 
 test_installer_cuda_ubuntu2604_uses_native_repo_before_fallback() {
@@ -742,6 +760,19 @@ printf 'fake deb\n' >"\$out"
 exit 0
 EOF
     chmod +x "$fake_bin/curl"
+
+    cat >"$fake_bin/apt-cache" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "show" && "${2:-}" == "cuda-toolkit" ]]; then
+    exit 0
+fi
+if [[ "${1:-}" == "policy" ]]; then
+    printf 'Candidate: (none)\n'
+    exit 0
+fi
+exit 1
+EOF
+    chmod +x "$fake_bin/apt-cache"
 
     cat >"$fake_bin/apt-get" <<EOF
 #!/usr/bin/env bash
@@ -816,6 +847,19 @@ exit 0
 EOF
     chmod +x "$fake_bin/curl"
 
+    cat >"$fake_bin/apt-cache" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "show" && "${2:-}" == "cuda-toolkit" ]]; then
+    exit 0
+fi
+if [[ "${1:-}" == "policy" ]]; then
+    printf 'Candidate: (none)\n'
+    exit 0
+fi
+exit 1
+EOF
+    chmod +x "$fake_bin/apt-cache"
+
     cat >"$fake_bin/apt-get" <<EOF
 #!/usr/bin/env bash
 printf 'apt-get %s\n' "\$*" >>"$command_log"
@@ -833,9 +877,168 @@ EOF
     bootstrap_nvidia_cuda_apt_repo 2>"$stderr_log"
     assert_contains "$(cat "$command_log")" "ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb"
     assert_contains "$(cat "$command_log")" "ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb"
-    assert_contains "$(cat "$stderr_log")" "using NVIDIA ubuntu2404 CUDA repo as compatibility fallback"
+    assert_contains "$(cat "$stderr_log")" "trying NVIDIA ubuntu2404 compatibility repo"
     assert_contains "$(cat "$command_log")" "dpkg -i"
     assert_contains "$(cat "$command_log")" "apt-get update -qq"
+}
+
+test_installer_cuda_ubuntu2604_falls_back_when_native_repo_has_no_toolkit_candidates() {
+    local tmp
+    local helper
+    local fake_bin
+    local os_release
+    local command_log
+    local stderr_log
+
+    tmp="$(mktemp -d)"
+    helper="$tmp/install-cuda-helpers.sh"
+    fake_bin="$tmp/bin"
+    os_release="$tmp/os-release"
+    command_log="$tmp/commands.log"
+    stderr_log="$tmp/stderr.log"
+    mkdir -p "$fake_bin"
+    write_install_cuda_helper_block "$helper"
+
+    cat >"$os_release" <<'EOF'
+ID=ubuntu
+VERSION_ID="26.04"
+VERSION_CODENAME=resolute
+EOF
+
+    cat >"$fake_bin/dpkg" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+    --print-architecture) printf 'amd64\n'; exit 0 ;;
+    -s) exit 1 ;;
+    -i) printf 'dpkg %s\n' "\$*" >>"$command_log"; exit 0 ;;
+esac
+exit 1
+EOF
+    chmod +x "$fake_bin/dpkg"
+
+    cat >"$fake_bin/curl" <<EOF
+#!/usr/bin/env bash
+printf 'curl %s\n' "\$*" >>"$command_log"
+out=''
+while [[ \$# -gt 0 ]]; do
+    if [[ "\$1" == "-o" ]]; then
+        shift
+        out="\$1"
+    fi
+    shift || true
+done
+printf 'fake deb\n' >"\$out"
+exit 0
+EOF
+    chmod +x "$fake_bin/curl"
+
+    cat >"$fake_bin/apt-get" <<EOF
+#!/usr/bin/env bash
+printf 'apt-get %s\n' "\$*" >>"$command_log"
+exit 0
+EOF
+    chmod +x "$fake_bin/apt-get"
+
+    cat >"$fake_bin/apt-cache" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "show" && "\${2:-}" == "cuda-toolkit" && -f "$tmp/allow-toolkit" ]]; then
+    exit 0
+fi
+if [[ "\${1:-}" == "policy" ]]; then
+    printf 'Candidate: (none)\n'
+    exit 0
+fi
+exit 1
+EOF
+    chmod +x "$fake_bin/apt-cache"
+
+    # shellcheck disable=SC1090
+    source "$helper"
+    run_root_cmd() {
+        if [[ "${1:-}" == "apt-get" && "${2:-}" == "update" ]]; then
+            if grep -q 'ubuntu2404' "$command_log" 2>/dev/null; then
+                : >"$tmp/allow-toolkit"
+            fi
+        fi
+        "$@"
+    }
+    PATH="$fake_bin:/usr/bin:/bin"
+    CUDA_OS_RELEASE_FILE="$os_release"
+    primary_backend="cuda"
+
+    bootstrap_nvidia_cuda_apt_repo 2>"$stderr_log"
+    assert_contains "$(cat "$command_log")" "ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb"
+    assert_contains "$(cat "$command_log")" "ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb"
+    assert_contains "$(cat "$stderr_log")" "did not expose toolkit packages"
+}
+
+test_installer_cuda_generic_toolkit_fallback_installs_current_packages() {
+    local tmp
+    local helper
+    local fake_bin
+    local apt_log
+
+    tmp="$(mktemp -d)"
+    helper="$tmp/install-cuda-helpers.sh"
+    fake_bin="$tmp/bin"
+    apt_log="$tmp/apt.log"
+    mkdir -p "$fake_bin"
+    write_install_cuda_helper_block "$helper"
+
+    cat >"$fake_bin/apt-get" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$apt_log"
+exit 0
+EOF
+    chmod +x "$fake_bin/apt-get"
+
+    cat >"$fake_bin/apt-cache" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "show" ]]; then
+    case "${2:-}" in
+        cuda-toolkit|cuda-nvcc|cuda-compiler|libcublas-dev) exit 0 ;;
+        *) exit 1 ;;
+    esac
+fi
+if [[ "${1:-}" == "policy" ]]; then
+    printf 'Candidate: (none)\n'
+    exit 0
+fi
+exit 1
+EOF
+    chmod +x "$fake_bin/apt-cache"
+
+    # shellcheck disable=SC1090
+    source "$helper"
+    run_root_cmd() { "$@"; }
+    PATH="$fake_bin:/usr/bin:/bin"
+
+    install_apt_packages_best_effort cuda-toolkit cuda-nvcc cuda-compiler libcublas-dev
+    assert_contains "$(cat "$apt_log")" "install -y -qq cuda-toolkit cuda-nvcc cuda-compiler libcublas-dev"
+}
+
+test_installer_cuda_default_path_selection_is_duplicate_safe() {
+    local tmp
+    local helper
+    local cuda_root
+
+    tmp="$(mktemp -d)"
+    helper="$tmp/install-cuda-helpers.sh"
+    cuda_root="/usr/local/cuda"
+    write_install_cuda_helper_block "$helper"
+
+    # shellcheck disable=SC1090
+    source "$helper"
+    cuda_root="$tmp/cuda"
+    mkdir -p "$cuda_root/bin" "$cuda_root/lib64"
+
+    PATH="$cuda_root/bin:/usr/bin:/bin"
+    LD_LIBRARY_PATH="$cuda_root/lib64:/lib"
+    CUDA_DEFAULT_PATH="$cuda_root"
+    select_default_cuda_if_present
+    select_default_cuda_if_present
+    [[ "$PATH" == "$cuda_root/bin:/usr/bin:/bin" ]] || fail "expected CUDA bin path not to be duplicated"
+    [[ "$LD_LIBRARY_PATH" == "$cuda_root/lib64:/lib" ]] || fail "expected CUDA lib path not to be duplicated"
 }
 
 test_installer_validates_runtime_bundle_subdirectories() {
@@ -2636,6 +2839,9 @@ main() {
     test_installer_cuda_repo_bootstrap_is_mockable_and_nonfatal
     test_installer_cuda_ubuntu2604_uses_native_repo_before_fallback
     test_installer_cuda_ubuntu2604_falls_back_to_ubuntu2404_on_download_failure
+    test_installer_cuda_ubuntu2604_falls_back_when_native_repo_has_no_toolkit_candidates
+    test_installer_cuda_generic_toolkit_fallback_installs_current_packages
+    test_installer_cuda_default_path_selection_is_duplicate_safe
     test_installer_validates_runtime_bundle_subdirectories
     test_interactive_installer_uses_user_basedpyright_install
     test_interactive_installer_has_harness_setup_wizard
