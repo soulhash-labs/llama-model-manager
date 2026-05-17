@@ -22,6 +22,11 @@ assert_not_contains() {
     [[ "$haystack" != *"$needle"* ]] || fail "expected output not to contain: $needle"
 }
 
+write_install_cuda_helper_block() {
+    local target="$1"
+    sed -n '/^run_root_cmd() {/,/^detect_cuda_architectures() {/p' "$ROOT_DIR/install.sh" | sed '$d' >"$target"
+}
+
 make_env() {
     local tmp="$1"
     mkdir -p "$tmp/home" "$tmp/config/llama-server" "$tmp/state" "$tmp/runtime"
@@ -231,7 +236,7 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$web_index" "glyphos-badge"
     assert_contains "$web_index" "CUDA Unified Memory (experimental)"
     assert_not_contains "$web_index" "GPU-aware defaults"
-    assert_contains "$install_script" "Would you like to check/install build dependencies"
+    assert_contains "$install_script" "Proceed with installer-managed build dependency setup"
     assert_contains "$install_script" "llama-model sync-opencode"
     assert_contains "$install_script" "glyphos_openai_gateway.py"
     assert_contains "$install_script" "context_mcp_bridge.py"
@@ -492,10 +497,188 @@ test_interactive_installer_declares_cuda_toolkit_install() {
     local installer
 
     installer="$(cat "$ROOT_DIR/install.sh")"
-    assert_contains "$installer" "CUDA host detected but nvcc is not in PATH"
-    assert_contains "$installer" "installer will attempt to install CUDA toolkit packages before compiling the CUDA runtime"
-    assert_contains "$installer" "LMM_AUTO_BUILD_RUNTIME is set, so attempting CUDA toolkit install"
+    assert_contains "$installer" "CUDA-capable NVIDIA GPU detected, but nvcc is missing."
+    assert_contains "$installer" "configure NVIDIA CUDA apt repository"
+    assert_contains "$installer" "install CUDA Toolkit 12.9 where compatible"
+    assert_contains "$installer" "fall back to CPU if CUDA fails"
     assert_contains "$installer" "LLAMA_AUTO_INSTALL_DEPS=1"
+}
+
+test_installer_cuda_apt_bootstrap_contract() {
+    local installer
+
+    installer="$(cat "$ROOT_DIR/install.sh")"
+    assert_contains "$installer" "detect_cuda_deb_repo_slug"
+    assert_contains "$installer" "bootstrap_nvidia_cuda_apt_repo"
+    assert_contains "$installer" "cuda-keyring_1.1-1_all.deb"
+    assert_contains "$installer" "developer.download.nvidia.com/compute/cuda/repos"
+    assert_contains "$installer" "dpkg -s cuda-keyring"
+    assert_contains "$installer" "bootstrap_nvidia_cuda_apt_repo"
+    assert_contains "$installer" 'apt-cache show "$pkg"'
+    assert_contains "$installer" "Candidate:"
+    assert_contains "$installer" 'apt-get install -y -qq "${available[@]}"'
+    assert_contains "$installer" "warn_cuda_apt_visibility_if_nvcc_missing"
+    assert_contains "$installer" 'cuda_arches_need_modern_toolkit "$cuda_arches"'
+    assert_contains "$installer" '*":$cuda_path/bin:"*)'
+    assert_contains "$installer" '*":$cuda_path/lib64:"*)'
+}
+
+test_installer_cuda_helper_slug_arch_and_apt_batching() {
+    local tmp
+    local helper
+    local fake_bin
+    local os_release
+    local apt_log
+
+    tmp="$(mktemp -d)"
+    helper="$tmp/install-cuda-helpers.sh"
+    fake_bin="$tmp/bin"
+    os_release="$tmp/os-release"
+    apt_log="$tmp/apt.log"
+    mkdir -p "$fake_bin"
+    write_install_cuda_helper_block "$helper"
+
+    cat >"$os_release" <<'EOF'
+ID=ubuntu
+VERSION_ID="24.04"
+EOF
+
+    cat >"$fake_bin/dpkg" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--print-architecture" ]]; then
+    printf 'amd64\n'
+    exit 0
+fi
+exit 1
+EOF
+    chmod +x "$fake_bin/dpkg"
+
+    cat >"$fake_bin/apt-cache" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "show" ]]; then
+    case "${2:-}" in
+        build-essential|cmake) exit 0 ;;
+        *) exit 1 ;;
+    esac
+fi
+if [[ "${1:-}" == "policy" ]]; then
+    case "${2:-}" in
+        pkg-policy) printf 'Candidate: 1.0\n'; exit 0 ;;
+        *) printf 'Candidate: (none)\n'; exit 0 ;;
+    esac
+fi
+exit 1
+EOF
+    chmod +x "$fake_bin/apt-cache"
+
+    cat >"$fake_bin/apt-get" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$apt_log"
+exit 0
+EOF
+    chmod +x "$fake_bin/apt-get"
+
+    # shellcheck disable=SC1090
+    source "$helper"
+    run_root_cmd() { "$@"; }
+    PATH="$fake_bin:/usr/bin:/bin"
+    CUDA_OS_RELEASE_FILE="$os_release"
+
+    [[ "$(detect_cuda_deb_repo_slug)" == "ubuntu2404" ]] || fail "expected ubuntu2404 CUDA repo slug"
+    [[ "$(detect_cuda_deb_repo_arch)" == "x86_64" ]] || fail "expected x86_64 CUDA repo arch"
+    apt_package_available build-essential || fail "expected apt-cache show availability to pass"
+    apt_package_available pkg-policy || fail "expected apt-cache policy Candidate availability to pass"
+    if apt_package_available missing-pkg; then
+        fail "expected missing package to be unavailable"
+    fi
+
+    install_apt_packages_best_effort build-essential cmake missing-pkg
+    assert_contains "$(cat "$apt_log")" "update -qq"
+    assert_contains "$(cat "$apt_log")" "install -y -qq build-essential cmake"
+    assert_not_contains "$(cat "$apt_log")" "missing-pkg"
+}
+
+test_installer_cuda_repo_bootstrap_is_mockable_and_nonfatal() {
+    local tmp
+    local helper
+    local fake_bin
+    local os_release
+    local command_log
+
+    tmp="$(mktemp -d)"
+    helper="$tmp/install-cuda-helpers.sh"
+    fake_bin="$tmp/bin"
+    os_release="$tmp/os-release"
+    command_log="$tmp/commands.log"
+    mkdir -p "$fake_bin"
+    write_install_cuda_helper_block "$helper"
+
+    cat >"$os_release" <<'EOF'
+ID=debian
+VERSION_ID="13"
+EOF
+
+    cat >"$fake_bin/dpkg" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+    --print-architecture) printf 'amd64\n'; exit 0 ;;
+    -s) exit 1 ;;
+    -i) printf 'dpkg %s\n' "\$*" >>"$command_log"; exit 0 ;;
+esac
+exit 1
+EOF
+    chmod +x "$fake_bin/dpkg"
+
+    cat >"$fake_bin/curl" <<EOF
+#!/usr/bin/env bash
+printf 'curl %s\n' "\$*" >>"$command_log"
+out=''
+while [[ \$# -gt 0 ]]; do
+    if [[ "\$1" == "-o" ]]; then
+        shift
+        out="\$1"
+    fi
+    shift || true
+done
+printf 'fake deb\n' >"\$out"
+exit 0
+EOF
+    chmod +x "$fake_bin/curl"
+
+    cat >"$fake_bin/apt-get" <<EOF
+#!/usr/bin/env bash
+printf 'apt-get %s\n' "\$*" >>"$command_log"
+exit 0
+EOF
+    chmod +x "$fake_bin/apt-get"
+
+    # shellcheck disable=SC1090
+    source "$helper"
+    run_root_cmd() { "$@"; }
+    PATH="$fake_bin:/usr/bin:/bin"
+    CUDA_OS_RELEASE_FILE="$os_release"
+    primary_backend="cuda"
+
+    bootstrap_nvidia_cuda_apt_repo
+    assert_contains "$(cat "$command_log")" "debian13/x86_64/cuda-keyring_1.1-1_all.deb"
+    assert_contains "$(cat "$command_log")" "dpkg -i"
+    assert_contains "$(cat "$command_log")" "apt-get update -qq"
+
+    cat >"$fake_bin/dpkg" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+    --print-architecture) printf 'amd64\n'; exit 0 ;;
+    -s) exit 0 ;;
+esac
+exit 1
+EOF
+    chmod +x "$fake_bin/dpkg"
+    : >"$command_log"
+
+    bootstrap_nvidia_cuda_apt_repo
+    assert_contains "$(cat "$command_log")" "apt-get update -qq"
+    assert_not_contains "$(cat "$command_log")" "curl"
+    assert_not_contains "$(cat "$command_log")" "dpkg -i"
 }
 
 test_installer_validates_runtime_bundle_subdirectories() {
@@ -2291,6 +2474,9 @@ main() {
     test_install_preserves_real_registry_entries
     test_dependency_install_preview_exists
     test_interactive_installer_declares_cuda_toolkit_install
+    test_installer_cuda_apt_bootstrap_contract
+    test_installer_cuda_helper_slug_arch_and_apt_batching
+    test_installer_cuda_repo_bootstrap_is_mockable_and_nonfatal
     test_installer_validates_runtime_bundle_subdirectories
     test_interactive_installer_uses_user_basedpyright_install
     test_interactive_installer_has_harness_setup_wizard

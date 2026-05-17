@@ -348,7 +348,14 @@ run_root_cmd() {
 apt_package_available() {
     local pkg="$1"
     command -v apt-cache >/dev/null 2>&1 || return 1
-    apt-cache policy "$pkg" 2>/dev/null | grep -Eq 'Candidate:[[:space:]]+[^()[:space:]]'
+
+    apt-cache show "$pkg" >/dev/null 2>&1 && return 0
+
+    apt-cache policy "$pkg" 2>/dev/null \
+        | awk '
+            $1 == "Candidate:" && $2 != "(none)" { found = 1 }
+            END { exit found ? 0 : 1 }
+        '
 }
 
 install_apt_packages_best_effort() {
@@ -360,15 +367,155 @@ install_apt_packages_best_effort() {
     fi
 
     local pkg
+    local available=()
     for pkg in "$@"; do
         if apt_package_available "$pkg"; then
-            run_root_cmd apt-get install -y -qq "$pkg" || {
-                printf 'post-install warning: failed to install package: %s\n' "$pkg" >&2
-            }
+            available+=("$pkg")
         else
             printf 'post-install warning: package unavailable on this system: %s\n' "$pkg" >&2
         fi
     done
+
+    if ((${#available[@]} == 0)); then
+        return 0
+    fi
+
+    run_root_cmd apt-get install -y -qq "${available[@]}" || {
+        printf 'post-install warning: apt failed to install one or more packages: %s\n' "${available[*]}" >&2
+        return 1
+    }
+}
+
+detect_cuda_deb_repo_slug() {
+    local os_release="${CUDA_OS_RELEASE_FILE:-/etc/os-release}"
+    local os_id=""
+    local version_id=""
+    local version_major=""
+
+    [[ -r "$os_release" ]] || return 1
+
+    # shellcheck disable=SC1090
+    . "$os_release"
+
+    os_id="${ID:-}"
+    version_id="${VERSION_ID:-}"
+    version_major="${version_id%%.*}"
+
+    case "${os_id}:${version_id}" in
+        ubuntu:24.04) printf 'ubuntu2404\n' ;;
+        ubuntu:22.04) printf 'ubuntu2204\n' ;;
+        ubuntu:20.04) printf 'ubuntu2004\n' ;;
+        debian:13)    printf 'debian13\n' ;;
+        debian:12)    printf 'debian12\n' ;;
+        debian:11)    printf 'debian11\n' ;;
+        *)
+            case "${os_id}:${version_major}" in
+                ubuntu:24) printf 'ubuntu2404\n' ;;
+                ubuntu:22) printf 'ubuntu2204\n' ;;
+                ubuntu:20) printf 'ubuntu2004\n' ;;
+                debian:13) printf 'debian13\n' ;;
+                debian:12) printf 'debian12\n' ;;
+                debian:11) printf 'debian11\n' ;;
+                *) return 1 ;;
+            esac
+            ;;
+    esac
+}
+
+detect_cuda_deb_repo_arch() {
+    local deb_arch=""
+
+    command -v dpkg >/dev/null 2>&1 || return 1
+    deb_arch="$(dpkg --print-architecture 2>/dev/null || true)"
+
+    case "$deb_arch" in
+        amd64) printf 'x86_64\n' ;;
+        arm64) printf 'sbsa\n' ;;
+        *) return 1 ;;
+    esac
+}
+
+bootstrap_nvidia_cuda_apt_repo() {
+    [[ "${primary_backend:-}" == "cuda" ]] || return 0
+    command -v apt-get >/dev/null 2>&1 || return 0
+    command -v dpkg >/dev/null 2>&1 || {
+        printf 'post-install warning: dpkg unavailable; cannot install NVIDIA CUDA apt keyring package\n' >&2
+        return 0
+    }
+
+    local repo_slug=""
+    local repo_arch=""
+    local keyring_deb="cuda-keyring_1.1-1_all.deb"
+    local keyring_url=""
+    local tmp_deb=""
+
+    if dpkg -s cuda-keyring >/dev/null 2>&1; then
+        printf 'post-install: NVIDIA CUDA apt keyring already installed; refreshing apt cache\n'
+        run_root_cmd apt-get update -qq || {
+            printf 'post-install warning: apt-get update failed after existing CUDA keyring check\n' >&2
+        }
+        return 0
+    fi
+
+    repo_slug="$(detect_cuda_deb_repo_slug || true)"
+    if [[ -z "$repo_slug" ]]; then
+        printf 'post-install warning: unsupported Debian/Ubuntu release for automatic NVIDIA CUDA apt repo setup\n' >&2
+        printf 'post-install warning: skipping CUDA apt repo bootstrap; existing apt sources will be used\n' >&2
+        return 0
+    fi
+
+    repo_arch="$(detect_cuda_deb_repo_arch || true)"
+    if [[ -z "$repo_arch" ]]; then
+        printf 'post-install warning: unsupported architecture for NVIDIA CUDA apt repo: %s\n' "$(dpkg --print-architecture 2>/dev/null || true)" >&2
+        return 0
+    fi
+
+    keyring_url="https://developer.download.nvidia.com/compute/cuda/repos/${repo_slug}/${repo_arch}/${keyring_deb}"
+    tmp_deb="$(mktemp "${TMPDIR:-/tmp}/cuda-keyring.XXXXXX.deb")"
+
+    printf 'post-install: bootstrapping NVIDIA CUDA apt repo: %s/%s\n' "$repo_slug" "$repo_arch"
+
+    if command -v curl >/dev/null 2>&1; then
+        if ! curl -fsSL "$keyring_url" -o "$tmp_deb"; then
+            printf 'post-install warning: failed to download CUDA keyring: %s\n' "$keyring_url" >&2
+            rm -f "$tmp_deb"
+            return 0
+        fi
+    elif command -v wget >/dev/null 2>&1; then
+        if ! wget -qO "$tmp_deb" "$keyring_url"; then
+            printf 'post-install warning: failed to download CUDA keyring: %s\n' "$keyring_url" >&2
+            rm -f "$tmp_deb"
+            return 0
+        fi
+    else
+        printf 'post-install warning: curl/wget unavailable; cannot download CUDA keyring\n' >&2
+        rm -f "$tmp_deb"
+        return 0
+    fi
+
+    if ! run_root_cmd dpkg -i "$tmp_deb"; then
+        printf 'post-install warning: failed to install CUDA keyring package\n' >&2
+        rm -f "$tmp_deb"
+        return 0
+    fi
+
+    rm -f "$tmp_deb"
+
+    if run_root_cmd apt-get update -qq; then
+        printf 'post-install: NVIDIA CUDA apt repo ready\n'
+    else
+        printf 'post-install warning: apt-get update failed after CUDA repo bootstrap\n' >&2
+    fi
+}
+
+warn_cuda_apt_visibility_if_nvcc_missing() {
+    [[ "${primary_backend:-}" == "cuda" ]] || return 0
+    command -v nvcc >/dev/null 2>&1 && return 0
+    command -v apt-cache >/dev/null 2>&1 || return 0
+
+    printf 'post-install warning: nvcc is still unavailable. Your apt sources may not expose NVIDIA CUDA toolkit packages.\n' >&2
+    printf 'post-install warning: check with: apt-cache policy cuda-toolkit-12-9 cuda-nvcc-12-9 cuda-toolkit-12-8 cuda-nvcc-12-8\n' >&2
+    printf 'post-install warning: CPU runtime fallback will be used unless CUDA toolkit is installed manually.\n' >&2
 }
 
 detect_cuda_architectures() {
@@ -591,8 +738,15 @@ select_cuda_alternative_if_present() {
         }
     fi
 
-    export PATH="$cuda_path/bin:$PATH"
-    export LD_LIBRARY_PATH="$cuda_path/lib64:${LD_LIBRARY_PATH:-}"
+    case ":$PATH:" in
+        *":$cuda_path/bin:"*) ;;
+        *) export PATH="$cuda_path/bin:$PATH" ;;
+    esac
+
+    case ":${LD_LIBRARY_PATH:-}:" in
+        *":$cuda_path/lib64:"*) ;;
+        *) export LD_LIBRARY_PATH="$cuda_path/lib64:${LD_LIBRARY_PATH:-}" ;;
+    esac
     hash -r 2>/dev/null || true
 
     printf 'post-install: selected CUDA toolkit path: %s\n' "$cuda_path"
@@ -658,6 +812,8 @@ configure_cuda_toolkit_for_build() {
     local nvcc_release=""
     local cuda_arches="${GGML_CUDA_ARCHITECTURES:-}"
 
+    bootstrap_nvidia_cuda_apt_repo
+
     # Install general build deps and preferred host compilers first.
     if command -v apt-get >/dev/null 2>&1; then
         install_apt_packages_best_effort \
@@ -710,6 +866,7 @@ configure_cuda_toolkit_for_build() {
     configure_cuda_host_compiler
 
     if ! command -v nvcc >/dev/null 2>&1; then
+        warn_cuda_apt_visibility_if_nvcc_missing
         printf 'post-install warning: nvcc still unavailable after CUDA toolkit setup; falling back to CPU runtime\n' >&2
         primary_backend="cpu"
         unset GGML_CUDA_ARCHITECTURES
@@ -845,10 +1002,10 @@ build_runtime_during_install() {
         # Interactive: show what we're doing and ask
         printf 'post-install: host %s backend detected\n' "$primary_backend"
         if [[ "$primary_backend" == "cuda" ]] && ! command -v nvcc >/dev/null 2>&1; then
-            printf 'post-install: CUDA host detected but nvcc is not in PATH\n'
-            printf 'post-install: CUDA toolkit will be configured after runtime-build confirmation\n'
+            printf 'post-install: CUDA-capable NVIDIA GPU detected, but nvcc is missing.\n'
+            printf 'post-install: recommended action is installer-managed CUDA setup: configure NVIDIA CUDA apt repository, install CUDA Toolkit 12.9 where compatible, install gcc/g++ 13 or 14 host compiler packages, build CUDA runtime, and fall back to CPU if CUDA fails.\n'
         fi
-        printf 'Would you like to check/install build dependencies and compile a local llama.cpp runtime now? [Y/n] '
+        printf 'Proceed with installer-managed build dependency setup and local llama.cpp runtime compile now? [Y/n] '
         reply=""
         read -r reply || reply=""
         reply="$(to_lower "$reply")"
