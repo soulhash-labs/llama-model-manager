@@ -417,21 +417,28 @@ detect_cuda_architectures() {
 nvcc_supports_cuda_architecture() {
     local arch="$1"
 
-    command -v nvcc >/dev/null 2>&1 || return 1
+    command -v nvcc >/dev/null 2>&1 || return 2
 
-    # nvcc --list-gpu-arch usually emits lines like:
-    #   compute_75
-    #   compute_89
-    #   compute_120
-    #
-    # Some older nvcc versions may not support this flag cleanly, so failure
-    # means "unknown", not always fatal.
-    if nvcc --list-gpu-arch >/dev/null 2>&1; then
-        nvcc --list-gpu-arch 2>/dev/null | grep -qx "compute_${arch}"
-        return $?
+    # If nvcc cannot report supported archs, treat support as unknown, not fatal.
+    if ! nvcc --list-gpu-arch >/dev/null 2>&1; then
+        return 2
     fi
 
-    return 2
+    if nvcc --list-gpu-arch 2>/dev/null | grep -qx "compute_${arch}"; then
+        return 0
+    fi
+
+    case "$arch" in
+        # Older GPUs may be unsupported by newer CUDA toolkits, but do not let
+        # the validator kill the installer. The real CMake build gives the
+        # authoritative result.
+        50|52|53|60|61|62|70|72|75)
+            return 2
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 
@@ -440,6 +447,7 @@ configure_cuda_architectures_for_build() {
     local arch=""
     local unsupported=()
     local support_status=0
+    local cmake_arch_arg=""
 
     [[ "${primary_backend:-}" == "cuda" ]] || return 0
 
@@ -452,15 +460,26 @@ configure_cuda_architectures_for_build() {
     fi
 
     export GGML_CUDA_ARCHITECTURES="$cuda_arches"
-    export CMAKE_ARGS="${CMAKE_ARGS:-} -DGGML_CUDA_ARCHITECTURES=${cuda_arches}"
+
+    # Avoid appending duplicate arch args on repeated installer runs.
+    cmake_arch_arg="-DGGML_CUDA_ARCHITECTURES=${cuda_arches}"
+    case " ${CMAKE_ARGS:-} " in
+        *" ${cmake_arch_arg} "*) ;;
+        *) export CMAKE_ARGS="${CMAKE_ARGS:-} ${cmake_arch_arg}" ;;
+    esac
 
     printf 'post-install: detected CUDA architecture(s): %s\n' "$cuda_arches"
     printf 'post-install: exported GGML_CUDA_ARCHITECTURES=%s\n' "$GGML_CUDA_ARCHITECTURES"
 
     IFS=';' read -r -a _cuda_arch_array <<< "$cuda_arches"
     for arch in "${_cuda_arch_array[@]}"; do
-        nvcc_supports_cuda_architecture "$arch"
-        support_status=$?
+        # Do not call this directly under set -e. A non-zero return would exit
+        # the whole installer before we can inspect $?.
+        if nvcc_supports_cuda_architecture "$arch"; then
+            support_status=0
+        else
+            support_status=$?
+        fi
 
         if [[ "$support_status" -eq 1 ]]; then
             unsupported+=("$arch")
@@ -471,9 +490,7 @@ configure_cuda_architectures_for_build() {
 
     if ((${#unsupported[@]} > 0)); then
         printf 'post-install error: installed nvcc does not support required CUDA architecture(s): %s\n' "${unsupported[*]}" >&2
-        printf 'post-install error: install a newer CUDA toolkit or force CPU fallback.\n' >&2
 
-        # Blackwell and future GPUs should not silently build the wrong CUDA target.
         for arch in "${unsupported[@]}"; do
             case "$arch" in
                 100|101|120)
@@ -481,18 +498,20 @@ configure_cuda_architectures_for_build() {
                     printf 'post-install error: refusing CUDA build; falling back to CPU runtime.\n' >&2
                     primary_backend="cpu"
                     unset GGML_CUDA_ARCHITECTURES
-                    export CMAKE_ARGS="${CMAKE_ARGS//-DGGML_CUDA_ARCHITECTURES=${cuda_arches}/}"
+                    export CMAKE_ARGS="${CMAKE_ARGS//$cmake_arch_arg/}"
                     return 0
                     ;;
             esac
         done
 
-        printf 'post-install warning: CUDA arch validation failed; continuing may fail. Falling back to CPU for safety.\n' >&2
-        primary_backend="cpu"
-        unset GGML_CUDA_ARCHITECTURES
-        export CMAKE_ARGS="${CMAKE_ARGS//-DGGML_CUDA_ARCHITECTURES=${cuda_arches}/}"
-        return 0
+        # For older cards like sm_52, nvcc --list-gpu-arch can be misleading
+        # on newer CUDA toolkits because old SASS targets may be removed even
+        # though PTX/JIT fallback may still work depending on CUDA/driver.
+        # Do not hard-fallback here. Let the real llama.cpp build decide.
+        printf 'post-install warning: nvcc did not list sm_%s; continuing CUDA build and letting CMake/llama.cpp decide\n' "${unsupported[*]}" >&2
     fi
+
+    return 0
 }
 
 
@@ -609,10 +628,9 @@ build_runtime_during_install() {
     if [[ -t 0 && -t 1 ]]; then
         # Interactive: show what we're doing and ask
         printf 'post-install: host %s backend detected\n' "$primary_backend"
-    if [[ "$primary_backend" == "cuda" ]] && ! command -v nvcc >/dev/null 2>&1; then
-        printf 'post-install: CUDA host detected but nvcc is not in PATH\n'
-        printf 'post-install: installing CUDA toolkit (nvidia-cuda-toolkit)...\n'
-        if [[ -t 0 && -t 1 ]]; then
+        if [[ "$primary_backend" == "cuda" ]] && ! command -v nvcc >/dev/null 2>&1; then
+            printf 'post-install: CUDA host detected but nvcc is not in PATH\n'
+            printf 'post-install: installing CUDA toolkit (nvidia-cuda-toolkit)...\n'
             printf 'Would you like to install nvidia-cuda-toolkit now? [Y/n] '
             local reply
             read -r reply || reply=""
@@ -648,45 +666,9 @@ build_runtime_during_install() {
                 printf 'post-install: CUDA toolkit install skipped by user; falling back to CPU runtime\n'
                 primary_backend="cpu"
             fi
-        else
-            printf 'post-install: non-interactive; install manually: sudo apt install nvidia-cuda-toolkit\n'
-            primary_backend="cpu"
         fi
-    fi
-
-    if [[ -t 0 && -t 1 ]]; then
-        # Interactive: show what we're doing and ask
-        printf 'post-install: host %s backend detected\n' "$primary_backend"
         printf 'Would you like to check/install build dependencies and compile a local llama.cpp runtime now? [Y/n] '
-        local reply
-        read -r reply || reply=""
-        reply="$(to_lower "$reply")"
-        if [[ "$reply" == "n" || "$reply" == "no" ]]; then
-            printf 'post-install: runtime build skipped by user\n'
-            return 0
-        fi
-    else
-        # Non-interactive / headless: only auto-build if deps are trivially
-        # available (no sudo prompts, no user interaction needed).
-        if [[ "$primary_backend" == "cpu" ]]; then
-            printf 'post-install: non-interactive install on CPU-only host; building CPU runtime\n'
-        elif command -v nvcc >/dev/null 2>&1; then
-            printf 'post-install: CUDA host with nvcc available; building CUDA runtime\n'
-        elif [[ "$primary_backend" == "cuda" ]]; then
-            printf 'post-install: CUDA host but nvcc not in PATH; falling back to CPU runtime\n'
-            primary_backend="cpu"
-        elif [[ "$primary_backend" == "vulkan" ]] && ! command -v glslc >/dev/null 2>&1 && ! command -v glslangValidator >/dev/null 2>&1; then
-            printf 'post-install: Vulkan host detected but SDK tools not in PATH; falling back to CPU runtime\n'
-            primary_backend="cpu"
-        elif [[ "$primary_backend" == "metal" ]] && ! xcode-select -p >/dev/null 2>&1; then
-            printf 'post-install: macOS Metal host detected but Xcode CLT not installed; falling back to CPU runtime\n'
-            primary_backend="cpu"
-        else
-            printf 'post-install: non-interactive install with %s build tools available; building %s runtime\n' "$primary_backend" "$primary_backend"
-        fi
-    fi
-        printf 'Would you like to check/install build dependencies and compile a local llama.cpp runtime now? [Y/n] '
-        local reply
+        reply=""
         read -r reply || reply=""
         reply="$(to_lower "$reply")"
         if [[ "$reply" == "n" || "$reply" == "no" ]]; then
