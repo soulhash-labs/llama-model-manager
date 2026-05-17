@@ -162,6 +162,51 @@ recommended_oh_my_openagent_install_command() {
     fi
 }
 
+install_bun_for_oh_my_openagent_if_needed() {
+    if command -v bunx >/dev/null 2>&1 || command -v bun >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if ! command -v curl >/dev/null 2>&1 || ! command -v bash >/dev/null 2>&1; then
+        printf 'post-install: Bun install skipped; curl and bash are required for the Bun installer\n' >&2
+        return 1
+    fi
+
+    case "${LMM_INSTALL_BUN:-}" in
+        1|true|yes|Y|y)
+            ;;
+        *)
+            if [[ -t 0 && -t 1 ]]; then
+                local reply=""
+                printf 'post-install: Bun is recommended for oh-my-openagent installation but is not on PATH.\n'
+                printf 'Install Bun now with: curl -fsSL https://bun.sh/install | bash ? [Y/n] '
+                read -r reply || reply=""
+                reply="$(to_lower "$reply")"
+                if [[ "$reply" == "n" || "$reply" == "no" ]]; then
+                    return 1
+                fi
+            else
+                return 1
+            fi
+            ;;
+    esac
+
+    if curl -fsSL https://bun.sh/install | bash; then
+        if [[ -d "$HOME/.bun/bin" ]]; then
+            case ":$PATH:" in
+                *":$HOME/.bun/bin:"*) ;;
+                *) export PATH="$HOME/.bun/bin:$PATH" ;;
+            esac
+            hash -r 2>/dev/null || true
+        fi
+        printf 'post-install: Bun installer completed\n'
+        return 0
+    fi
+
+    printf 'post-install warning: Bun installer failed; oh-my-openagent may need npx/npm fallback\n' >&2
+    return 1
+}
+
 run_oh_my_openagent_install_command() {
     local command_text="$1"
     case "$command_text" in
@@ -282,6 +327,7 @@ interactive_harness_setup_wizard() {
             fetch_oh_my_openagent_guide "$guide_url" "$guide_path" || true
         fi
 
+        install_bun_for_oh_my_openagent_if_needed || true
         openagent_recommendation="$(recommended_oh_my_openagent_install_command)"
         if [[ -z "$openagent_recommendation" ]]; then
             printf 'post-install: cannot install oh-my-openagent automatically because bunx/npx is unavailable\n' >&2
@@ -763,12 +809,32 @@ cuda_arches_need_modern_toolkit() {
 legacy_cuda_toolkit_paths() {
     if [[ -n "${LMM_LEGACY_CUDA_PATHS:-}" ]]; then
         printf '%s\n' "$LMM_LEGACY_CUDA_PATHS"
+    elif [[ -n "${LMM_LEGACY_CUDA_TOOLKIT_PATH:-}" ]]; then
+        printf '%s\n' "$LMM_LEGACY_CUDA_TOOLKIT_PATH"
     else
         printf '/usr/local/cuda-11.8 /opt/cuda-11.8\n'
     fi
 }
 
-select_legacy_cuda_toolkit_if_present() {
+legacy_cuda_runfile_url() {
+    printf '%s\n' "https://developer.download.nvidia.com/compute/cuda/11.8.0/local_installers/cuda_11.8.0_520.61.05_linux.run"
+}
+
+legacy_cuda_runfile_name() {
+    printf '%s\n' "cuda_11.8.0_520.61.05_linux.run"
+}
+
+legacy_cuda_toolkit_path() {
+    printf '%s\n' "${LMM_LEGACY_CUDA_TOOLKIT_PATH:-/usr/local/cuda-11.8}"
+}
+
+append_cmake_toolkit_root_arg() {
+    local cuda_path="$1"
+    export CMAKE_ARGS="$(printf '%s\n' "${CMAKE_ARGS:-}" | sed -E 's/(^|[[:space:]])-DCUDAToolkit_ROOT=[^[:space:]]+//g' | xargs)"
+    export CMAKE_ARGS="${CMAKE_ARGS:-} -DCUDAToolkit_ROOT=${cuda_path}"
+}
+
+select_legacy_cuda_11_8_for_build() {
     [[ "${primary_backend:-}" == "cuda" ]] || return 0
     cuda_arches_need_legacy_toolkit || return 1
 
@@ -778,7 +844,8 @@ select_legacy_cuda_toolkit_if_present() {
     legacy_paths="$(legacy_cuda_toolkit_paths)"
     for legacy_path in $legacy_paths; do
         if [[ -x "$legacy_path/bin/nvcc" ]]; then
-            printf 'post-install: legacy CUDA architecture detected; selecting toolkit: %s\n' "$legacy_path"
+            printf 'post-install: selecting CUDA 11.8 toolkit for legacy CUDA arch(es): %s\n' "${GGML_CUDA_ARCHITECTURES:-unknown}"
+            printf 'post-install: legacy CUDA toolkit path: %s\n' "$legacy_path"
 
             case ":$PATH:" in
                 *":$legacy_path/bin:"*) ;;
@@ -793,6 +860,7 @@ select_legacy_cuda_toolkit_if_present() {
             export CUDA_HOME="$legacy_path"
             export CUDA_PATH="$legacy_path"
             export CUDAToolkit_ROOT="$legacy_path"
+            append_cmake_toolkit_root_arg "$legacy_path"
             export LMM_LEGACY_CUDA_SELECTED=1
             hash -r 2>/dev/null || true
             "$legacy_path/bin/nvcc" --version || true
@@ -803,28 +871,144 @@ select_legacy_cuda_toolkit_if_present() {
     return 1
 }
 
-guard_unsupported_legacy_cuda_architecture() {
-    [[ "${primary_backend:-}" == "cuda" ]] || return 0
-    cuda_arches_need_legacy_toolkit || return 0
+select_legacy_cuda_toolkit_if_present() {
+    select_legacy_cuda_11_8_for_build "$@"
+}
 
-    if select_legacy_cuda_toolkit_if_present; then
+allow_legacy_cuda_runfile_install() {
+    case "${LMM_ALLOW_LEGACY_CUDA_RUNFILE:-}" in
+        1|true|yes|Y|y) return 0 ;;
+    esac
+
+    if [[ -t 0 && -t 1 ]]; then
+        local reply=""
+        printf 'post-install: legacy CUDA GPU detected and CUDA 11.8 toolkit is missing.\n'
+        printf 'post-install: CUDA 11.8 toolkit-only install can be downloaded from NVIDIA (~4.3 GB).\n'
+        printf 'post-install: the installer will run the NVIDIA runfile with --silent --toolkit only; it will not install/replace your NVIDIA driver.\n'
+        printf 'Download and install CUDA 11.8 toolkit-only now? [y/N] '
+        read -r reply || reply=""
+        reply="$(to_lower "$reply")"
+        [[ "$reply" == "y" || "$reply" == "yes" ]]
+        return $?
+    fi
+
+    return 1
+}
+
+download_legacy_cuda_runfile() {
+    local target_dir="${XDG_CACHE_HOME:-$HOME/.cache}/llama-model-manager/cuda"
+    local runfile_name=""
+    local runfile_url=""
+    local runfile_path=""
+
+    runfile_name="$(legacy_cuda_runfile_name)"
+    runfile_url="$(legacy_cuda_runfile_url)"
+    runfile_path="${target_dir}/${runfile_name}"
+
+    mkdir -p "$target_dir"
+
+    if [[ -s "$runfile_path" ]]; then
+        printf '%s\n' "$runfile_path"
         return 0
     fi
 
+    printf 'post-install: downloading CUDA 11.8 toolkit runfile from NVIDIA:\n' >&2
+    printf '  %s\n' "$runfile_url" >&2
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fL --continue-at - "$runfile_url" -o "$runfile_path" || {
+            rm -f "$runfile_path"
+            return 1
+        }
+    elif command -v wget >/dev/null 2>&1; then
+        wget -c -O "$runfile_path" "$runfile_url" || {
+            rm -f "$runfile_path"
+            return 1
+        }
+    else
+        printf 'post-install warning: curl/wget unavailable; cannot download CUDA 11.8 runfile\n' >&2
+        return 1
+    fi
+
+    chmod 0755 "$runfile_path" || true
+    printf '%s\n' "$runfile_path"
+}
+
+install_legacy_cuda_11_8_toolkit_runfile() {
+    [[ "${primary_backend:-}" == "cuda" ]] || return 0
+    cuda_arches_need_legacy_toolkit || return 1
+
+    local legacy_path=""
+    local runfile_path=""
+
+    legacy_path="$(legacy_cuda_toolkit_path)"
+
+    if [[ -x "$legacy_path/bin/nvcc" ]]; then
+        printf 'post-install: CUDA 11.8 already installed at %s\n' "$legacy_path"
+        return 0
+    fi
+
+    allow_legacy_cuda_runfile_install || {
+        printf 'post-install warning: CUDA 11.8 toolkit install not approved; CPU fallback will be used for legacy GPU.\n' >&2
+        return 1
+    }
+
+    runfile_path="$(download_legacy_cuda_runfile)" || {
+        printf 'post-install warning: failed to download CUDA 11.8 runfile; CPU fallback will be used\n' >&2
+        return 1
+    }
+
+    printf 'post-install: installing CUDA 11.8 toolkit-only from runfile\n'
+
+    if ! run_root_cmd sh "$runfile_path" --silent --toolkit; then
+        printf 'post-install warning: CUDA 11.8 toolkit-only runfile install failed\n' >&2
+        return 1
+    fi
+
+    if [[ ! -x "$legacy_path/bin/nvcc" ]]; then
+        printf 'post-install warning: CUDA 11.8 install completed but nvcc was not found at %s/bin/nvcc\n' "$legacy_path" >&2
+        return 1
+    fi
+
+    printf 'post-install: CUDA 11.8 toolkit installed successfully at %s\n' "$legacy_path"
+    return 0
+}
+
+configure_legacy_cuda_toolkit_for_build() {
+    [[ "${primary_backend:-}" == "cuda" ]] || return 0
+    cuda_arches_need_legacy_toolkit || return 0
+
+    if select_legacy_cuda_11_8_for_build; then
+        return 0
+    fi
+
+    if install_legacy_cuda_11_8_toolkit_runfile; then
+        select_legacy_cuda_11_8_for_build
+        return $?
+    fi
+
     printf 'post-install warning: legacy CUDA GPU detected: %s\n' "${GGML_CUDA_ARCHITECTURES:-unknown}" >&2
-    printf 'post-install warning: active CUDA toolkit does not appear suitable for this GPU.\n' >&2
-    printf 'post-install warning: install CUDA Toolkit 11.8 manually, or use CPU fallback.\n' >&2
-    printf 'post-install warning: CUDA build will be skipped to avoid guaranteed failure.\n' >&2
+    printf 'post-install warning: legacy CUDA GPU detected but CUDA 11.8 toolkit is unavailable.\n' >&2
+    printf 'post-install warning: falling back to CPU runtime.\n' >&2
     printf 'post-install hint: legacy CUDA setup example:\n' >&2
     printf '  install CUDA 11.8 toolkit-only from NVIDIA runfile, then rerun:\n' >&2
     printf '  export PATH=/usr/local/cuda-11.8/bin:$PATH\n' >&2
     printf '  export LD_LIBRARY_PATH=/usr/local/cuda-11.8/lib64:$LD_LIBRARY_PATH\n' >&2
+    printf '  export CUDA_HOME=/usr/local/cuda-11.8\n' >&2
+    printf '  export CUDA_PATH=/usr/local/cuda-11.8\n' >&2
+    printf '  export CUDAToolkit_ROOT=/usr/local/cuda-11.8\n' >&2
     printf '  export GGML_CUDA_ARCHITECTURES=%s\n' "${GGML_CUDA_ARCHITECTURES:-52}" >&2
     printf '  llama-model build-runtime --backend cuda\n' >&2
 
     primary_backend="cpu"
     unset GGML_CUDA_ARCHITECTURES
     remove_cmake_cuda_arch_arg
+    export CMAKE_ARGS="$(printf '%s\n' "${CMAKE_ARGS:-}" | sed -E 's/(^|[[:space:]])-DCUDAToolkit_ROOT=[^[:space:]]+//g' | xargs)"
+    return 0
+}
+
+guard_unsupported_legacy_cuda_architecture() {
+    configure_legacy_cuda_toolkit_for_build "$@"
 }
 
 nvcc_supports_cuda_architecture() {
@@ -1094,17 +1278,12 @@ configure_cuda_toolkit_for_build() {
     fi
 
     if cuda_arches_need_legacy_toolkit; then
-        if [[ "${LMM_LEGACY_CUDA_SELECTED:-}" == "1" ]]; then
+        configure_legacy_cuda_toolkit_for_build
+        if [[ "${primary_backend:-}" == "cuda" ]]; then
             configure_cuda_host_compiler
             nvcc_release="$(detect_nvcc_release || true)"
             printf 'post-install: active nvcc release: %s\n' "${nvcc_release:-unknown}"
-            return 0
         fi
-
-        printf 'post-install warning: legacy CUDA architecture has no selected legacy toolkit; falling back to CPU runtime\n' >&2
-        primary_backend="cpu"
-        unset GGML_CUDA_ARCHITECTURES
-        remove_cmake_cuda_arch_arg
         return 0
     fi
 
@@ -1334,7 +1513,7 @@ build_runtime_during_install() {
         printf 'post-install: host %s backend detected\n' "$primary_backend"
         if [[ "$primary_backend" == "cuda" ]] && ! command -v nvcc >/dev/null 2>&1; then
             printf 'post-install: CUDA-capable NVIDIA GPU detected, but nvcc is missing.\n'
-            printf 'post-install: installer-managed setup will use Ubuntu-native cuda-toolkit on Ubuntu 26.04+, otherwise NVIDIA CUDA apt repo packages.\n'
+            printf 'post-install: installer-managed setup will use CUDA 11.8 toolkit-only for legacy GPUs when approved, Ubuntu-native cuda-toolkit on Ubuntu 26.04+, otherwise NVIDIA CUDA apt repo packages.\n'
             printf 'post-install: it will install build tools, select gcc/g++ 13 or 14 as CUDA host compiler, build CUDA runtime, and fall back to CPU if CUDA fails.\n'
         fi
         printf 'Proceed with installer-managed build dependency setup and local llama.cpp runtime compile now? [Y/n] '
@@ -1371,8 +1550,12 @@ build_runtime_during_install() {
     fi
 
     configure_cuda_architectures_for_build
-    guard_unsupported_legacy_cuda_architecture
-    configure_cuda_toolkit_for_build
+
+    if [[ "$primary_backend" == "cuda" ]] && cuda_arches_need_legacy_toolkit; then
+        configure_legacy_cuda_toolkit_for_build
+    elif [[ "$primary_backend" == "cuda" ]]; then
+        configure_cuda_toolkit_for_build
+    fi
 
     # Print exact compiler contract for CUDA builds to catch GCC/CUDA mismatches.
     if [[ "$primary_backend" == "cuda" ]]; then

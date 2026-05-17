@@ -498,6 +498,7 @@ test_interactive_installer_declares_cuda_toolkit_install() {
 
     installer="$(cat "$ROOT_DIR/install.sh")"
     assert_contains "$installer" "CUDA-capable NVIDIA GPU detected, but nvcc is missing."
+    assert_contains "$installer" "CUDA 11.8 toolkit-only for legacy GPUs when approved"
     assert_contains "$installer" "Ubuntu-native cuda-toolkit on Ubuntu 26.04+"
     assert_contains "$installer" "otherwise NVIDIA CUDA apt repo packages"
     assert_contains "$installer" "select gcc/g++ 13 or 14 as CUDA host compiler"
@@ -516,6 +517,14 @@ test_installer_cuda_apt_bootstrap_contract() {
     assert_contains "$installer" "cuda_arches_need_legacy_toolkit"
     assert_contains "$installer" "select_legacy_cuda_toolkit_if_present"
     assert_contains "$installer" "guard_unsupported_legacy_cuda_architecture"
+    assert_contains "$installer" "configure_legacy_cuda_toolkit_for_build"
+    assert_contains "$installer" "install_legacy_cuda_11_8_toolkit_runfile"
+    assert_contains "$installer" "select_legacy_cuda_11_8_for_build"
+    assert_contains "$installer" "LMM_ALLOW_LEGACY_CUDA_RUNFILE"
+    assert_contains "$installer" "cuda_11.8.0_520.61.05_linux.run"
+    assert_contains "$installer" "developer.download.nvidia.com/compute/cuda/11.8.0/local_installers"
+    assert_contains "$installer" 'run_root_cmd sh "$runfile_path" --silent --toolkit'
+    assert_not_contains "$installer" "--driver"
     assert_contains "$installer" "install CUDA 11.8 toolkit-only"
     assert_contains "$installer" "detect_cuda_deb_repo_slug"
     assert_contains "$installer" "bootstrap_nvidia_cuda_apt_repo"
@@ -541,6 +550,17 @@ test_installer_cuda_apt_bootstrap_contract() {
     assert_contains "$installer" '*":$cuda_path/lib64:"*)'
 }
 
+test_interactive_installer_bootstraps_bun_for_oh_my_openagent() {
+    local installer
+
+    installer="$(cat "$ROOT_DIR/install.sh")"
+    assert_contains "$installer" "install_bun_for_oh_my_openagent_if_needed"
+    assert_contains "$installer" "curl -fsSL https://bun.sh/install | bash"
+    assert_contains "$installer" "Bun is recommended for oh-my-openagent installation"
+    assert_contains "$installer" "install_bun_for_oh_my_openagent_if_needed || true"
+    assert_contains "$installer" 'openagent_recommendation="$(recommended_oh_my_openagent_install_command)"'
+}
+
 test_installer_legacy_cuda_arch_without_legacy_toolkit_falls_back_cpu() {
     local tmp
     local helper
@@ -557,6 +577,8 @@ test_installer_legacy_cuda_arch_without_legacy_toolkit_falls_back_cpu() {
     GGML_CUDA_ARCHITECTURES="52"
     CMAKE_ARGS=" -DGGML_CUDA_ARCHITECTURES=52 -DOTHER_FLAG=1"
     LMM_LEGACY_CUDA_PATHS="$tmp/missing-11.8"
+    LMM_LEGACY_CUDA_TOOLKIT_PATH="$tmp/missing-11.8"
+    LMM_ALLOW_LEGACY_CUDA_RUNFILE=0
 
     guard_unsupported_legacy_cuda_architecture 2>"$stderr_log"
     [[ "$primary_backend" == "cpu" ]] || fail "expected legacy CUDA guard to switch to CPU"
@@ -602,6 +624,74 @@ EOF
     [[ "$CUDAToolkit_ROOT" == "$legacy_root" ]] || fail "expected CUDAToolkit_ROOT to point at legacy toolkit"
     assert_contains "$PATH" "$legacy_root/bin"
     assert_contains "$LD_LIBRARY_PATH" "$legacy_root/lib64"
+    assert_contains "$CMAKE_ARGS" "-DCUDAToolkit_ROOT=$legacy_root"
+}
+
+test_installer_legacy_cuda_arch_installs_cuda_118_runfile_when_approved() {
+    local tmp
+    local helper
+    local fake_bin
+    local cache_dir
+    local legacy_root
+    local curl_log
+    local run_root_log
+
+    tmp="$(mktemp -d)"
+    helper="$tmp/install-cuda-helpers.sh"
+    fake_bin="$tmp/bin"
+    cache_dir="$tmp/cache"
+    legacy_root="$tmp/cuda-11.8"
+    curl_log="$tmp/curl.log"
+    run_root_log="$tmp/run-root.log"
+    mkdir -p "$fake_bin" "$cache_dir"
+    write_install_cuda_helper_block "$helper"
+
+    cat >"$fake_bin/curl" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$curl_log"
+while [[ "\$#" -gt 0 ]]; do
+    if [[ "\$1" == "-o" ]]; then
+        shift
+        printf '#!/usr/bin/env sh\nexit 0\n' >"\$1"
+        exit 0
+    fi
+    shift
+done
+exit 1
+EOF
+    chmod +x "$fake_bin/curl"
+
+    # shellcheck disable=SC1090
+    source "$helper"
+    run_root_cmd() {
+        printf '%s\n' "$*" >>"$run_root_log"
+        mkdir -p "$legacy_root/bin" "$legacy_root/lib64"
+        cat >"$legacy_root/bin/nvcc" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+    printf 'Cuda compilation tools, release 11.8, V11.8.89\n'
+fi
+exit 0
+EOF
+        chmod +x "$legacy_root/bin/nvcc"
+        return 0
+    }
+
+    PATH="$fake_bin:/usr/bin:/bin"
+    XDG_CACHE_HOME="$cache_dir"
+    LMM_ALLOW_LEGACY_CUDA_RUNFILE=1
+    LMM_LEGACY_CUDA_TOOLKIT_PATH="$legacy_root"
+    LMM_LEGACY_CUDA_PATHS="$legacy_root"
+    primary_backend="cuda"
+    GGML_CUDA_ARCHITECTURES="52"
+
+    configure_legacy_cuda_toolkit_for_build
+    [[ "$primary_backend" == "cuda" ]] || fail "expected approved runfile lane to keep CUDA backend"
+    [[ "${LMM_LEGACY_CUDA_SELECTED:-}" == "1" ]] || fail "expected legacy CUDA marker after runfile install"
+    assert_contains "$(cat "$curl_log")" "cuda_11.8.0_520.61.05_linux.run"
+    assert_contains "$(cat "$run_root_log")" "--silent --toolkit"
+    assert_not_contains "$(cat "$run_root_log")" "--driver"
+    assert_contains "$PATH" "$legacy_root/bin"
 }
 
 test_installer_ubuntu2604_legacy_arch_does_not_install_native_cuda13() {
@@ -638,6 +728,8 @@ EOF
     primary_backend="cuda"
     GGML_CUDA_ARCHITECTURES="52"
     LMM_LEGACY_CUDA_PATHS="$tmp/missing-11.8"
+    LMM_LEGACY_CUDA_TOOLKIT_PATH="$tmp/missing-11.8"
+    LMM_ALLOW_LEGACY_CUDA_RUNFILE=0
 
     guard_unsupported_legacy_cuda_architecture >/dev/null 2>&1
     [[ "$primary_backend" == "cpu" ]] || fail "expected Ubuntu 26.04 legacy arch to remain CPU fallback"
@@ -3095,8 +3187,10 @@ main() {
     test_dependency_install_preview_exists
     test_interactive_installer_declares_cuda_toolkit_install
     test_installer_cuda_apt_bootstrap_contract
+    test_interactive_installer_bootstraps_bun_for_oh_my_openagent
     test_installer_legacy_cuda_arch_without_legacy_toolkit_falls_back_cpu
     test_installer_legacy_cuda_arch_selects_existing_cuda_118
+    test_installer_legacy_cuda_arch_installs_cuda_118_runfile_when_approved
     test_installer_ubuntu2604_legacy_arch_does_not_install_native_cuda13
     test_installer_ubuntu2604_native_cuda_path_uses_cuda_toolkit_only
     test_installer_ubuntu2604_native_cuda_path_falls_through_when_nvcc_missing
