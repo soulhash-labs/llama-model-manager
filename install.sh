@@ -711,13 +711,53 @@ build_runtime_during_install() {
 
     configure_cuda_architectures_for_build
 
+    # Print exact compiler contract for CUDA builds to catch GCC/CUDA mismatches.
+    if [[ "$primary_backend" == "cuda" ]]; then
+        printf 'post-install: CUDA compiler: %s\n' "$(command -v nvcc || true)"
+        nvcc --version || true
+
+        printf 'post-install: host C compiler: %s\n' "${CC:-$(command -v cc || true)}"
+        "${CC:-cc}" --version | head -n 1 || true
+
+        printf 'post-install: host C++ compiler: %s\n' "${CXX:-$(command -v c++ || true)}"
+        "${CXX:-c++}" --version | head -n 1 || true
+
+        if [[ -n "${CUDAHOSTCXX:-}" ]]; then
+            printf 'post-install: CUDAHOSTCXX: %s\n' "$CUDAHOSTCXX"
+            "$CUDAHOSTCXX" --version | head -n 1 || true
+        fi
+    fi
+
     # Force the build to write into the installed app share, not the source
     # checkout.  Without this, build-runtime resolves APP_ROOT to the repo
     # directory (because web/ exists there) and writes binaries to the wrong
     # location.
-    LLAMA_SERVER_RUNTIME_DIR="${APP_SHARE_DIR}/runtime" \
-    LLAMA_AUTO_INSTALL_DEPS=1 \
-        "$bin" build-runtime --backend "$primary_backend" || true
+    local build_failed=0
+
+    if ! LLAMA_SERVER_RUNTIME_DIR="${APP_SHARE_DIR}/runtime" \
+         LLAMA_AUTO_INSTALL_DEPS=1 \
+         "$bin" build-runtime --backend "$primary_backend"; then
+        build_failed=1
+        printf 'post-install: %s runtime build failed\n' "$primary_backend" >&2
+
+        if [[ "$primary_backend" != "cpu" ]]; then
+            printf 'post-install: retrying CPU fallback runtime\n' >&2
+            primary_backend="cpu"
+            unset GGML_CUDA_ARCHITECTURES
+            export CMAKE_ARGS="${CMAKE_ARGS:-}"
+
+            if ! LLAMA_SERVER_RUNTIME_DIR="${APP_SHARE_DIR}/runtime" \
+                 LLAMA_AUTO_INSTALL_DEPS=1 \
+                 "$bin" build-runtime --backend cpu; then
+                printf 'post-install: CPU fallback runtime build also failed\n' >&2
+                printf 'post-install: run "%s build-runtime --backend auto" manually after fixing dependencies\n' "$bin" >&2
+                return 0
+            fi
+        else
+            printf 'post-install: run "%s build-runtime --backend auto" manually after fixing dependencies\n' "$bin" >&2
+            return 0
+        fi
+    fi
 
     # Post-build validation: ldd + --version checks
     local runtime_dir="${APP_SHARE_DIR}/runtime/llama-server"
@@ -726,19 +766,12 @@ build_runtime_during_install() {
     local valid_runtime_binaries=()
     local b=""
     local payload_binary=""
+    local backend_runtime_dir=""
 
-    if [[ -d "$runtime_dir" ]] && find "$runtime_dir" -name 'llama-server' -type f -print -quit 2>/dev/null | grep -q .; then
-        for b in "$runtime_dir"/*-"${primary_backend}"/llama-server; do
-            [[ -x "$b" ]] || continue
-            runtime_binaries+=("$b")
-            break
-        done
-        while IFS= read -r -d '' b; do
-            if ((${#runtime_binaries[@]} > 0)) && [[ "$b" == "${runtime_binaries[0]}" ]]; then
-                continue
-            fi
-            runtime_binaries+=("$b")
-        done < <(find "$runtime_dir" -name 'llama-server' -type f -print0 | sort -z)
+    backend_runtime_dir="$(find "$runtime_dir" -maxdepth 1 -type d -name "*-${primary_backend}" -print -quit 2>/dev/null || true)"
+
+    if [[ -n "$backend_runtime_dir" ]] && [[ -x "$backend_runtime_dir/llama-server" ]]; then
+        runtime_binaries+=("$backend_runtime_dir/llama-server")
 
         for b in "${runtime_binaries[@]}"; do
             payload_binary="${b}.bin"
