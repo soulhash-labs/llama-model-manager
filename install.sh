@@ -121,8 +121,86 @@ install_basedpyright_during_install() {
     fi
 }
 
-recommended_opencode_install_command() {
-    printf 'curl -fsSL https://opencode.ai/install | bash\n'
+opencode_install_command_available() {
+    local command_text="$1"
+    case "$command_text" in
+        "curl -fsSL https://opencode.ai/install | bash")
+            command -v curl >/dev/null 2>&1 && command -v bash >/dev/null 2>&1
+            ;;
+        "brew install anomalyco/tap/opencode")
+            command -v brew >/dev/null 2>&1
+            ;;
+        "bun add -g opencode-ai")
+            command -v bun >/dev/null 2>&1
+            ;;
+        "npm i -g opencode-ai")
+            command -v npm >/dev/null 2>&1
+            ;;
+        "paru -S opencode")
+            command -v paru >/dev/null 2>&1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+prompt_opencode_install_choice() {
+    local choice=""
+    local command_text=""
+    local missing_tool=""
+
+    while true; do
+        printf 'How would you like to install OpenCode?\n' >&2
+        printf '  1) curl -fsSL https://opencode.ai/install | bash  (recommended)\n' >&2
+        printf '  2) brew install anomalyco/tap/opencode             (macOS)\n' >&2
+        printf '  3) bun add -g opencode-ai\n' >&2
+        printf '  4) npm i -g opencode-ai\n' >&2
+        printf '  5) paru -S opencode                               (Arch)\n' >&2
+        printf '  s) skip OpenCode installation\n' >&2
+        printf 'Choice [1-5, s]: ' >&2
+
+        read -r choice || choice=""
+        choice="$(to_lower "$choice")"
+
+        case "$choice" in
+            ""|1)
+                command_text="curl -fsSL https://opencode.ai/install | bash"
+                missing_tool="curl and bash"
+                ;;
+            2)
+                command_text="brew install anomalyco/tap/opencode"
+                missing_tool="brew"
+                ;;
+            3)
+                command_text="bun add -g opencode-ai"
+                missing_tool="bun"
+                ;;
+            4)
+                command_text="npm i -g opencode-ai"
+                missing_tool="npm"
+                ;;
+            5)
+                command_text="paru -S opencode"
+                missing_tool="paru"
+                ;;
+            s|skip|n|no)
+                return 0
+                ;;
+            *)
+                printf 'post-install: invalid OpenCode install choice: %s\n' "$choice" >&2
+                continue
+                ;;
+        esac
+
+        if opencode_install_command_available "$command_text"; then
+            printf '%s\n' "$command_text"
+            return 0
+        fi
+
+        printf 'post-install warning: selected OpenCode install method requires %s, but it is not on PATH.\n' "$missing_tool" >&2
+        printf 'post-install: choose another OpenCode install method or skip.\n' >&2
+    done
 }
 
 run_opencode_install_command() {
@@ -294,25 +372,16 @@ interactive_harness_setup_wizard() {
     if command -v opencode >/dev/null 2>&1; then
         printf 'post-install: opencode already available\n'
     else
-        recommendation="$(recommended_opencode_install_command)"
         printf 'post-install: opencode is not installed or not on PATH\n'
-        printf 'Recommended install command for this machine:\n'
-        printf '  %s\n' "$recommendation"
-        printf 'Other supported OpenCode install options:\n'
-        printf '  curl -fsSL https://opencode.ai/install | bash\n'
-        printf '  npm i -g opencode-ai\n'
-        printf '  bun add -g opencode-ai\n'
-        printf '  brew install anomalyco/tap/opencode\n'
-        printf '  paru -S opencode\n'
-        printf 'Install OpenCode now with the recommended command? [Y/n] '
-        read -r reply || reply=""
-        reply="$(to_lower "$reply")"
-        if [[ "$reply" != "n" && "$reply" != "no" ]]; then
+        recommendation="$(prompt_opencode_install_choice)"
+        if [[ -n "$recommendation" ]]; then
             if run_opencode_install_command "$recommendation"; then
                 printf 'post-install: OpenCode install command completed\n'
             else
                 printf 'post-install warning: OpenCode install command failed; retry manually with: %s\n' "$recommendation" >&2
             fi
+        else
+            printf 'post-install: OpenCode install skipped\n'
         fi
     fi
 
