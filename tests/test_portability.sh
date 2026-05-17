@@ -513,6 +513,10 @@ test_installer_cuda_apt_bootstrap_contract() {
     assert_contains "$installer" "enable_ubuntu_multiverse_best_effort"
     assert_contains "$installer" "install_ubuntu_native_cuda_toolkit"
     assert_contains "$installer" "Ubuntu-native CUDA toolkit setup did not make nvcc available; falling back to CPU runtime"
+    assert_contains "$installer" "cuda_arches_need_legacy_toolkit"
+    assert_contains "$installer" "select_legacy_cuda_toolkit_if_present"
+    assert_contains "$installer" "guard_unsupported_legacy_cuda_architecture"
+    assert_contains "$installer" "install CUDA 11.8 toolkit-only"
     assert_contains "$installer" "detect_cuda_deb_repo_slug"
     assert_contains "$installer" "bootstrap_nvidia_cuda_apt_repo"
     assert_contains "$installer" "bootstrap_nvidia_cuda_apt_repo_for_slug"
@@ -535,6 +539,111 @@ test_installer_cuda_apt_bootstrap_contract() {
     assert_contains "$installer" 'cuda_arches_need_modern_toolkit "$cuda_arches"'
     assert_contains "$installer" '*":$cuda_path/bin:"*)'
     assert_contains "$installer" '*":$cuda_path/lib64:"*)'
+}
+
+test_installer_legacy_cuda_arch_without_legacy_toolkit_falls_back_cpu() {
+    local tmp
+    local helper
+    local stderr_log
+
+    tmp="$(mktemp -d)"
+    helper="$tmp/install-cuda-helpers.sh"
+    stderr_log="$tmp/stderr.log"
+    write_install_cuda_helper_block "$helper"
+
+    # shellcheck disable=SC1090
+    source "$helper"
+    primary_backend="cuda"
+    GGML_CUDA_ARCHITECTURES="52"
+    CMAKE_ARGS=" -DGGML_CUDA_ARCHITECTURES=52 -DOTHER_FLAG=1"
+    LMM_LEGACY_CUDA_PATHS="$tmp/missing-11.8"
+
+    guard_unsupported_legacy_cuda_architecture 2>"$stderr_log"
+    [[ "$primary_backend" == "cpu" ]] || fail "expected legacy CUDA guard to switch to CPU"
+    [[ -z "${GGML_CUDA_ARCHITECTURES:-}" ]] || fail "expected legacy CUDA guard to unset GGML_CUDA_ARCHITECTURES"
+    assert_not_contains "$CMAKE_ARGS" "GGML_CUDA_ARCHITECTURES"
+    assert_contains "$(cat "$stderr_log")" "legacy CUDA GPU detected: 52"
+    assert_contains "$(cat "$stderr_log")" "install CUDA 11.8 toolkit-only"
+}
+
+test_installer_legacy_cuda_arch_selects_existing_cuda_118() {
+    local tmp
+    local helper
+    local legacy_root
+
+    tmp="$(mktemp -d)"
+    helper="$tmp/install-cuda-helpers.sh"
+    legacy_root="$tmp/cuda-11.8"
+    mkdir -p "$legacy_root/bin" "$legacy_root/lib64"
+    write_install_cuda_helper_block "$helper"
+
+    cat >"$legacy_root/bin/nvcc" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+    printf 'Cuda compilation tools, release 11.8, V11.8.89\n'
+fi
+exit 0
+EOF
+    chmod +x "$legacy_root/bin/nvcc"
+
+    # shellcheck disable=SC1090
+    source "$helper"
+    primary_backend="cuda"
+    GGML_CUDA_ARCHITECTURES="52"
+    LMM_LEGACY_CUDA_PATHS="$legacy_root"
+    PATH="/usr/bin:/bin"
+    LD_LIBRARY_PATH="/lib"
+
+    guard_unsupported_legacy_cuda_architecture
+    [[ "$primary_backend" == "cuda" ]] || fail "expected legacy CUDA toolkit to keep CUDA backend"
+    [[ "${LMM_LEGACY_CUDA_SELECTED:-}" == "1" ]] || fail "expected legacy CUDA marker"
+    [[ "$CUDA_HOME" == "$legacy_root" ]] || fail "expected CUDA_HOME to point at legacy toolkit"
+    [[ "$CUDA_PATH" == "$legacy_root" ]] || fail "expected CUDA_PATH to point at legacy toolkit"
+    [[ "$CUDAToolkit_ROOT" == "$legacy_root" ]] || fail "expected CUDAToolkit_ROOT to point at legacy toolkit"
+    assert_contains "$PATH" "$legacy_root/bin"
+    assert_contains "$LD_LIBRARY_PATH" "$legacy_root/lib64"
+}
+
+test_installer_ubuntu2604_legacy_arch_does_not_install_native_cuda13() {
+    local tmp
+    local helper
+    local fake_bin
+    local os_release
+    local apt_log
+
+    tmp="$(mktemp -d)"
+    helper="$tmp/install-cuda-helpers.sh"
+    fake_bin="$tmp/bin"
+    os_release="$tmp/os-release"
+    apt_log="$tmp/apt.log"
+    mkdir -p "$fake_bin"
+    write_install_cuda_helper_block "$helper"
+
+    cat >"$os_release" <<'EOF'
+ID=ubuntu
+VERSION_ID="26.04"
+EOF
+
+    cat >"$fake_bin/apt-get" <<EOF
+#!/usr/bin/env bash
+printf 'apt-get %s\n' "\$*" >>"$apt_log"
+exit 0
+EOF
+    chmod +x "$fake_bin/apt-get"
+
+    # shellcheck disable=SC1090
+    source "$helper"
+    PATH="$fake_bin:/usr/bin:/bin"
+    CUDA_OS_RELEASE_FILE="$os_release"
+    primary_backend="cuda"
+    GGML_CUDA_ARCHITECTURES="52"
+    LMM_LEGACY_CUDA_PATHS="$tmp/missing-11.8"
+
+    guard_unsupported_legacy_cuda_architecture >/dev/null 2>&1
+    [[ "$primary_backend" == "cpu" ]] || fail "expected Ubuntu 26.04 legacy arch to remain CPU fallback"
+    if [[ -f "$apt_log" ]]; then
+        assert_not_contains "$(cat "$apt_log")" "cuda-toolkit"
+    fi
 }
 
 test_installer_ubuntu2604_native_cuda_path_uses_cuda_toolkit_only() {
@@ -2975,6 +3084,9 @@ main() {
     test_dependency_install_preview_exists
     test_interactive_installer_declares_cuda_toolkit_install
     test_installer_cuda_apt_bootstrap_contract
+    test_installer_legacy_cuda_arch_without_legacy_toolkit_falls_back_cpu
+    test_installer_legacy_cuda_arch_selects_existing_cuda_118
+    test_installer_ubuntu2604_legacy_arch_does_not_install_native_cuda13
     test_installer_ubuntu2604_native_cuda_path_uses_cuda_toolkit_only
     test_installer_ubuntu2604_native_cuda_path_falls_through_when_nvcc_missing
     test_installer_cuda_helper_slug_arch_and_apt_batching

@@ -732,10 +732,32 @@ detect_cuda_architectures() {
     printf '%s\n' "${arches[*]}"
 }
 
+cuda_arches_need_legacy_toolkit() {
+    local cuda_arches="${1:-}"
+    local arch=""
+
+    [[ -n "$cuda_arches" ]] || cuda_arches="${GGML_CUDA_ARCHITECTURES:-}"
+    [[ -n "$cuda_arches" ]] || cuda_arches="$(detect_cuda_architectures || true)"
+    [[ -n "$cuda_arches" ]] || return 1
+
+    IFS=';' read -r -a _cuda_arch_array <<< "$cuda_arches"
+    for arch in "${_cuda_arch_array[@]}"; do
+        case "$arch" in
+            50|52|53|60|61|62|70|72)
+                return 0
+                ;;
+        esac
+    done
+
+    return 1
+}
+
 cuda_arches_need_modern_toolkit() {
     local cuda_arches="${1:-}"
     local arch=""
 
+    [[ -n "$cuda_arches" ]] || cuda_arches="${GGML_CUDA_ARCHITECTURES:-}"
+    [[ -n "$cuda_arches" ]] || cuda_arches="$(detect_cuda_architectures || true)"
     [[ -n "$cuda_arches" ]] || return 1
 
     IFS=';' read -r -a _cuda_arch_array <<< "$cuda_arches"
@@ -748,6 +770,73 @@ cuda_arches_need_modern_toolkit() {
     done
 
     return 1
+}
+
+legacy_cuda_toolkit_paths() {
+    if [[ -n "${LMM_LEGACY_CUDA_PATHS:-}" ]]; then
+        printf '%s\n' "$LMM_LEGACY_CUDA_PATHS"
+    else
+        printf '/usr/local/cuda-11.8 /opt/cuda-11.8\n'
+    fi
+}
+
+select_legacy_cuda_toolkit_if_present() {
+    [[ "${primary_backend:-}" == "cuda" ]] || return 0
+    cuda_arches_need_legacy_toolkit || return 1
+
+    local legacy_path=""
+    local legacy_paths=""
+
+    legacy_paths="$(legacy_cuda_toolkit_paths)"
+    for legacy_path in $legacy_paths; do
+        if [[ -x "$legacy_path/bin/nvcc" ]]; then
+            printf 'post-install: legacy CUDA architecture detected; selecting toolkit: %s\n' "$legacy_path"
+
+            case ":$PATH:" in
+                *":$legacy_path/bin:"*) ;;
+                *) export PATH="$legacy_path/bin:$PATH" ;;
+            esac
+
+            case ":${LD_LIBRARY_PATH:-}:" in
+                *":$legacy_path/lib64:"*) ;;
+                *) export LD_LIBRARY_PATH="$legacy_path/lib64:${LD_LIBRARY_PATH:-}" ;;
+            esac
+
+            export CUDA_HOME="$legacy_path"
+            export CUDA_PATH="$legacy_path"
+            export CUDAToolkit_ROOT="$legacy_path"
+            export LMM_LEGACY_CUDA_SELECTED=1
+            hash -r 2>/dev/null || true
+            "$legacy_path/bin/nvcc" --version || true
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+guard_unsupported_legacy_cuda_architecture() {
+    [[ "${primary_backend:-}" == "cuda" ]] || return 0
+    cuda_arches_need_legacy_toolkit || return 0
+
+    if select_legacy_cuda_toolkit_if_present; then
+        return 0
+    fi
+
+    printf 'post-install warning: legacy CUDA GPU detected: %s\n' "${GGML_CUDA_ARCHITECTURES:-unknown}" >&2
+    printf 'post-install warning: active CUDA toolkit does not appear suitable for this GPU.\n' >&2
+    printf 'post-install warning: install CUDA Toolkit 11.8 manually, or use CPU fallback.\n' >&2
+    printf 'post-install warning: CUDA build will be skipped to avoid guaranteed failure.\n' >&2
+    printf 'post-install hint: legacy CUDA setup example:\n' >&2
+    printf '  install CUDA 11.8 toolkit-only from NVIDIA runfile, then rerun:\n' >&2
+    printf '  export PATH=/usr/local/cuda-11.8/bin:$PATH\n' >&2
+    printf '  export LD_LIBRARY_PATH=/usr/local/cuda-11.8/lib64:$LD_LIBRARY_PATH\n' >&2
+    printf '  export GGML_CUDA_ARCHITECTURES=%s\n' "${GGML_CUDA_ARCHITECTURES:-52}" >&2
+    printf '  llama-model build-runtime --backend cuda\n' >&2
+
+    primary_backend="cpu"
+    unset GGML_CUDA_ARCHITECTURES
+    remove_cmake_cuda_arch_arg
 }
 
 nvcc_supports_cuda_architecture() {
@@ -1012,6 +1101,25 @@ configure_cuda_toolkit_for_build() {
     local nvcc_release=""
     local cuda_arches="${GGML_CUDA_ARCHITECTURES:-}"
 
+    if [[ "${primary_backend:-}" != "cuda" ]]; then
+        return 0
+    fi
+
+    if cuda_arches_need_legacy_toolkit; then
+        if [[ "${LMM_LEGACY_CUDA_SELECTED:-}" == "1" ]]; then
+            configure_cuda_host_compiler
+            nvcc_release="$(detect_nvcc_release || true)"
+            printf 'post-install: active nvcc release: %s\n' "${nvcc_release:-unknown}"
+            return 0
+        fi
+
+        printf 'post-install warning: legacy CUDA architecture has no selected legacy toolkit; falling back to CPU runtime\n' >&2
+        primary_backend="cpu"
+        unset GGML_CUDA_ARCHITECTURES
+        remove_cmake_cuda_arch_arg
+        return 0
+    fi
+
     if is_ubuntu_2604_or_newer; then
         if install_ubuntu_native_cuda_toolkit; then
             configure_cuda_host_compiler
@@ -1275,6 +1383,7 @@ build_runtime_during_install() {
     fi
 
     configure_cuda_architectures_for_build
+    guard_unsupported_legacy_cuda_architecture
     configure_cuda_toolkit_for_build
 
     # Print exact compiler contract for CUDA builds to catch GCC/CUDA mismatches.
