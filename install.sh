@@ -732,19 +732,16 @@ build_runtime_during_install() {
     # checkout.  Without this, build-runtime resolves APP_ROOT to the repo
     # directory (because web/ exists there) and writes binaries to the wrong
     # location.
-    local build_failed=0
-
     if ! LLAMA_SERVER_RUNTIME_DIR="${APP_SHARE_DIR}/runtime" \
          LLAMA_AUTO_INSTALL_DEPS=1 \
          "$bin" build-runtime --backend "$primary_backend"; then
-        build_failed=1
         printf 'post-install: %s runtime build failed\n' "$primary_backend" >&2
 
         if [[ "$primary_backend" != "cpu" ]]; then
             printf 'post-install: retrying CPU fallback runtime\n' >&2
             primary_backend="cpu"
             unset GGML_CUDA_ARCHITECTURES
-            export CMAKE_ARGS="${CMAKE_ARGS:-}"
+            export CMAKE_ARGS="$(printf '%s\n' "${CMAKE_ARGS:-}" | sed -E 's/(^|[[:space:]])-DGGML_CUDA_ARCHITECTURES=[^[:space:]]+//g' | xargs)"
 
             if ! LLAMA_SERVER_RUNTIME_DIR="${APP_SHARE_DIR}/runtime" \
                  LLAMA_AUTO_INSTALL_DEPS=1 \
@@ -1326,7 +1323,8 @@ printf '  default route mode: LLAMA_MODEL_HARNESS_MODE=%s\n' "$(default_value LL
 if [[ -t 0 && -t 1 ]]; then
     runtime_dir="${APP_SHARE_DIR}/runtime/llama-server"
     has_runtime="no"
-    if [[ -d "$runtime_dir" ]] && find "$runtime_dir" -name 'llama-server' -type f -print -quit 2>/dev/null | grep -q .; then
+    if [[ -d "$runtime_dir" ]] && \
+       find "$runtime_dir" -maxdepth 2 -name 'llama-server' -type f -executable -print -quit 2>/dev/null | grep -q .; then
         has_runtime="yes"
     fi
     if [[ "$has_runtime" != "yes" ]]; then
