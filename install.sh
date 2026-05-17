@@ -523,8 +523,9 @@ configure_cuda_architectures_for_build() {
 #   - Detects host OS/arch/backends using the installed `llama-model doctor`
 #   - If a GPU backend (cuda/vulkan/metal) is available on the host, attempts
 #     to build that backend + CPU fallback automatically
-#   - Silently degrades to CPU-only if GPU build dependencies are missing
-#   - Never blocks; build failures are logged, not fatal
+#   - Detects CUDA compute capability and exports GGML_CUDA_ARCHITECTURES
+#   - Retries CPU fallback automatically if GPU build fails
+#   - Interactively asks before building in terminal sessions
 build_runtime_during_install() {
     local bin="$BIN_DIR/llama-model"
     [[ -x "$bin" ]] || { printf 'post-install: skipping runtime build — %s not installed yet\n' "$bin" >&2; return 0; }
@@ -685,7 +686,7 @@ build_runtime_during_install() {
             printf 'note: set LMM_AUTO_BUILD_RUNTIME=1 to force, or run manually after installing CUDA toolkit\n'
             primary_backend="cpu"
             printf 'post-install: falling back to CPU-only runtime\n'
-        elif command -v nvcc >/dev/null 2>&1; then
+        elif [[ "$primary_backend" == "cuda" ]] && command -v nvcc >/dev/null 2>&1; then
             # nvcc is available - proceed with GPU build
             printf 'post-install: CUDA host with nvcc available; building CUDA runtime\n'
         elif [[ "$primary_backend" == "cuda" ]] && ! command -v nvcc >/dev/null 2>&1; then
