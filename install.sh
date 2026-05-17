@@ -391,6 +391,7 @@ detect_cuda_deb_repo_slug() {
     local os_id=""
     local version_id=""
     local version_major=""
+    local ubuntu_codename=""
 
     [[ -r "$os_release" ]] || return 1
 
@@ -400,8 +401,10 @@ detect_cuda_deb_repo_slug() {
     os_id="${ID:-}"
     version_id="${VERSION_ID:-}"
     version_major="${version_id%%.*}"
+    ubuntu_codename="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
 
     case "${os_id}:${version_id}" in
+        ubuntu:26.04) printf 'ubuntu2604\n' ;;
         ubuntu:24.04) printf 'ubuntu2404\n' ;;
         ubuntu:22.04) printf 'ubuntu2204\n' ;;
         ubuntu:20.04) printf 'ubuntu2004\n' ;;
@@ -409,14 +412,26 @@ detect_cuda_deb_repo_slug() {
         debian:12)    printf 'debian12\n' ;;
         debian:11)    printf 'debian11\n' ;;
         *)
-            case "${os_id}:${version_major}" in
-                ubuntu:24) printf 'ubuntu2404\n' ;;
-                ubuntu:22) printf 'ubuntu2204\n' ;;
-                ubuntu:20) printf 'ubuntu2004\n' ;;
-                debian:13) printf 'debian13\n' ;;
-                debian:12) printf 'debian12\n' ;;
-                debian:11) printf 'debian11\n' ;;
-                *) return 1 ;;
+            case "$ubuntu_codename" in
+                resolute) printf 'ubuntu2604\n' ;;
+                noble)    printf 'ubuntu2404\n' ;;
+                jammy)    printf 'ubuntu2204\n' ;;
+                focal)    printf 'ubuntu2004\n' ;;
+                trixie)   printf 'debian13\n' ;;
+                bookworm) printf 'debian12\n' ;;
+                bullseye) printf 'debian11\n' ;;
+                *)
+                    case "${os_id}:${version_major}" in
+                        ubuntu:26) printf 'ubuntu2604\n' ;;
+                        ubuntu:24) printf 'ubuntu2404\n' ;;
+                        ubuntu:22) printf 'ubuntu2204\n' ;;
+                        ubuntu:20) printf 'ubuntu2004\n' ;;
+                        debian:13) printf 'debian13\n' ;;
+                        debian:12) printf 'debian12\n' ;;
+                        debian:11) printf 'debian11\n' ;;
+                        *) return 1 ;;
+                    esac
+                    ;;
             esac
             ;;
     esac
@@ -445,6 +460,7 @@ bootstrap_nvidia_cuda_apt_repo() {
 
     local repo_slug=""
     local repo_arch=""
+    local fallback_slug=""
     local keyring_deb="cuda-keyring_1.1-1_all.deb"
     local keyring_url=""
     local tmp_deb=""
@@ -470,27 +486,43 @@ bootstrap_nvidia_cuda_apt_repo() {
         return 0
     fi
 
-    keyring_url="https://developer.download.nvidia.com/compute/cuda/repos/${repo_slug}/${repo_arch}/${keyring_deb}"
     tmp_deb="$(mktemp "${TMPDIR:-/tmp}/cuda-keyring.XXXXXX.deb")"
 
-    printf 'post-install: bootstrapping NVIDIA CUDA apt repo: %s/%s\n' "$repo_slug" "$repo_arch"
+    download_cuda_keyring() {
+        local slug="$1"
 
-    if command -v curl >/dev/null 2>&1; then
-        if ! curl -fsSL "$keyring_url" -o "$tmp_deb"; then
-            printf 'post-install warning: failed to download CUDA keyring: %s\n' "$keyring_url" >&2
+        keyring_url="https://developer.download.nvidia.com/compute/cuda/repos/${slug}/${repo_arch}/${keyring_deb}"
+        printf 'post-install: bootstrapping NVIDIA CUDA apt repo: %s/%s\n' "$slug" "$repo_arch"
+
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL "$keyring_url" -o "$tmp_deb"
+        elif command -v wget >/dev/null 2>&1; then
+            wget -qO "$tmp_deb" "$keyring_url"
+        else
+            printf 'post-install warning: curl/wget unavailable; cannot download CUDA keyring\n' >&2
+            return 2
+        fi
+    }
+
+    if ! download_cuda_keyring "$repo_slug"; then
+        printf 'post-install warning: failed to download CUDA keyring: %s\n' "$keyring_url" >&2
+
+        case "$repo_slug" in
+            ubuntu2604) fallback_slug="ubuntu2404" ;;
+        esac
+
+        if [[ -n "$fallback_slug" ]]; then
+            printf 'post-install warning: Ubuntu 26.04 detected; NVIDIA ubuntu2604 CUDA repo was unavailable or failed to download.\n' >&2
+            printf 'post-install warning: using NVIDIA ubuntu2404 CUDA repo as compatibility fallback.\n' >&2
+            if ! download_cuda_keyring "$fallback_slug"; then
+                printf 'post-install warning: failed to download CUDA keyring fallback: %s\n' "$keyring_url" >&2
+                rm -f "$tmp_deb"
+                return 0
+            fi
+        else
             rm -f "$tmp_deb"
             return 0
         fi
-    elif command -v wget >/dev/null 2>&1; then
-        if ! wget -qO "$tmp_deb" "$keyring_url"; then
-            printf 'post-install warning: failed to download CUDA keyring: %s\n' "$keyring_url" >&2
-            rm -f "$tmp_deb"
-            return 0
-        fi
-    else
-        printf 'post-install warning: curl/wget unavailable; cannot download CUDA keyring\n' >&2
-        rm -f "$tmp_deb"
-        return 0
     fi
 
     if ! run_root_cmd dpkg -i "$tmp_deb"; then

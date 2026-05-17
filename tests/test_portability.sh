@@ -585,6 +585,20 @@ EOF
     CUDA_OS_RELEASE_FILE="$os_release"
 
     [[ "$(detect_cuda_deb_repo_slug)" == "ubuntu2404" ]] || fail "expected ubuntu2404 CUDA repo slug"
+
+    cat >"$os_release" <<'EOF'
+ID=ubuntu
+VERSION_ID="26.04"
+VERSION_CODENAME=resolute
+EOF
+    [[ "$(detect_cuda_deb_repo_slug)" == "ubuntu2604" ]] || fail "expected ubuntu2604 CUDA repo slug for Ubuntu 26.04"
+
+    cat >"$os_release" <<'EOF'
+ID=ubuntu
+VERSION_CODENAME=resolute
+EOF
+    [[ "$(detect_cuda_deb_repo_slug)" == "ubuntu2604" ]] || fail "expected ubuntu2604 CUDA repo slug for resolute codename"
+
     [[ "$(detect_cuda_deb_repo_arch)" == "x86_64" ]] || fail "expected x86_64 CUDA repo arch"
     apt_package_available build-essential || fail "expected apt-cache show availability to pass"
     apt_package_available pkg-policy || fail "expected apt-cache policy Candidate availability to pass"
@@ -679,6 +693,149 @@ EOF
     assert_contains "$(cat "$command_log")" "apt-get update -qq"
     assert_not_contains "$(cat "$command_log")" "curl"
     assert_not_contains "$(cat "$command_log")" "dpkg -i"
+}
+
+test_installer_cuda_ubuntu2604_uses_native_repo_before_fallback() {
+    local tmp
+    local helper
+    local fake_bin
+    local os_release
+    local command_log
+
+    tmp="$(mktemp -d)"
+    helper="$tmp/install-cuda-helpers.sh"
+    fake_bin="$tmp/bin"
+    os_release="$tmp/os-release"
+    command_log="$tmp/commands.log"
+    mkdir -p "$fake_bin"
+    write_install_cuda_helper_block "$helper"
+
+    cat >"$os_release" <<'EOF'
+ID=ubuntu
+VERSION_ID="26.04"
+VERSION_CODENAME=resolute
+EOF
+
+    cat >"$fake_bin/dpkg" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+    --print-architecture) printf 'amd64\n'; exit 0 ;;
+    -s) exit 1 ;;
+    -i) printf 'dpkg %s\n' "\$*" >>"$command_log"; exit 0 ;;
+esac
+exit 1
+EOF
+    chmod +x "$fake_bin/dpkg"
+
+    cat >"$fake_bin/curl" <<EOF
+#!/usr/bin/env bash
+printf 'curl %s\n' "\$*" >>"$command_log"
+out=''
+while [[ \$# -gt 0 ]]; do
+    if [[ "\$1" == "-o" ]]; then
+        shift
+        out="\$1"
+    fi
+    shift || true
+done
+printf 'fake deb\n' >"\$out"
+exit 0
+EOF
+    chmod +x "$fake_bin/curl"
+
+    cat >"$fake_bin/apt-get" <<EOF
+#!/usr/bin/env bash
+printf 'apt-get %s\n' "\$*" >>"$command_log"
+exit 0
+EOF
+    chmod +x "$fake_bin/apt-get"
+
+    # shellcheck disable=SC1090
+    source "$helper"
+    run_root_cmd() { "$@"; }
+    PATH="$fake_bin:/usr/bin:/bin"
+    CUDA_OS_RELEASE_FILE="$os_release"
+    primary_backend="cuda"
+
+    bootstrap_nvidia_cuda_apt_repo
+    assert_contains "$(cat "$command_log")" "ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb"
+    assert_not_contains "$(cat "$command_log")" "ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb"
+}
+
+test_installer_cuda_ubuntu2604_falls_back_to_ubuntu2404_on_download_failure() {
+    local tmp
+    local helper
+    local fake_bin
+    local os_release
+    local command_log
+    local stderr_log
+
+    tmp="$(mktemp -d)"
+    helper="$tmp/install-cuda-helpers.sh"
+    fake_bin="$tmp/bin"
+    os_release="$tmp/os-release"
+    command_log="$tmp/commands.log"
+    stderr_log="$tmp/stderr.log"
+    mkdir -p "$fake_bin"
+    write_install_cuda_helper_block "$helper"
+
+    cat >"$os_release" <<'EOF'
+ID=ubuntu
+VERSION_ID="26.04"
+VERSION_CODENAME=resolute
+EOF
+
+    cat >"$fake_bin/dpkg" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+    --print-architecture) printf 'amd64\n'; exit 0 ;;
+    -s) exit 1 ;;
+    -i) printf 'dpkg %s\n' "\$*" >>"$command_log"; exit 0 ;;
+esac
+exit 1
+EOF
+    chmod +x "$fake_bin/dpkg"
+
+    cat >"$fake_bin/curl" <<EOF
+#!/usr/bin/env bash
+printf 'curl %s\n' "\$*" >>"$command_log"
+out=''
+url=''
+while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+        -o) shift; out="\$1" ;;
+        http*) url="\$1" ;;
+    esac
+    shift || true
+done
+if [[ "\$url" == *"/ubuntu2604/"* ]]; then
+    exit 22
+fi
+printf 'fake deb\n' >"\$out"
+exit 0
+EOF
+    chmod +x "$fake_bin/curl"
+
+    cat >"$fake_bin/apt-get" <<EOF
+#!/usr/bin/env bash
+printf 'apt-get %s\n' "\$*" >>"$command_log"
+exit 0
+EOF
+    chmod +x "$fake_bin/apt-get"
+
+    # shellcheck disable=SC1090
+    source "$helper"
+    run_root_cmd() { "$@"; }
+    PATH="$fake_bin:/usr/bin:/bin"
+    CUDA_OS_RELEASE_FILE="$os_release"
+    primary_backend="cuda"
+
+    bootstrap_nvidia_cuda_apt_repo 2>"$stderr_log"
+    assert_contains "$(cat "$command_log")" "ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb"
+    assert_contains "$(cat "$command_log")" "ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb"
+    assert_contains "$(cat "$stderr_log")" "using NVIDIA ubuntu2404 CUDA repo as compatibility fallback"
+    assert_contains "$(cat "$command_log")" "dpkg -i"
+    assert_contains "$(cat "$command_log")" "apt-get update -qq"
 }
 
 test_installer_validates_runtime_bundle_subdirectories() {
@@ -2477,6 +2634,8 @@ main() {
     test_installer_cuda_apt_bootstrap_contract
     test_installer_cuda_helper_slug_arch_and_apt_batching
     test_installer_cuda_repo_bootstrap_is_mockable_and_nonfatal
+    test_installer_cuda_ubuntu2604_uses_native_repo_before_fallback
+    test_installer_cuda_ubuntu2604_falls_back_to_ubuntu2404_on_download_failure
     test_installer_validates_runtime_bundle_subdirectories
     test_interactive_installer_uses_user_basedpyright_install
     test_interactive_installer_has_harness_setup_wizard
