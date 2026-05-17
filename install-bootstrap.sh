@@ -70,7 +70,21 @@ if ! need_cmd bash; then
     exit 1
 fi
 
+PAYLOAD_INSTALLER="$SOURCE_DIR/install.sh"
+
+if [ ! -f "$PAYLOAD_INSTALLER" ]; then
+    printf '%s\n' "error: installer payload is missing install.sh" >&2
+    exit 1
+fi
+
+chmod 0755 "$PAYLOAD_INSTALLER" || {
+    printf '%s\n' "error: failed to mark install.sh executable" >&2
+    exit 1
+}
+
 printf '%s\n' "Running llama-model-manager installer..."
+cd "$SOURCE_DIR" || exit 1
+
 TTY_REATTACH_OK="no"
 if [ -r /dev/tty ]; then
     if sh -c 'exec </dev/tty' 2>/dev/null; then
@@ -79,7 +93,7 @@ if [ -r /dev/tty ]; then
 fi
 
 if [ "$TTY_REATTACH_OK" = "yes" ]; then
-    exec bash "$SOURCE_DIR/install.sh" </dev/tty
+    exec bash ./install.sh </dev/tty
 fi
 
-exec bash "$SOURCE_DIR/install.sh"
+exec bash ./install.sh
