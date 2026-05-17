@@ -498,8 +498,9 @@ test_interactive_installer_declares_cuda_toolkit_install() {
 
     installer="$(cat "$ROOT_DIR/install.sh")"
     assert_contains "$installer" "CUDA-capable NVIDIA GPU detected, but nvcc is missing."
-    assert_contains "$installer" "configure NVIDIA CUDA apt repository"
-    assert_contains "$installer" "install CUDA Toolkit 12.9 where compatible"
+    assert_contains "$installer" "Ubuntu-native cuda-toolkit on Ubuntu 26.04+"
+    assert_contains "$installer" "otherwise NVIDIA CUDA apt repo packages"
+    assert_contains "$installer" "select gcc/g++ 13 or 14 as CUDA host compiler"
     assert_contains "$installer" "fall back to CPU if CUDA fails"
     assert_contains "$installer" "LLAMA_AUTO_INSTALL_DEPS=1"
 }
@@ -508,6 +509,10 @@ test_installer_cuda_apt_bootstrap_contract() {
     local installer
 
     installer="$(cat "$ROOT_DIR/install.sh")"
+    assert_contains "$installer" "is_ubuntu_2604_or_newer"
+    assert_contains "$installer" "enable_ubuntu_multiverse_best_effort"
+    assert_contains "$installer" "install_ubuntu_native_cuda_toolkit"
+    assert_contains "$installer" "Ubuntu-native CUDA toolkit setup did not make nvcc available; falling back to CPU runtime"
     assert_contains "$installer" "detect_cuda_deb_repo_slug"
     assert_contains "$installer" "bootstrap_nvidia_cuda_apt_repo"
     assert_contains "$installer" "bootstrap_nvidia_cuda_apt_repo_for_slug"
@@ -525,9 +530,144 @@ test_installer_cuda_apt_bootstrap_contract() {
     assert_contains "$installer" "version-pinned CUDA toolkit packages unavailable; trying generic/current CUDA toolkit packages"
     assert_contains "$installer" "cuda-compiler"
     assert_contains "$installer" "libcublas-dev"
+    assert_not_contains "$installer" "_UCLIBC_"
+    assert_not_contains "$installer" "__CUDACC_RTC__"
     assert_contains "$installer" 'cuda_arches_need_modern_toolkit "$cuda_arches"'
     assert_contains "$installer" '*":$cuda_path/bin:"*)'
     assert_contains "$installer" '*":$cuda_path/lib64:"*)'
+}
+
+test_installer_ubuntu2604_native_cuda_path_uses_cuda_toolkit_only() {
+    local tmp
+    local helper
+    local fake_bin
+    local os_release
+    local apt_log
+    local repo_log
+
+    tmp="$(mktemp -d)"
+    helper="$tmp/install-cuda-helpers.sh"
+    fake_bin="$tmp/bin"
+    os_release="$tmp/os-release"
+    apt_log="$tmp/apt.log"
+    repo_log="$tmp/repo.log"
+    mkdir -p "$fake_bin"
+    write_install_cuda_helper_block "$helper"
+
+    cat >"$os_release" <<'EOF'
+ID=ubuntu
+VERSION_ID="26.04"
+VERSION_CODENAME=resolute
+EOF
+
+    cat >"$fake_bin/apt-cache" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "show" ]]; then
+    case "${2:-}" in
+        build-essential|cmake|ninja-build|git|pkg-config|libssl-dev|gcc-13|g++-13|gcc-14|g++-14|cuda-toolkit) exit 0 ;;
+        *) exit 1 ;;
+    esac
+fi
+if [[ "${1:-}" == "policy" ]]; then
+    printf 'Candidate: (none)\n'
+    exit 0
+fi
+exit 1
+EOF
+    chmod +x "$fake_bin/apt-cache"
+
+    cat >"$fake_bin/apt-get" <<EOF
+#!/usr/bin/env bash
+printf 'apt-get %s\n' "\$*" >>"$apt_log"
+exit 0
+EOF
+    chmod +x "$fake_bin/apt-get"
+
+    cat >"$fake_bin/add-apt-repository" <<EOF
+#!/usr/bin/env bash
+printf 'add-apt-repository %s\n' "\$*" >>"$repo_log"
+exit 0
+EOF
+    chmod +x "$fake_bin/add-apt-repository"
+
+    cat >"$fake_bin/nvcc" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+    printf 'Cuda compilation tools, release 13.1, V13.1.80\n'
+fi
+exit 0
+EOF
+    chmod +x "$fake_bin/nvcc"
+
+    # shellcheck disable=SC1090
+    source "$helper"
+    run_root_cmd() { "$@"; }
+    PATH="$fake_bin:/bin"
+    CUDA_OS_RELEASE_FILE="$os_release"
+    primary_backend="cuda"
+
+    is_ubuntu_2604_or_newer || fail "expected Ubuntu 26.04 helper to match"
+    install_ubuntu_native_cuda_toolkit
+
+    assert_contains "$(cat "$repo_log")" "add-apt-repository -y multiverse"
+    assert_contains "$(cat "$apt_log")" "install -y -qq build-essential cmake ninja-build git pkg-config libssl-dev gcc-13 g++-13 gcc-14 g++-14 cuda-toolkit"
+    assert_not_contains "$(cat "$apt_log")" "libcublas-dev"
+    assert_not_contains "$(cat "$apt_log")" "nvidia-cuda-toolkit"
+    assert_not_contains "$(cat "$apt_log")" "nvidia-cuda-dev"
+}
+
+test_installer_ubuntu2604_native_cuda_path_falls_through_when_nvcc_missing() {
+    local tmp
+    local helper
+    local fake_bin
+    local os_release
+    local stderr_log
+
+    tmp="$(mktemp -d)"
+    helper="$tmp/install-cuda-helpers.sh"
+    fake_bin="$tmp/bin"
+    os_release="$tmp/os-release"
+    stderr_log="$tmp/stderr.log"
+    mkdir -p "$fake_bin"
+    ln -s /bin/bash "$fake_bin/bash"
+    write_install_cuda_helper_block "$helper"
+
+    cat >"$os_release" <<'EOF'
+ID=ubuntu
+VERSION_ID="26.04"
+EOF
+
+    cat >"$fake_bin/apt-cache" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "show" ]]; then
+    case "${2:-}" in
+        build-essential|cmake|ninja-build|git|pkg-config|libssl-dev|gcc-13|g++-13|gcc-14|g++-14|cuda-toolkit) exit 0 ;;
+        *) exit 1 ;;
+    esac
+fi
+exit 1
+EOF
+    chmod +x "$fake_bin/apt-cache"
+
+    cat >"$fake_bin/apt-get" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$fake_bin/apt-get"
+
+    # shellcheck disable=SC1090
+    source "$helper"
+    run_root_cmd() { "$@"; }
+    PATH="$fake_bin"
+    CUDA_OS_RELEASE_FILE="$os_release"
+    CUDA_DEFAULT_PATH="$tmp/missing-cuda"
+    primary_backend="cuda"
+
+    if install_ubuntu_native_cuda_toolkit 2>"$stderr_log"; then
+        fail "expected Ubuntu-native CUDA path to fail when nvcc remains missing"
+    fi
+    PATH="/usr/bin:/bin"
+    assert_contains "$(cat "$stderr_log")" "Ubuntu-native cuda-toolkit did not provide nvcc"
 }
 
 test_installer_cuda_helper_slug_arch_and_apt_batching() {
@@ -2835,6 +2975,8 @@ main() {
     test_dependency_install_preview_exists
     test_interactive_installer_declares_cuda_toolkit_install
     test_installer_cuda_apt_bootstrap_contract
+    test_installer_ubuntu2604_native_cuda_path_uses_cuda_toolkit_only
+    test_installer_ubuntu2604_native_cuda_path_falls_through_when_nvcc_missing
     test_installer_cuda_helper_slug_arch_and_apt_batching
     test_installer_cuda_repo_bootstrap_is_mockable_and_nonfatal
     test_installer_cuda_ubuntu2604_uses_native_repo_before_fallback

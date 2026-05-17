@@ -450,6 +450,52 @@ detect_cuda_deb_repo_arch() {
     esac
 }
 
+is_ubuntu_2604_or_newer() {
+    local os_release="${CUDA_OS_RELEASE_FILE:-/etc/os-release}"
+    local os_id=""
+    local version_id=""
+    local version_major=""
+    local ubuntu_codename=""
+
+    [[ -r "$os_release" ]] || return 1
+
+    # shellcheck disable=SC1090
+    . "$os_release"
+
+    os_id="${ID:-}"
+    version_id="${VERSION_ID:-}"
+    version_major="${version_id%%.*}"
+    ubuntu_codename="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
+
+    [[ "$os_id" == "ubuntu" ]] || return 1
+
+    case "$ubuntu_codename" in
+        resolute) return 0 ;;
+    esac
+
+    [[ "$version_major" =~ ^[0-9]+$ ]] || return 1
+    ((version_major >= 26))
+}
+
+enable_ubuntu_multiverse_best_effort() {
+    command -v apt-get >/dev/null 2>&1 || return 0
+
+    if command -v add-apt-repository >/dev/null 2>&1; then
+        run_root_cmd add-apt-repository -y multiverse || true
+        run_root_cmd apt-get update -qq || true
+        return 0
+    fi
+
+    install_apt_packages_best_effort software-properties-common
+
+    if command -v add-apt-repository >/dev/null 2>&1; then
+        run_root_cmd add-apt-repository -y multiverse || true
+        run_root_cmd apt-get update -qq || true
+    else
+        printf 'post-install warning: add-apt-repository unavailable; cannot automatically enable Ubuntu multiverse\n' >&2
+    fi
+}
+
 cuda_repo_slug_fallbacks() {
     local primary="$1"
 
@@ -860,6 +906,53 @@ select_default_cuda_if_present() {
     printf 'post-install: selected default CUDA toolkit path: %s\n' "$cuda_path"
 }
 
+install_ubuntu_native_cuda_toolkit() {
+    [[ "${primary_backend:-}" == "cuda" ]] || return 0
+    is_ubuntu_2604_or_newer || return 1
+    command -v apt-get >/dev/null 2>&1 || return 1
+
+    local cuda_path="${CUDA_DEFAULT_PATH:-/usr/local/cuda}"
+
+    printf 'post-install: Ubuntu 26.04+ detected; using Ubuntu-native CUDA toolkit package path\n'
+
+    enable_ubuntu_multiverse_best_effort
+
+    install_apt_packages_best_effort \
+        build-essential \
+        cmake \
+        ninja-build \
+        git \
+        pkg-config \
+        libssl-dev \
+        gcc-13 \
+        g++-13 \
+        gcc-14 \
+        g++-14 \
+        cuda-toolkit
+
+    select_default_cuda_if_present || true
+
+    if command -v nvcc >/dev/null 2>&1; then
+        printf 'post-install: nvcc available after Ubuntu-native CUDA toolkit install\n'
+        nvcc --version || true
+        return 0
+    fi
+
+    if [[ -x "$cuda_path/bin/nvcc" ]]; then
+        case ":$PATH:" in
+            *":$cuda_path/bin:"*) ;;
+            *) export PATH="$cuda_path/bin:$PATH" ;;
+        esac
+        hash -r 2>/dev/null || true
+        printf 'post-install: nvcc available at %s/bin/nvcc\n' "$cuda_path"
+        "$cuda_path/bin/nvcc" --version || true
+        return 0
+    fi
+
+    printf 'post-install warning: Ubuntu-native cuda-toolkit did not provide nvcc in PATH\n' >&2
+    return 1
+}
+
 nvcc_supports_any_detected_cuda_architecture() {
     local cuda_arches=""
     local arch=""
@@ -918,6 +1011,27 @@ configure_cuda_toolkit_for_build() {
 
     local nvcc_release=""
     local cuda_arches="${GGML_CUDA_ARCHITECTURES:-}"
+
+    if is_ubuntu_2604_or_newer; then
+        if install_ubuntu_native_cuda_toolkit; then
+            configure_cuda_host_compiler
+
+            nvcc_release="$(detect_nvcc_release || true)"
+            printf 'post-install: active nvcc release: %s\n' "${nvcc_release:-unknown}"
+
+            if ! nvcc_supports_any_detected_cuda_architecture; then
+                printf 'post-install warning: active CUDA toolkit may not support detected CUDA architecture; CUDA build may fail\n' >&2
+            fi
+
+            return 0
+        fi
+
+        printf 'post-install warning: Ubuntu-native CUDA toolkit setup did not make nvcc available; falling back to CPU runtime\n' >&2
+        primary_backend="cpu"
+        unset GGML_CUDA_ARCHITECTURES
+        remove_cmake_cuda_arch_arg
+        return 0
+    fi
 
     bootstrap_nvidia_cuda_apt_repo
 
@@ -1124,7 +1238,8 @@ build_runtime_during_install() {
         printf 'post-install: host %s backend detected\n' "$primary_backend"
         if [[ "$primary_backend" == "cuda" ]] && ! command -v nvcc >/dev/null 2>&1; then
             printf 'post-install: CUDA-capable NVIDIA GPU detected, but nvcc is missing.\n'
-            printf 'post-install: recommended action is installer-managed CUDA setup: configure NVIDIA CUDA apt repository, install CUDA Toolkit 12.9 where compatible, install gcc/g++ 13 or 14 host compiler packages, build CUDA runtime, and fall back to CPU if CUDA fails.\n'
+            printf 'post-install: installer-managed setup will use Ubuntu-native cuda-toolkit on Ubuntu 26.04+, otherwise NVIDIA CUDA apt repo packages.\n'
+            printf 'post-install: it will install build tools, select gcc/g++ 13 or 14 as CUDA host compiler, build CUDA runtime, and fall back to CPU if CUDA fails.\n'
         fi
         printf 'Proceed with installer-managed build dependency setup and local llama.cpp runtime compile now? [Y/n] '
         reply=""
