@@ -17,6 +17,7 @@ const STORAGE_KEYS = {
 };
 
 function $(selector) {
+  if (typeof selector !== "string") return selector || null;
   return document.querySelector(selector);
 }
 

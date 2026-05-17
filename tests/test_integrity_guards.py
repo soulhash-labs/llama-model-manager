@@ -50,6 +50,12 @@ def test_web_app_js_api_helper_robust():
     assert "options.headers" in source
 
 
+def test_web_app_js_selector_helper_accepts_existing_nodes():
+    source = read("web/app.js")
+    assert 'typeof selector !== "string"' in source
+    assert "return selector || null" in source
+
+
 def test_gateway_context_budget_config_present():
     source = read("scripts/lmm_config.py")
     for needle in [
