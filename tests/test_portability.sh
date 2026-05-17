@@ -1314,8 +1314,14 @@ test_interactive_installer_uses_user_basedpyright_install() {
 
 test_interactive_installer_has_harness_setup_wizard() {
     local installer
+    local opencode_recommendation_body
 
     installer="$(cat "$ROOT_DIR/install.sh")"
+    opencode_recommendation_body="$(awk '
+        /^recommended_opencode_install_command\(\) \{/ { in_func = 1 }
+        in_func { print }
+        in_func && /^}/ { exit }
+    ' "$ROOT_DIR/install.sh")"
     assert_contains "$installer" "Integration setup check:"
     assert_contains "$installer" "recommended_opencode_install_command"
     assert_contains "$installer" "integration bundle:"
@@ -1331,11 +1337,16 @@ test_interactive_installer_has_harness_setup_wizard() {
     assert_contains "$installer" "recommended_oh_my_openagent_install_command"
     assert_contains "$installer" "bunx oh-my-openagent install"
     assert_contains "$installer" "npx oh-my-openagent install"
-    assert_contains "$installer" "Install oh-my-openagent now with the recommended command?"
+    assert_contains "$installer" "Install oh-my-openagent (enables background subagents, task() delegation, model fallback)?"
     assert_contains "$installer" "run_oh_my_openagent_install_command"
     assert_contains "$installer" "synced OpenCode and oh-my-openagent to LMM GlyphOS providers"
     assert_contains "$installer" "https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/refs/heads/dev/docs/guide/installation.md"
     assert_contains "$installer" "llama-model sync-opencode"
+    assert_contains "$opencode_recommendation_body" "printf 'curl -fsSL https://opencode.ai/install | bash\\n'"
+    assert_not_contains "$opencode_recommendation_body" "brew install anomalyco/tap/opencode"
+    assert_not_contains "$opencode_recommendation_body" "paru -S opencode"
+    assert_not_contains "$opencode_recommendation_body" "bun add -g opencode-ai"
+    assert_not_contains "$opencode_recommendation_body" "npm i -g opencode-ai"
 }
 
 test_state_and_shell_split_helpers() {

@@ -122,19 +122,7 @@ install_basedpyright_during_install() {
 }
 
 recommended_opencode_install_command() {
-    local os
-    os="$(uname -s)"
-    if [[ "$os" == "Darwin" ]] && command -v brew >/dev/null 2>&1; then
-        printf 'brew install anomalyco/tap/opencode\n'
-    elif command -v paru >/dev/null 2>&1; then
-        printf 'paru -S opencode\n'
-    elif command -v bun >/dev/null 2>&1; then
-        printf 'bun add -g opencode-ai\n'
-    elif command -v npm >/dev/null 2>&1; then
-        printf 'npm i -g opencode-ai\n'
-    else
-        printf 'curl -fsSL https://opencode.ai/install | bash\n'
-    fi
+    printf 'curl -fsSL https://opencode.ai/install | bash\n'
 }
 
 run_opencode_install_command() {
