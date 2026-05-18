@@ -574,6 +574,19 @@ test_installer_cuda_apt_bootstrap_contract() {
     assert_contains "$installer" "Skip oh-my-openagent install/sync step? [Y/n]"
 }
 
+test_installer_detects_existing_lmm_cuda_runtime_before_build_prompt() {
+    local installer
+
+    installer="$(cat "$ROOT_DIR/install.sh")"
+
+    assert_contains "$installer" "defaults_env_value_for_key LLAMA_SERVER_BIN"
+    assert_contains "$installer" '$APP_SHARE_DIR/runtime/llama-server'
+    assert_contains "$installer" '*-${primary_backend}/llama-server'
+    assert_contains "$installer" '*-cuda/llama-server'
+    assert_contains "$installer" 'libggml-cuda.so'
+    assert_contains "$installer" 'Use this existing llama.cpp runtime instead of building a bundled runtime now?'
+}
+
 test_build_runtime_preserves_extra_cmake_args() {
     local launcher
 
@@ -3170,6 +3183,7 @@ main() {
     test_dependency_install_preview_exists
     test_interactive_installer_declares_cuda_toolkit_install
     test_installer_cuda_apt_bootstrap_contract
+    test_installer_detects_existing_lmm_cuda_runtime_before_build_prompt
     test_build_runtime_preserves_extra_cmake_args
     test_interactive_installer_bootstraps_bun_for_oh_my_openagent
     test_installer_legacy_cuda_arch_without_legacy_toolkit_falls_back_cpu

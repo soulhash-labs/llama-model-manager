@@ -1223,12 +1223,83 @@ guard_unsupported_legacy_cuda_architecture() {
     configure_legacy_cuda_toolkit_for_build "$@"
 }
 
+defaults_env_value_for_key() {
+    local key="$1"
+    local file="$CONFIG_DIR/defaults.env"
+
+    [[ -f "$file" ]] || return 1
+
+    python3 - "$file" "$key" <<'PY'
+import shlex
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+key = sys.argv[2]
+
+for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+
+    try:
+        parts = shlex.split(stripped, comments=True, posix=True)
+    except ValueError:
+        continue
+
+    if not parts:
+        continue
+
+    if parts[0] == "export":
+        parts = parts[1:]
+
+    for part in parts:
+        if part.startswith(key + "="):
+            value = part.split("=", 1)[1]
+            if value:
+                print(value)
+                raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
 find_existing_llama_server_binary() {
     local candidate=""
+    local saved_bin=""
+    local runtime_dir="$APP_SHARE_DIR/runtime/llama-server"
 
     if [[ -n "${LLAMA_SERVER_BIN:-}" && -x "${LLAMA_SERVER_BIN:-}" ]]; then
         printf '%s\n' "$LLAMA_SERVER_BIN"
         return 0
+    fi
+
+    saved_bin="$(defaults_env_value_for_key LLAMA_SERVER_BIN 2>/dev/null || true)"
+    if [[ -n "$saved_bin" && -x "$saved_bin" ]]; then
+        printf '%s\n' "$saved_bin"
+        return 0
+    fi
+
+    if [[ -n "${primary_backend:-}" && -d "$runtime_dir" ]]; then
+        candidate="$(find "$runtime_dir" -maxdepth 2 -type f -path "*-${primary_backend}/llama-server" -executable -print -quit 2>/dev/null || true)"
+        if [[ -n "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    fi
+
+    if [[ -d "$runtime_dir" ]]; then
+        candidate="$(find "$runtime_dir" -maxdepth 2 -type f -path "*-cuda/llama-server" -executable -print -quit 2>/dev/null || true)"
+        if [[ -n "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+
+        candidate="$(find "$runtime_dir" -maxdepth 2 -type f -name llama-server -executable -print -quit 2>/dev/null || true)"
+        if [[ -n "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
     fi
 
     candidate="$(command -v llama-server 2>/dev/null || true)"
@@ -1261,6 +1332,26 @@ validate_existing_llama_server_binary() {
 existing_llama_server_backend_hint() {
     local binary="$1"
     local output=""
+    local dir=""
+
+    case "$binary" in
+        *-cuda/llama-server)   printf 'cuda\n'; return 0 ;;
+        *-vulkan/llama-server) printf 'vulkan\n'; return 0 ;;
+        *-metal/llama-server)  printf 'metal\n'; return 0 ;;
+        *-cpu/llama-server)    printf 'cpu\n'; return 0 ;;
+    esac
+
+    dir="$(dirname "$binary")"
+
+    if [[ -e "$dir/libggml-cuda.so" ]] || [[ -e "$dir/libggml-cuda.so.0" ]] || compgen -G "$dir/libggml-cuda.so.*" >/dev/null; then
+        printf 'cuda\n'
+        return 0
+    fi
+
+    if [[ -e "$dir/libggml-vulkan.so" ]] || compgen -G "$dir/libggml-vulkan.so.*" >/dev/null; then
+        printf 'vulkan\n'
+        return 0
+    fi
 
     output="$("$binary" --version 2>&1 || true)"
     if printf '%s\n' "$output" | grep -qi 'cuda\|cublas\|ggml-cuda'; then
