@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import Any
 
 from .client_base import BaseChatClient, _result
@@ -41,6 +41,7 @@ class LlamaCppClient(BaseChatClient):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.default_system = default_system
+        self.opens_stream_before_return = True
 
     @property
     def _root_url(self) -> str:
@@ -167,6 +168,60 @@ class LlamaCppClient(BaseChatClient):
                 latency_ms=int((time.perf_counter() - started) * 1000),
                 raw={"error": str(exc)},
             )
+
+    def stream_generate(
+        self,
+        prompt: str,
+        **kwargs,
+    ) -> Iterator[str]:
+        messages = []
+        system = kwargs.get("system", self.default_system)
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        payload: dict[str, Any] = {
+            "model": kwargs.get("model", self._resolve_model()),
+            "messages": messages,
+            "temperature": kwargs.get("temperature", 0.7),
+            "max_tokens": kwargs.get("max_tokens", self.max_tokens),
+            "stream": True,
+        }
+
+        if "tools" in kwargs and kwargs["tools"] is not None:
+            payload["tools"] = kwargs["tools"]
+        if "tool_choice" in kwargs and kwargs["tool_choice"] is not None:
+            payload["tool_choice"] = kwargs["tool_choice"]
+        if "extra_body" in kwargs and isinstance(kwargs["extra_body"], Mapping):
+            payload.update(dict(kwargs["extra_body"]))
+
+        response = self._session.post(
+            self._chat_url(),
+            json=payload,
+            headers=self._headers(),
+            timeout=self.timeout,
+            stream=True,
+        )
+        response.raise_for_status()
+
+        for line in response.iter_lines():
+            if not line:
+                continue
+            text = line.decode("utf-8")
+            if text.startswith("data: "):
+                data_str = text[6:]
+                if data_str.strip() == "[DONE]":
+                    break
+                try:
+                    import json
+                    data = json.loads(data_str)
+                    choice = (data.get("choices") or [{}])[0]
+                    delta = choice.get("delta") or {}
+                    content = delta.get("content", "")
+                    if content:
+                        yield content
+                except Exception:
+                    continue
 
 
 def create_llamacpp_client(
