@@ -430,8 +430,7 @@ llama-model download-retry <job_id>
 | **oh-my-openagent** | Subagent delegation, task() dispatch, model fallback for OpenCode | `llama-model sync-oh-my-openagent` |
 | **OpenClaw** | Syncs to the live local OpenAI-compatible `llama.cpp` endpoint | `llama-model sync-openclaw` |
 | **Harness gateway** | OpenAI-compatible routed gateway in front of Context/GlyphOS/local llama.cpp | `llama-model gateway start\|stop\|restart\|status\|logs` |
-| **Claude Code** | Syncs local Claude settings to a local Anthropic-compatible gateway | `llama-model sync-claude` |
-| **Claude gateway** | Local bridge in front of the active `llama.cpp` endpoint for Claude Code compatibility | `llama-model claude-gateway start\|stop\|restart\|status\|logs` |
+| **Claude Code** | Syncs local Claude settings to the LMM gateway with native Anthropic support | `llama-model sync-claude` |
 | **GlyphOS AI Compute** | Syncs `~/.glyphos/config.yaml` to the active local `llama.cpp` runtime | `llama-model sync-glyphos` |
 
 These integrations are optional. The default product behavior remains the local `llama.cpp` runtime plus the on-demand dashboard.
@@ -442,16 +441,13 @@ Override the long-run reservation with `OPENCODE_COMPACTION_RESERVED` when a har
 
 ### 🐂 Claude Code Quick Start
 
-After syncing, Claude Code works with **no flags** — just run `claude`.
+After syncing, Claude Code works with **no flags** — just run `claude`. The LMM gateway on port 4010 handles Anthropic protocol natively.
 
 ```bash
-# 1. Start the Claude gateway (translates Anthropic protocol to local llama.cpp)
-llama-model claude-gateway start
-
-# 2. Sync your settings (writes ~/.claude/settings.json with local endpoint + dummy key)
+# 1. Sync your settings (writes ~/.claude/settings.json pointing at port 4010)
 llama-model sync-claude
 
-# 3. Just run Claude — no env vars, no --bare flag needed
+# 2. Just run Claude — no env vars, no --bare flag needed
 claude
 ```
 
@@ -461,7 +457,7 @@ claude
 {
   "model": "qwen35-9b-q8",
   "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:4000",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:4010/v1",
     "ANTHROPIC_MODEL": "qwen35-9b-q8",
     "ANTHROPIC_API_KEY": "local-dev-token"
   }
@@ -489,7 +485,7 @@ Use this for one-off testing or debugging. Not needed for normal use.
 - Routed mode means `harness → LMM gateway → Context MCP when available → Glyph Encoding when useful → GlyphOS AI Compute → local llama.cpp backend`. Sync output reports `routed-full-capable` when the combined feature is configured. Use `--mode direct` when you want to bypass the gateway and call the backend `8081/v1` endpoint directly.
 - `llama-model sync-opencode --preset long-run` writes model-aware `compaction.reserved` headroom. For 128k-token local contexts it reserves 64000 tokens, which avoids the observed long-session stall pattern where opencode aborts a pending tool after a parent message timeout.
 - `llama-model sync-openclaw` updates `~/.openclaw/openclaw.json` so OpenClaw points at the routed LMM gateway by default.
-- `llama-model sync-claude` writes `~/.claude/settings.json` for Claude Code.
+- `llama-model sync-claude` writes `~/.claude/settings.json` for Claude Code, pointing at the LMM gateway (port 4010) which handles Anthropic protocol natively.
 - Post-switch sync for Claude Code, OpenClaw, GlyphOS, and oh-my-openagent is opt-in with `LLAMA_MODEL_SYNC_CLAUDE=1`, `LLAMA_MODEL_SYNC_OPENCLAW=1`, `LLAMA_MODEL_SYNC_GLYPHOS=1`, and `LLAMA_MODEL_SYNC_OH_MY_OPENAGENT=1` (default).
 - Post-switch sync is non-fatal; a client-config error warns but does not roll back a successfully started local model.
 

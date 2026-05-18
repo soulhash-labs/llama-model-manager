@@ -32,7 +32,6 @@ Commands:
   llama-model sync-opencode [alias|/path/to/model.gguf]
   llama-model sync-openclaw [--profile NAME] [alias|/path/to/model.gguf]
   llama-model sync-claude [model-id]
-  llama-model claude-gateway start|stop|restart|status|logs
   llama-model sync-glyphos [alias|/path/to/model.gguf]
   llama-model context-mcp status|build
   llama-model update-check [--component lmm|llamacpp|all] [--json]
@@ -129,7 +128,7 @@ Client integrations:
   Run `llama-model sync-openclaw` to point it at the routed LMM gateway. Use `--mode direct` for the backend llama.cpp endpoint. Set LLAMA_MODEL_SYNC_OPENCLAW=1 to also update it after successful switches.
 
   Claude Code keeps settings in ~/.claude/settings.json and expects an Anthropic-style API.
-  Run `llama-model sync-claude` and, when needed, start the local bridge with `llama-model claude-gateway start`. Set LLAMA_MODEL_SYNC_CLAUDE=1 to update settings after successful switches.
+  Run `llama-model sync-claude` to point Claude Code at the LMM gateway (port 4010). Set LLAMA_MODEL_SYNC_CLAUDE=1 to update settings after successful switches.
 
   GlyphOS AI Compute can target the same local llama.cpp endpoint.
   A bundled public copy lives under integrations/public-glyphos-ai-compute/ in the repo and under ~/.local/share/llama-model-manager/integrations/ after install.

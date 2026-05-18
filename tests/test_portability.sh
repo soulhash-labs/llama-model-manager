@@ -204,13 +204,12 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$help" "compaction.reserved"
     assert_contains "$help" "llama-model sync-openclaw"
     assert_contains "$help" "llama-model sync-claude"
-    assert_contains "$help" "llama-model claude-gateway start"
     assert_contains "$help" "llama-model sync-glyphos"
     assert_contains "$help" "llama-model context-mcp status|build"
     assert_contains "$help" "llama-model download-jobs"
     assert_contains "$help" "llama-model download-cancel <job_id>"
     assert_contains "$defaults" "OPENCLAW_PROFILE="
-    assert_contains "$defaults" "CLAUDE_GATEWAY_PORT=4000"
+    assert_contains "$defaults" "CLAUDE_GATEWAY_HOST/PORT/LOG/UPSTREAM_TIMEOUT_SECONDS are deprecated"
     assert_contains "$defaults" "LLAMA_MODEL_HARNESS_MODE=routed"
     assert_contains "$defaults" "LLAMA_MODEL_GATEWAY_HOST=127.0.0.1"
     assert_contains "$defaults" "LLAMA_MODEL_GATEWAY_PORT=4010"
@@ -219,10 +218,9 @@ test_docs_no_longer_imply_universal_gpu_binary() {
     assert_contains "$defaults" "LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS=500"
     assert_contains "$defaults" "LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS=250"
     assert_contains "$defaults" 'LLAMA_MODEL_GATEWAY_LOG=$HOME/models/lmm-gateway.log'
-    assert_contains "$defaults" "CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS=1800"
     assert_contains "$defaults" "GGML_CUDA_ENABLE_UNIFIED_MEMORY="
     assert_not_contains "$defaults" "LLAMA_SERVER_DEVICE=cuda0"
-    assert_contains "$web_index" "Claude Gateway Timeout (s)"
+    assert_not_contains "$web_index" "Claude Gateway Timeout (s)"
     assert_contains "$web_index" "Remote Models"
     assert_contains "$web_index" "Download Jobs"
     assert_contains "$web_index" "Observed Glyph Routes"
@@ -271,7 +269,8 @@ test_installers_support_bootstrap_tty_handoff_and_empty_registry_seed() {
     bootstrap="$(cat "$ROOT_DIR/install-bootstrap.sh")"
     assert_contains "$bootstrap" "TTY_REATTACH_OK=\"no\""
     assert_contains "$bootstrap" "if sh -c 'exec </dev/tty' 2>/dev/null; then"
-    assert_contains "$bootstrap" 'exec bash "$SOURCE_DIR/install.sh" </dev/tty'
+    assert_contains "$bootstrap" 'cd "$SOURCE_DIR" || exit 1'
+    assert_contains "$bootstrap" 'exec bash ./install.sh </dev/tty'
 
     tmp="$(mktemp -d)"
     mkdir -p "$tmp/home/Desktop" "$tmp/config" "$tmp/data"
@@ -300,7 +299,8 @@ test_installers_support_bootstrap_tty_handoff_and_empty_registry_seed() {
     assert_contains "$app_js" 'default-cuda-unified-memory'
     assert_contains "$app_js" 'LLAMA_MODEL_GATEWAY_HOST'
     assert_contains "$app_js" 'LLAMA_MODEL_GATEWAY_LOG'
-    assert_contains "$app_js" '/api/gateway/logs?lines=100'
+    assert_contains "$app_js" 'const query = lane === "fast" ? "?lines=100&lane=fast" : "?lines=100"'
+    assert_contains "$app_js" '/api/gateway/logs${query}'
     assert_contains "$app_js" 'return `~/${value.slice(homeDir.length + 1)}`;'
 }
 
@@ -1549,7 +1549,6 @@ test_quoted_home_paths_from_saved_defaults_expand() {
     make_env "$tmp"
     cat >"$tmp/config/llama-server/defaults.env" <<'EOF'
 LLAMA_SERVER_LOG='$HOME/models/llama-server.log'
-CLAUDE_GATEWAY_LOG='$HOME/models/claude-gateway.log'
 GLYPHOS_CONFIG_FILE='$HOME/.glyphos/config.yaml'
 EOF
 
@@ -1558,11 +1557,10 @@ EOF
         XDG_CONFIG_HOME="$tmp/config" \
         XDG_STATE_HOME="$tmp/state" \
         LLAMA_SERVER_RUNTIME_DIR="$tmp/runtime" \
-        bash -c 'source "$1"; printf "%s\n%s\n%s\n" "$LLAMA_SERVER_LOG" "$CLAUDE_GATEWAY_LOG" "$GLYPHOS_CONFIG_FILE"' _ "$BIN"
+        bash -c 'source "$1"; printf "%s\n%s\n" "$LLAMA_SERVER_LOG" "$GLYPHOS_CONFIG_FILE"' _ "$BIN"
     )"
 
     assert_contains "$output" "$tmp/home/models/llama-server.log"
-    assert_contains "$output" "$tmp/home/models/claude-gateway.log"
     assert_contains "$output" "$tmp/home/.glyphos/config.yaml"
     assert_not_contains "$output" '$HOME/models/llama-server.log'
 }
@@ -1731,6 +1729,8 @@ test_auto_fit_uses_ram_aware_hybrid_gpu_layers() {
         SELECTED_LLAMA_SERVER_BACKEND="cuda"
         SELECTED_LLAMA_SERVER_SOURCE="test"
         SELECTED_LLAMA_SERVER_STATUS="compatible"
+        SELECTED_LLAMA_SERVER_HOST_BACKENDS="cpu,cuda"
+        SELECTED_LLAMA_SERVER_CUDA_OK="yes"
         return 0
     }
     validate_mmproj_for_model() { return 0; }
@@ -1755,11 +1755,12 @@ test_auto_fit_uses_ram_aware_hybrid_gpu_layers() {
     LLAMA_MODEL_SYNC_CLAUDE="0"
     LLAMA_MODEL_SYNC_OPENCLAW="0"
     LLAMA_MODEL_SYNC_GLYPHOS="0"
+    GGML_CUDA_ENABLE_UNIFIED_MEMORY="0"
 
     output="$(start_server demo "$model" "" "128000" "999" "128" "16" "auto" "cuda0")"
     state="$(cat "$tmp/state.out")"
-    assert_contains "$output" "auto_fit_posture: hybrid-fit"
-    assert_contains "$output" "auto_fit_tradeoff: Hybrid-fit: VRAM is tight but system RAM is available"
+    assert_contains "$output" "auto_fit: context 128000 -> 32768 based on detected GPU memory (11264 MiB)"
+    assert_contains "$output" "auto_fit_tradeoff: system RAM will carry more model state; expect slower runs than full GPU offload"
     assert_contains "$output" "GPU layers 999 -> 24"
     assert_contains "$output" "expect slower runs than full GPU offload"
     assert_contains "$state" "context=32768"
@@ -1779,7 +1780,7 @@ test_install_next_steps_sanitize_home_paths() {
     output="$(env \
         HOME="$tmp/home" \
         bash "$ROOT_DIR/install.sh")"
-    next_steps="$(printf '%s\n' "$output" | grep -E '^[[:space:]]+(4|11|12)\.')"
+    next_steps="$(printf '%s\n' "$output" | grep -E '^[[:space:]]+(4|10|11)\.')"
 
     assert_contains "$next_steps" 'Edit ~/.config/llama-server/defaults.env if needed'
     assert_contains "$next_steps" 'Bundled public GlyphOS AI Compute package: ~/.local/share/llama-model-manager/integrations/public-glyphos-ai-compute'
@@ -1910,7 +1911,7 @@ EOF
     assert_contains "$defaults_after" "LLAMA_MODEL_HARNESS_MODE=routed"
     assert_contains "$defaults_after" "LLAMA_MODEL_GATEWAY_HOST='127.0.0.2'"
     assert_contains "$defaults_after" 'LLAMA_MODEL_GATEWAY_PORT="4510"'
-    assert_contains "$defaults_after" 'LLAMA_MODEL_GATEWAY_LOG=$HOME/models/lmm-gateway.log'
+    assert_contains "$defaults_after" "LLAMA_MODEL_GATEWAY_LOG=$tmp/home/models/lmm-gateway.log"
     assert_not_contains "$defaults_after" "LLAMA_MODEL_OPENCODE_GATEWAY_BASE_URL"
     assert_contains "$output" "harness endpoint: http://127.0.0.2:4510/v1"
     assert_contains "$output" "backend endpoint: http://127.0.0.1:19082/v1"
@@ -1937,6 +1938,8 @@ test_cuda_unified_memory_preserves_requested_context_and_exports_env() {
         SELECTED_LLAMA_SERVER_BACKEND="cuda"
         SELECTED_LLAMA_SERVER_SOURCE="test"
         SELECTED_LLAMA_SERVER_STATUS="compatible"
+        SELECTED_LLAMA_SERVER_HOST_BACKENDS="cpu,cuda"
+        SELECTED_LLAMA_SERVER_CUDA_OK="yes"
         return 0
     }
     validate_mmproj_for_model() { return 0; }
@@ -3083,7 +3086,6 @@ LLAMA_SERVER_BIN=
 LLAMA_SERVER_DEVICE=
 LLAMA_SERVER_PORT=19081
 LLAMA_SERVER_LOG=
-CLAUDE_BASE_URL=http://127.0.0.1:4000
 CLAUDE_MODEL_ID=qwen35-9b-q8
 CLAUDE_AUTH_TOKEN=local-dev-token
 EOF
@@ -3095,76 +3097,16 @@ EOF
 
     output="$(run_cli "$tmp" sync-claude)"
     assert_contains "$output" "status: synced"
-    assert_contains "$output" "claude_api_key: mirrored-from-auth-token"
+    assert_contains "$output" "claude_api_key: configured"
+    assert_contains "$output" "claude_api_key_source: mirrored-from-auth-token"
 
     settings="$(cat "$tmp/home/.claude/settings.json")"
     assert_contains "$settings" '"model": "qwen35-9b-q8"'
-    assert_contains "$settings" '"ANTHROPIC_BASE_URL": "http://127.0.0.1:4000"'
+    assert_contains "$settings" '"ANTHROPIC_BASE_URL": "http://127.0.0.1:4010/v1"'
     assert_contains "$settings" '"ANTHROPIC_AUTH_TOKEN": "local-dev-token"'
     assert_contains "$settings" '"ANTHROPIC_API_KEY": "local-dev-token"'
     assert_contains "$settings" '"theme": "dark"'
 }
-
-test_claude_gateway_detects_existing_listener() {
-    local tmp
-    local output
-
-    tmp="$(mktemp -d)"
-    make_env "$tmp"
-
-    # shellcheck disable=SC1090
-    source "$BIN"
-    CLAUDE_GATEWAY_PORT=4000
-    CLAUDE_GATEWAY_LOG="$tmp/claude-gateway.log"
-    CLAUDE_GATEWAY_PID_FILE="$tmp/claude-gateway.pid"
-    claude_gateway_health_ok() { return 0; }
-    claude_gateway_pid() { printf '44339\n'; }
-    claude_gateway_listener_pid() { printf '28010\n'; }
-    pid_matches_claude_gateway() {
-        [[ "$1" == '44339' ]] && return 1
-        [[ "$1" == '28010' ]]
-    }
-    claude_gateway_model_id() { printf 'qwen35-9b-q8\n'; }
-    claude_gateway_upstream_base() { printf 'http://127.0.0.1:8081/v1\n'; }
-
-    output="$(claude_gateway_start)"
-    assert_contains "$output" 'status: running'
-    assert_contains "$output" 'pid: 28010'
-
-    output="$(claude_gateway_status)"
-    assert_contains "$output" 'running: yes'
-    assert_contains "$output" 'pid: 28010'
-}
-
-test_claude_gateway_timeout_default_visible() {
-    local tmp
-    local output
-
-    tmp="$(mktemp -d)"
-    make_env "$tmp"
-    cat >"$tmp/config/llama-server/defaults.env" <<'EOF'
-LLAMA_SERVER_BIN=
-LLAMA_SERVER_DEVICE=
-LLAMA_SERVER_PORT=19081
-LLAMA_SERVER_LOG=
-CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS=1800
-EOF
-
-    output="$(run_cli "$tmp" claude-gateway status)"
-    assert_contains "$output" "upstream_timeout_seconds: 1800"
-}
-
-test_claude_gateway_status_without_runtime_is_clean() {
-    local tmp
-    local output
-
-    tmp="$(mktemp -d)"
-    make_env "$tmp"
-    output="$(run_cli "$tmp" claude-gateway status)"
-    assert_contains "$output" "running: no"
-    assert_contains "$output" "url: http://127.0.0.1:4000"
-}
-
 
 test_download_lifecycle_cli_fallbacks() {
     local tmp
@@ -3287,9 +3229,6 @@ main() {
     test_sync_glyphos_updates_config
     test_sync_glyphos_uses_openai_model_id_when_process_hides_model_path
     test_sync_claude_updates_settings
-    test_claude_gateway_detects_existing_listener
-    test_claude_gateway_timeout_default_visible
-    test_claude_gateway_status_without_runtime_is_clean
     test_opencode_plugin_disable_enable_safe_mode
     test_doctor_log_scanner_detects_plugin_error
     printf 'All portability tests passed.\n'

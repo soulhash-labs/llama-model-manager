@@ -2119,7 +2119,6 @@ function renderDefaults(defaults) {
   $("#default-update-timeout").value = defaults.LMM_UPDATE_TIMEOUT_SECONDS || "5";
   $("#default-openclaw-profile").value = defaults.OPENCLAW_PROFILE || "";
   $("#default-openclaw-api-key").value = defaults.OPENCLAW_API_KEY || "";
-  $("#default-claude-gateway-timeout").value = defaults.CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS || "";
   $("#default-claude-base-url").value = defaults.CLAUDE_BASE_URL || "";
   $("#default-claude-model-id").value = defaults.CLAUDE_MODEL_ID || "";
   $("#default-claude-auth-token").value = defaults.CLAUDE_AUTH_TOKEN || "";
@@ -2298,7 +2297,6 @@ function collectDefaultsPayload() {
     LMM_UPDATE_TIMEOUT_SECONDS: $("#default-update-timeout").value.trim(),
     OPENCLAW_PROFILE: $("#default-openclaw-profile").value.trim(),
     OPENCLAW_API_KEY: $("#default-openclaw-api-key").value.trim(),
-    CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS: $("#default-claude-gateway-timeout").value.trim(),
     CLAUDE_BASE_URL: $("#default-claude-base-url").value.trim(),
     CLAUDE_MODEL_ID: $("#default-claude-model-id").value.trim(),
     CLAUDE_AUTH_TOKEN: $("#default-claude-auth-token").value.trim(),

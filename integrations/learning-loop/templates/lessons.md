@@ -77,12 +77,12 @@ and why — scoped to your hardware tier.
 
 ### [Tier 3] GlyphOS full mode (port 4010) handles tool calls correctly
 - **Tier**: 3
-- **What happened**: Tool calls failed through port 4000 (legacy claude-gateway)
-- **Root cause**: Legacy gateway doesn't extract tool_calls from llama.cpp response
-- **Fix approach**: Use port 4010 (GlyphOS full) — extracts tool_calls, converts to Anthropic tool_use blocks
-- **Prevention**: Always use port 4010 for tool call support
+- **What happened**: Legacy claude-gateway (port 4000) couldn't extract tool_calls
+- **Root cause**: Standalone bridge had no GlyphOS tool call extraction
+- **Fix approach**: Port 4000 deprecated; Anthropic handled natively on port 4010 via handlers_anthropic.py
+- **Prevention**: Claude Code always points at port 4010 via sync-claude
 > **Related concept**: docs/self_learning.md#5-subagent-quality-tracking
-> — validates that gateway selection affects tool call reliability
+> — validates that native Anthropic support eliminates the need for a separate bridge
 
 ### [Tier 3] GIS1 semantic encoding activates at psi_coherence ≥ 0.7
 - **Tier**: 3

@@ -51,11 +51,6 @@ OH_MY_OPENAGENT_LOG_FILE="${OH_MY_OPENAGENT_LOG_FILE:-}"
 OPENCLAW_PROFILE="${OPENCLAW_PROFILE:-}"
 OPENCLAW_API_KEY="${OPENCLAW_API_KEY:-llama-local}"
 CLAUDE_SETTINGS_FILE="${CLAUDE_SETTINGS_FILE:-$HOME/.claude/settings.json}"
-CLAUDE_GATEWAY_HOST="${CLAUDE_GATEWAY_HOST:-127.0.0.1}"
-CLAUDE_GATEWAY_PORT="${CLAUDE_GATEWAY_PORT:-4000}"
-CLAUDE_GATEWAY_LOG="${CLAUDE_GATEWAY_LOG:-$HOME/models/claude-gateway.log}"
-CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS="${CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS:-1800}"
-CLAUDE_GATEWAY_PID_FILE="${CLAUDE_GATEWAY_PID_FILE:-$STATE_DIR/claude-gateway.pid}"
 CLAUDE_BASE_URL="${CLAUDE_BASE_URL:-}"
 CLAUDE_MODEL_ID="${CLAUDE_MODEL_ID:-}"
 CLAUDE_AUTH_TOKEN="${CLAUDE_AUTH_TOKEN:-}"
@@ -124,8 +119,6 @@ if [[ -f "$DEFAULTS_FILE" ]]; then
 fi
 
 LLAMA_SERVER_LOG="$(expand_user_path_literal "$LLAMA_SERVER_LOG")"
-CLAUDE_GATEWAY_LOG="$(expand_user_path_literal "$CLAUDE_GATEWAY_LOG")"
-CLAUDE_GATEWAY_PID_FILE="$(expand_user_path_literal "$CLAUDE_GATEWAY_PID_FILE")"
 CLAUDE_SETTINGS_FILE="$(expand_user_path_literal "$CLAUDE_SETTINGS_FILE")"
 GLYPHOS_CONFIG_FILE="$(expand_user_path_literal "$GLYPHOS_CONFIG_FILE")"
 OPENCODE_CONFIG_FILE="$(expand_user_path_literal "$OPENCODE_CONFIG_FILE")"
@@ -182,7 +175,6 @@ Usage:
   llama-model context-mcp status|build
   llama-model update-check [--component lmm|llamacpp|all] [--json]
   llama-model gateway start|stop|restart|status|logs
-  llama-model claude-gateway start|stop|restart|status|logs
   llama-model download-jobs
   llama-model download-cancel <job_id>
   llama-model download-retry <job_id>
@@ -208,7 +200,6 @@ Examples:
   llama-model sync-openclaw --profile lmm-eval qwen35-9b-q8
   llama-model gateway start
   llama-model sync-claude qwen35-9b-q8
-  llama-model claude-gateway start
   llama-model sync-glyphos
   llama-model context-mcp build
   llama-model update-check
@@ -3512,7 +3503,7 @@ ${STARTUP_FAILURE_ACTION}"
     # === CUDA GUARDRAIL: Block silent CPU fallback for CUDA models on CUDA hosts ===
     if [[ "$expected_device_backend" == "cuda" || "$device" == cuda* ]]; then
         # Model requests CUDA
-        if [[ "$SELECTED_LLAMA_SERVER_CUDA_OK" != "yes" ]]; then
+        if [[ "${SELECTED_LLAMA_SERVER_CUDA_OK:-no}" != "yes" ]]; then
             # No validated CUDA runtime selected
             if [[ ",$SELECTED_LLAMA_SERVER_HOST_BACKENDS," == *",cuda,"* ]]; then
                 die "Model requests CUDA but no validated CUDA runtime is available. Run 'llama-model build-runtime --backend cuda' to build one."
@@ -4654,11 +4645,10 @@ show_logs() {
     local target="${2:-server}"
     case "$target" in
         server)   tail -n "$lines" "$LLAMA_SERVER_LOG" ;;
-        claude)   tail -n "$lines" "$CLAUDE_GATEWAY_LOG" ;;
         gateway)  tail -n "$lines" "$LLAMA_MODEL_GATEWAY_LOG" ;;
         gateway-fast) tail -n "$lines" "$LLAMA_MODEL_GATEWAY_FAST_LOG" ;;
         *)
-            printf 'error: unknown log target "%s". Valid: server, claude, gateway, gateway-fast\n' "$target" >&2
+            printf 'error: unknown log target "%s". Valid: server, gateway, gateway-fast\n' "$target" >&2
             return 1
             ;;
     esac
@@ -5636,7 +5626,7 @@ post_switch_run_sync() {
             claude)
                 synced_value="$(printf '%s\n' "$output" | awk -F': ' '/^model_id: / { print $2; exit }')"
                 printf 'synced_claude_model: %s\n' "${synced_value:-unknown}"
-                printf 'claude_reload_note: restart Claude Code and restart the local Claude gateway if it was already running\n'
+                printf 'claude_reload_note: restart Claude Code to pick up config changes\n'
                 ;;
             openclaw)
                 synced_value="$(printf '%s\n' "$output" | awk -F': ' '/^openclaw_model: / { print $2; exit }')"
@@ -5710,7 +5700,7 @@ sync_claude() {
 
     base_url="$(trim_whitespace "${CLAUDE_BASE_URL:-}")"
     if [[ -z "$base_url" ]]; then
-        base_url="http://${CLAUDE_GATEWAY_HOST}:${CLAUDE_GATEWAY_PORT}"
+        base_url="http://${LLAMA_MODEL_GATEWAY_HOST:-127.0.0.1}:${LLAMA_MODEL_GATEWAY_PORT:-4010}/v1"
     fi
     auth_token="$(trim_whitespace "${CLAUDE_AUTH_TOKEN:-${ANTHROPIC_AUTH_TOKEN:-}}")"
     api_key="$(trim_whitespace "${CLAUDE_API_KEY:-${ANTHROPIC_API_KEY:-}}")"
@@ -6059,274 +6049,6 @@ lmm_gateway_command_fast() {
             printf '%s\n' 'Usage: llama-model gateway fast start|stop|restart|status|logs'
             ;;
         *) die "unknown fast gateway action: $action" ;;
-    esac
-}
-
-claude_gateway_script() {
-    local script="$APP_ROOT/scripts/claude_gateway.py"
-    [[ -f "$script" ]] || die "Claude gateway script not found: $script"
-    printf '%s\n' "$script"
-}
-
-claude_gateway_model_id() {
-    local model_id
-    model_id="$(trim_whitespace "${CLAUDE_MODEL_ID:-}")"
-    if [[ -n "$model_id" ]]; then
-        printf '%s\n' "$model_id"
-        return 0
-    fi
-    resolve_sync_target ""
-    printf '%s\n' "$SYNC_TARGET_MODEL_ID"
-}
-
-claude_gateway_url() {
-    printf 'http://%s:%s\n' "$CLAUDE_GATEWAY_HOST" "$CLAUDE_GATEWAY_PORT"
-}
-
-claude_gateway_upstream_base() {
-    upstream_api_base
-}
-
-claude_gateway_timeout_seconds() {
-    local upstream_timeout_seconds
-    upstream_timeout_seconds="$(trim_whitespace "${CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS:-1800}")"
-    [[ "$upstream_timeout_seconds" =~ ^[0-9]+$ ]] || die "CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS must be a positive integer"
-    (( upstream_timeout_seconds >= 1 )) || die "CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS must be at least 1"
-    printf '%s
-' "$upstream_timeout_seconds"
-}
-
-claude_gateway_pid() {
-    [[ -f "$CLAUDE_GATEWAY_PID_FILE" ]] || return 1
-    cat "$CLAUDE_GATEWAY_PID_FILE"
-}
-
-claude_gateway_listener_pid() {
-    local pid=""
-
-    if command_available lsof; then
-        pid="$(lsof -tiTCP:"$CLAUDE_GATEWAY_PORT" -sTCP:LISTEN 2>/dev/null | head -n 1 || true)"
-        [[ -n "$pid" ]] && { printf '%s\n' "$pid"; return 0; }
-    fi
-
-    if command_available ss; then
-        pid="$(ss -ltnp "( sport = :$CLAUDE_GATEWAY_PORT )" 2>/dev/null | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | head -n 1 || true)"
-        [[ -n "$pid" ]] && { printf '%s\n' "$pid"; return 0; }
-    fi
-
-    pid="$(pgrep -af 'claude_gateway.py' 2>/dev/null | awk -v port="$CLAUDE_GATEWAY_PORT" '$0 ~ ("--port " port "([[:space:]]|$)") { print $1; exit }' || true)"
-    [[ -n "$pid" ]] && printf '%s\n' "$pid"
-}
-
-pid_matches_claude_gateway() {
-    local pid="$1"
-    local cmdline
-
-    cmdline="$(pid_command_line "$pid")"
-    [[ -n "$cmdline" ]] || return 1
-    [[ "$cmdline" == *claude_gateway.py* ]] || return 1
-    [[ "$cmdline" == *"--port ${CLAUDE_GATEWAY_PORT}"* ]] || return 1
-    return 0
-}
-
-claude_gateway_health_ok() {
-    curl -fsS "$(claude_gateway_url)/healthz" >/dev/null 2>&1
-}
-
-claude_gateway_detect_pid() {
-    local pid=""
-
-    pid="$(claude_gateway_pid 2>/dev/null || true)"
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && pid_matches_claude_gateway "$pid"; then
-        printf '%s\n' "$pid"
-        return 0
-    fi
-
-    pid="$(claude_gateway_listener_pid 2>/dev/null || true)"
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && pid_matches_claude_gateway "$pid"; then
-        printf '%s\n' "$pid"
-        return 0
-    fi
-
-    return 1
-}
-
-claude_gateway_running() {
-    claude_gateway_health_ok
-}
-
-claude_gateway_wait_ready() {
-    local pid="$1"
-    local url="$(claude_gateway_url)/healthz"
-    local waited
-
-    for waited in $(seq 1 30); do
-        if curl -fsS "$url" >/dev/null 2>&1; then
-            return 0
-        fi
-        if ! kill -0 "$pid" 2>/dev/null; then
-            tail -n 60 "$CLAUDE_GATEWAY_LOG" >&2 || true
-            printf 'error: claude gateway exited during startup\n' >&2
-            return 1
-        fi
-        sleep 1
-    done
-    tail -n 60 "$CLAUDE_GATEWAY_LOG" >&2 || true
-    printf 'error: timed out waiting for %s/healthz\n' "$(claude_gateway_url)" >&2
-    return 1
-}
-
-claude_gateway_start() {
-    local script
-    local pid=""
-    local listener_pid=""
-    local model_id=""
-    local upstream_base
-    local upstream_timeout_seconds
-    local -a cmd=()
-    require_python3
-    script="$(claude_gateway_script)"
-    upstream_base="$(claude_gateway_upstream_base)"
-    upstream_timeout_seconds="$(claude_gateway_timeout_seconds)"
-    model_id="$(claude_gateway_model_id 2>/dev/null || true)"
-    mkdir -p "$(dirname "$CLAUDE_GATEWAY_LOG")" "$(dirname "$CLAUDE_GATEWAY_PID_FILE")"
-
-    listener_pid="$(claude_gateway_listener_pid 2>/dev/null || true)"
-    if claude_gateway_health_ok; then
-        pid="$listener_pid"
-        if [[ -z "$pid" ]]; then
-            pid="$(claude_gateway_pid 2>/dev/null || true)"
-        fi
-        if [[ -n "$pid" ]]; then
-            printf '%s\n' "$pid" > "$CLAUDE_GATEWAY_PID_FILE"
-        fi
-        printf 'status: running\n'
-        printf 'pid: %s\n' "$pid"
-        printf 'url: %s\n' "$(claude_gateway_url)"
-        printf 'upstream_base: %s\n' "$upstream_base"
-        printf 'model_id: %s\n' "$model_id"
-        printf 'log: %s\n' "$CLAUDE_GATEWAY_LOG"
-        return 0
-    fi
-
-    if [[ -n "$listener_pid" ]] && ! pid_matches_claude_gateway "$listener_pid"; then
-        die "port ${CLAUDE_GATEWAY_PORT} is already occupied by another process"
-    fi
-
-    cmd=(python3 "$script" --host "$CLAUDE_GATEWAY_HOST" --port "$CLAUDE_GATEWAY_PORT" --upstream-base "$upstream_base" --upstream-timeout-seconds "$upstream_timeout_seconds")
-    if [[ -n "$model_id" ]]; then
-        cmd+=(--advertised-model-id "$model_id")
-    fi
-
-    setsid "${cmd[@]}" >"$CLAUDE_GATEWAY_LOG" 2>&1 < /dev/null &
-    pid=$!
-    disown "$pid" 2>/dev/null || true
-    if claude_gateway_wait_ready "$pid"; then
-        printf '%s\n' "$pid" > "$CLAUDE_GATEWAY_PID_FILE"
-        printf 'status: running\n'
-        printf 'pid: %s\n' "$pid"
-        printf 'url: %s\n' "$(claude_gateway_url)"
-        printf 'upstream_base: %s\n' "$upstream_base"
-        printf 'model_id: %s\n' "$model_id"
-        printf 'log: %s\n' "$CLAUDE_GATEWAY_LOG"
-    else
-        rm -f "$CLAUDE_GATEWAY_PID_FILE"
-        if kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" 2>/dev/null || true
-        fi
-        return 1
-    fi
-}
-
-claude_gateway_stop() {
-    local pid
-    pid="$(claude_gateway_detect_pid 2>/dev/null || true)"
-    if [[ -z "$pid" ]]; then
-        pid="$(claude_gateway_listener_pid 2>/dev/null || true)"
-    fi
-    if [[ -z "$pid" ]]; then
-        rm -f "$CLAUDE_GATEWAY_PID_FILE"
-        printf 'status: stopped\n'
-        return 0
-    fi
-    # Verify PID is still the gateway process before killing (TOCTOU guard)
-    if ! kill -0 "$pid" 2>/dev/null || ! pid_matches_claude_gateway "$pid"; then
-        rm -f "$CLAUDE_GATEWAY_PID_FILE"
-        printf 'status: stopped\n'
-        return 0
-    fi
-    kill -TERM "$pid" 2>/dev/null || true
-    for _ in $(seq 1 15); do
-        if ! kill -0 "$pid" 2>/dev/null; then
-            rm -f "$CLAUDE_GATEWAY_PID_FILE"
-            printf 'status: stopped\n'
-            return 0
-        fi
-        sleep 1
-    done
-
-    # SIGKILL fallback
-    printf 'warning: claude gateway pid %s did not respond to SIGTERM; sending SIGKILL\n' "$pid" >&2
-    kill -KILL "$pid" 2>/dev/null || true
-    for _ in $(seq 1 5); do
-        if ! kill -0 "$pid" 2>/dev/null; then
-            rm -f "$CLAUDE_GATEWAY_PID_FILE"
-            printf 'status: stopped\n'
-            return 0
-        fi
-        sleep 1
-    done
-
-    die "claude gateway pid $pid did not stop (even after SIGKILL)"
-}
-
-claude_gateway_restart() {
-    claude_gateway_stop >/dev/null 2>&1 || true
-    claude_gateway_start
-}
-
-claude_gateway_status() {
-    local running="no"
-    local pid=""
-    local model_id="$(claude_gateway_model_id 2>/dev/null || true)"
-    local upstream_timeout_seconds="$(claude_gateway_timeout_seconds)"
-    pid="$(claude_gateway_detect_pid 2>/dev/null || true)"
-    if [[ -z "$pid" ]]; then
-        pid="$(claude_gateway_listener_pid 2>/dev/null || true)"
-    fi
-    if claude_gateway_health_ok; then
-        running="yes"
-        if [[ -n "$pid" ]]; then
-            printf '%s\n' "$pid" > "$CLAUDE_GATEWAY_PID_FILE"
-        fi
-    fi
-    printf 'running: %s\n' "$running"
-    printf 'pid: %s\n' "$pid"
-    printf 'url: %s\n' "$(claude_gateway_url)"
-    printf 'upstream_base: %s\n' "$(claude_gateway_upstream_base)"
-    printf 'upstream_timeout_seconds: %s\n' "$upstream_timeout_seconds"
-    printf 'model_id: %s\n' "$model_id"
-    printf 'log: %s\n' "$CLAUDE_GATEWAY_LOG"
-}
-
-claude_gateway_logs() {
-    local lines="${1:-100}"
-    tail -n "$lines" "$CLAUDE_GATEWAY_LOG"
-}
-
-claude_gateway_command() {
-    local action="${1:-status}"
-    shift || true
-    case "$action" in
-        start) claude_gateway_start ;;
-        stop) claude_gateway_stop ;;
-        restart) claude_gateway_restart ;;
-        status) claude_gateway_status ;;
-        logs) claude_gateway_logs "$@" ;;
-        help|-h|--help)
-            printf '%s\n' 'Usage: llama-model claude-gateway start|stop|restart|status|logs'
-            ;;
-        *) die "unknown claude-gateway action: $action" ;;
     esac
 }
 
@@ -7159,10 +6881,6 @@ main() {
         gateway)
             shift
             lmm_gateway_command "$@"
-            ;;
-        claude-gateway)
-            shift
-            claude_gateway_command "$@"
             ;;
         download-jobs)
             shift

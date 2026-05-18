@@ -684,11 +684,7 @@
             </label>
             <label class="span-2" title="Base URL written into Claude Code settings. Points to the GlyphOS gateway.">
               Claude Base URL
-              <input name="CLAUDE_BASE_URL" id="default-claude-base-url" placeholder="http://127.0.0.1:4010">
-            </label>
-            <label title="Maximum seconds the GlyphOS gateway will wait for a slow llama.cpp request before aborting it.">
-              GlyphOS Gateway Timeout (s)
-              <input name="CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS" id="default-claude-gateway-timeout" placeholder="1800">
+              <input name="CLAUDE_BASE_URL" id="default-claude-base-url" placeholder="http://127.0.0.1:4010/v1">
             </label>
             <label title="Claude model id to advertise and sync. Leave blank to follow the active alias.">
               Claude Model ID
@@ -801,7 +797,7 @@
                 <code id="claude-model">-</code>
                 <span id="claude-path" class="metric-note">-</span>
                 <div class="inline-actions integration-actions">
-                  <button id="sync-claude" class="button button-small button-primary" title="Sync Claude Code settings to the local Claude gateway.">Sync Claude</button>
+                  <button id="sync-claude" class="button button-small button-primary" title="Sync Claude Code settings to the LMM gateway.">Sync Claude</button>
                 </div>
               </article>
             </div>

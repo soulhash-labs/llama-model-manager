@@ -2507,10 +2507,9 @@ if [[ -f "$CLAUDE_SETTINGS_FILE" ]]; then
 else
     printf '  8. If you use Claude Code later, sync it with: llama-model sync-claude\n'
 fi
-printf '  9. Optional local Claude gateway: llama-model claude-gateway start\n'
-printf ' 10. Sync GlyphOS AI Compute if you use it: llama-model sync-glyphos\n'
-printf ' 11. Bundled public GlyphOS AI Compute package: %s/integrations/public-glyphos-ai-compute\n' "$(compact_home_path "$APP_SHARE_DIR")"
-printf ' 12. Experimental CUDA unified-memory fallback: set GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 in %s/defaults.env to try larger context/KV/compute allocations through system RAM\n' "$(compact_home_path "$CONFIG_DIR")"
+printf '  9. Sync GlyphOS AI Compute if you use it: llama-model sync-glyphos\n'
+printf ' 10. Bundled public GlyphOS AI Compute package: %s/integrations/public-glyphos-ai-compute\n' "$(compact_home_path "$APP_SHARE_DIR")"
+printf ' 11. Experimental CUDA unified-memory fallback: set GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 in %s/defaults.env to try larger context/KV/compute allocations through system RAM\n' "$(compact_home_path "$CONFIG_DIR")"
 printf '     on discrete GPUs this can be much slower; usually pair it with LLAMA_SERVER_PARALLEL=1\n'
 printf 'Routing endpoints:\n'
 printf '  harness endpoint: http://%s:%s/v1\n' "$(default_value LLAMA_MODEL_GATEWAY_HOST 127.0.0.1)" "$(default_value LLAMA_MODEL_GATEWAY_PORT 4010)"

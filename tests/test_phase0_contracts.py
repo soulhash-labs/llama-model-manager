@@ -4901,8 +4901,6 @@ while True:
                     return "running: yes\nhealth: yes\ngateway_mode: full\n"
                 if args == ("gateway", "fast", "status"):
                     return "running: no\nhealth: no\ngateway_mode: fast\n"
-                if args == ("claude-gateway", "status"):
-                    return "running: no\n"
                 return ""
 
             with mock.patch.object(manager, "run_cli", side_effect=fake_run_cli):

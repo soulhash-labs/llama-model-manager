@@ -91,10 +91,6 @@ KNOWN_DEFAULT_KEYS = [
     "LMM_UPDATE_STATE_FILE",
     "OPENCLAW_PROFILE",
     "OPENCLAW_API_KEY",
-    "CLAUDE_GATEWAY_HOST",
-    "CLAUDE_GATEWAY_PORT",
-    "CLAUDE_GATEWAY_LOG",
-    "CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS",
     "CLAUDE_BASE_URL",
     "CLAUDE_MODEL_ID",
     "CLAUDE_AUTH_TOKEN",
@@ -233,9 +229,6 @@ API_POST_PAYLOAD_SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "/api/context-glyphos/activate": {
         "allowed": set(),
-    },
-    "/api/claude-gateway": {
-        "allowed": {"action"},
     },
     "/api/gateway": {
         "allowed": {"action", "lane"},
@@ -1007,10 +1000,6 @@ class Manager:
             "LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE": values.get("LLAMA_MODEL_CONTEXT_GLYPHOS_PIPELINE", ""),
             "OPENCLAW_PROFILE": values.get("OPENCLAW_PROFILE", ""),
             "OPENCLAW_API_KEY": values.get("OPENCLAW_API_KEY", "llama-local"),
-            "CLAUDE_GATEWAY_HOST": values.get("CLAUDE_GATEWAY_HOST", "127.0.0.1"),
-            "CLAUDE_GATEWAY_PORT": values.get("CLAUDE_GATEWAY_PORT", "4000"),
-            "CLAUDE_GATEWAY_LOG": values.get("CLAUDE_GATEWAY_LOG", str(self.home / "models" / "claude-gateway.log")),
-            "CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS": values.get("CLAUDE_GATEWAY_UPSTREAM_TIMEOUT_SECONDS", "1800"),
             "CLAUDE_BASE_URL": values.get("CLAUDE_BASE_URL", ""),
             "CLAUDE_MODEL_ID": values.get("CLAUDE_MODEL_ID", ""),
             "CLAUDE_AUTH_TOKEN": values.get("CLAUDE_AUTH_TOKEN", ""),
@@ -2796,16 +2785,10 @@ class Manager:
             if openclaw_api_base
             else ""
         )
-        claude_gateway_status: dict[str, str] = {}
-        if not self.demo:
-            try:
-                claude_gateway_status = self.parse_key_values(self.run_cli("claude-gateway", "status"))
-            except Exception:
-                claude_gateway_status = {}
         claude_model_id = defaults.get("CLAUDE_MODEL_ID", "").strip() or current_alias
         claude_base_url = (
             defaults.get("CLAUDE_BASE_URL", "").strip()
-            or f"http://{defaults.get('CLAUDE_GATEWAY_HOST', '127.0.0.1')}:{defaults.get('CLAUDE_GATEWAY_PORT', '4000')}"
+            or f"http://{defaults.get('LLAMA_MODEL_GATEWAY_HOST', '127.0.0.1')}:{defaults.get('LLAMA_MODEL_GATEWAY_PORT', '4010')}/v1"
         )
         glyphos_telemetry = self.glyphos_telemetry_snapshot(limit=12)
         context_mode_mcp = self.context_mode_mcp_state()
@@ -2847,7 +2830,6 @@ class Manager:
             "claude_settings_exists": self.claude_settings_file.exists(),
             "claude_model_id": claude_model_id,
             "claude_base_url": claude_base_url,
-            "claude_gateway": claude_gateway_status,
             "gateway": gateway_status,
             "gateway_fast": gateway_fast_status,
             "gateway_api_base": gateway_api_base,
@@ -3393,14 +3375,7 @@ class Manager:
                 "claude_settings_file": str(self.claude_settings_file),
                 "claude_settings_exists": True,
                 "claude_model_id": "qwen35-9b-q8",
-                "claude_base_url": "http://127.0.0.1:4000",
-                "claude_gateway": {
-                    "running": "yes",
-                    "url": "http://127.0.0.1:4000",
-                    "model_id": "qwen35-9b-q8",
-                    "log": "/var/log/claude-gateway.log",
-                    "upstream_timeout_seconds": "1800",
-                },
+                "claude_base_url": "http://127.0.0.1:4010/v1",
                 "gateway": {
                     "running": "yes",
                     "health": "yes",
@@ -3874,12 +3849,6 @@ class AppHandler(BaseHTTPRequestHandler):
             return self.manager.learn_init_project(project_path)
         if route == "/api/learning-loop/init-global":
             return self.manager.learn_init_global()
-        if route == "/api/claude-gateway":
-            action = str(payload.get("action", "status")).strip()
-            if action not in ALLOWED_GATEWAY_ACTIONS:
-                raise ValidationError("invalid_action", f"Invalid claude-gateway action: {action}")
-            result = self.manager.parse_key_values(self.manager.run_cli("claude-gateway", action))
-            return {"ok": True, "result": result}
         if route == "/api/gateway":
             action = str(payload.get("action", "status")).strip()
             if action not in ALLOWED_GATEWAY_ACTIONS:
@@ -3937,12 +3906,6 @@ class AppHandler(BaseHTTPRequestHandler):
                     query = urllib.parse.parse_qs(parsed.query)
                     lines = self._parse_lines_query(query.get("lines", [None])[0], default=100)
                     logs = self.manager.run_cli("dashboard-service", "logs", str(lines))
-                    self.send_json({"lines": lines, "content": logs})
-                    return
-                if parsed.path == "/api/claude-gateway/logs":
-                    query = urllib.parse.parse_qs(parsed.query)
-                    lines = self._parse_lines_query(query.get("lines", [None])[0], default=100)
-                    logs = self.manager.run_cli("claude-gateway", "logs", str(lines))
                     self.send_json({"lines": lines, "content": logs})
                     return
                 if parsed.path == "/api/gateway/logs":

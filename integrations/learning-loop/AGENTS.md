@@ -168,7 +168,7 @@ At session start, read `agent-tier.yaml` to determine hardware capability:
 
 - Port 4010 = full mode (context pipeline + routing + semantic encoding + tool calls)
 - Port 4011 = fast mode (basic routing, lower latency)
-- Port 4000 = legacy claude-gateway (deprecated, no GlyphOS features)
+- Port 4000 = removed (deprecated; Anthropic handled natively on 4010)
 - Tool calls work through GlyphOS — use `tool_choice` for forced tool use
 - GIS1 semantic encoding activates automatically when psi_coherence ≥ 0.7
 
