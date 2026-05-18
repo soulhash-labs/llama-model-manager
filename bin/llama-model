@@ -1702,7 +1702,7 @@ binary_dynamic_links_resolve() {
     case "$SELECTED_LLAMA_SERVER_HOST_OS" in
         linux)
             if command_available ldd; then
-                output="$(ldd "$payload" 2>&1 || true)"
+                output="$(ldd_with_runtime_wrapper_env "$binary" "$payload")"
                 [[ "$output" != *"not found"* ]] || return 1
             fi
             ;;
@@ -1854,11 +1854,15 @@ validate_bundled_binary() {
         return 1
     }
 
-    # Extra strictness check: verify no llama/ggml/mtmd libs are "not found"
+
+
+
+    # Extra strictness check: verify no bundled llama/ggml/mtmd libs are "not found".
+    # Use the same scoped library path that the runtime wrapper uses.
     {
         payload="$(resolve_bundle_payload_binary "$binary")"
         if command_available ldd && [[ "$(binary_file_info "$payload")" == *ELF* ]]; then
-            strict_output="$(env -i PATH="$PATH" LD_LIBRARY_PATH="$(dirname "$payload")" ldd "$payload" 2>&1 || true)"
+            strict_output="$(ldd_with_runtime_wrapper_env "$binary" "$payload")"
             missing_libs="$(printf '%s' "$strict_output" | grep -E 'not found' | grep -E 'libggml|libllama|libmtmd' || true)"
             if [[ -n "$missing_libs" ]]; then
                 BUNDLE_VALIDATE_REASON="bundled binary has missing llama/ggml/mtmd libraries: ${missing_libs}"
@@ -1904,14 +1908,15 @@ validate_runtime_profile() {
         return 1
     fi
 
-    # 2. Run ldd check on payload binary
+    # 2. Run ldd check on payload binary using the same scoped library path
+    # that the runtime wrapper uses.
     payload="$(resolve_bundle_payload_binary "$binary")"
     info="$(binary_file_info "$payload")"
 
     if [[ -n "$info" && "$info" != *"script"* && "$info" != *"text executable"* ]]; then
         if command_available ldd && [[ "$info" == *ELF* ]]; then
-            ldd_output="$(ldd "$payload" 2>&1 || true)"
-            missing_libs="$(printf '%s' "$ldd_output" | grep -E 'not found' | grep -E 'libggml|libllama|libmtmd' | awk '{print $1}' | tr '\n' ',' | sed 's/,$//' || true)"
+            ldd_output="$(ldd_with_runtime_wrapper_env "$binary" "$payload")"
+            missing_libs="$(printf '%s' "$ldd_output" | grep -E 'not found' | grep -E 'libggml|libllama|libmtmd|libcuda|libcudart|libcublas' | awk '{print $1}' | tr '\n' ',' | sed 's/,$//' || true)"
             if [[ -n "$missing_libs" ]]; then
                 VALIDATE_RUNTIME_OK="no"
                 VALIDATE_RUNTIME_STATUS="invalid-missing-libs"
@@ -2036,13 +2041,20 @@ detect_external_binary_backend() {
     local info=""
     local payload=""
 
+    case "$binary" in
+        *-cuda/llama-server)   printf 'cuda\n'; return 0 ;;
+        *-vulkan/llama-server) printf 'vulkan\n'; return 0 ;;
+        *-metal/llama-server)  printf 'metal\n'; return 0 ;;
+        *-cpu/llama-server)    printf 'cpu\n'; return 0 ;;
+    esac
+
     payload="$(resolve_bundle_payload_binary "$binary")"
 
     case "$SELECTED_LLAMA_SERVER_HOST_OS" in
         linux)
             if command_available ldd; then
-                info="$(ldd "$payload" 2>&1 || true)"
-                if printf '%s' "$info" | grep -qiE 'libcublas|libcudart|libggml_cuda'; then
+                info="$(ldd_with_runtime_wrapper_env "$binary" "$payload")"
+                if printf '%s' "$info" | grep -qiE 'libcublas|libcudart|libggml_cuda|libggml-cuda'; then
                     printf 'cuda\n'
                     return 0
                 fi
@@ -2884,6 +2896,36 @@ resolve_bundle_payload_binary() {
         return 0
     fi
     printf '%s\n' "$binary"
+}
+
+runtime_wrapper_ld_library_path() {
+    local wrapper="$1"
+    local dir=""
+    local paths=""
+
+    dir="$(cd "$(dirname "$wrapper")" 2>/dev/null && pwd -P || dirname "$wrapper")"
+    paths="$dir"
+
+    # Legacy CUDA bundle: keep CUDA 11.8 scoped to this runtime only.
+    # This lets system CUDA remain current while old sm_52 builds still validate/run.
+    if [[ "$wrapper" == *"-cuda/llama-server" ]]; then
+        if [[ -d /usr/local/cuda-11.8/lib64 ]] && grep -q 'cuda-11.8/lib64' "$wrapper" 2>/dev/null; then
+            paths="$paths:/usr/local/cuda-11.8/lib64"
+        fi
+    fi
+
+    printf '%s\n' "$paths"
+}
+
+ldd_with_runtime_wrapper_env() {
+    local wrapper="$1"
+    local payload="$2"
+    local wrapper_ld_path=""
+
+    wrapper_ld_path="$(runtime_wrapper_ld_library_path "$wrapper")"
+
+    LD_LIBRARY_PATH="$wrapper_ld_path:${LD_LIBRARY_PATH:-}" \
+        ldd "$payload" 2>&1 || true
 }
 
 append_extra_cmake_args() {
