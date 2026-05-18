@@ -588,7 +588,7 @@ class Manager:
 
         return Path.home() / ".local" / "bin" / "llama-model"
 
-    def run_cli(self, *args: str) -> str:
+    def run_cli(self, *args: str, cwd: str | Path | None = None) -> str:
         if self.demo:
             return ""
         if not self.cli_bin.exists():
@@ -601,7 +601,14 @@ class Manager:
         if args and args[0] == "doctor":
             env["LLAMA_MODEL_DOCTOR_SKIP_DASHBOARD_API"] = "1"
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout_seconds, env=env)
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                env=env,
+                cwd=str(cwd) if cwd is not None else None,
+            )
         except subprocess.TimeoutExpired as exc:
             command_text = " ".join(shlex.quote(item) for item in command)
             raise CommandTimeoutError(command_text, timeout_seconds) from exc

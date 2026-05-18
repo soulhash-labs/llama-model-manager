@@ -534,6 +534,9 @@ test_installer_cuda_apt_bootstrap_contract() {
     assert_contains "$installer" "libcublas/targets/x86_64-linux"
     assert_contains "$installer" "normalize_legacy_cuda_cccl_layout"
     assert_contains "$installer" "cuda_cccl/targets/x86_64-linux/include"
+    assert_contains "$installer" "configure_legacy_cuda_ldconfig"
+    assert_contains "$installer" "/etc/ld.so.conf.d/cuda-11-8.conf"
+    assert_contains "$installer" "LMM_CONFIGURE_CUDA_LDCONFIG"
     assert_contains "$installer" "LMM_CMAKE_ARGS"
     assert_contains "$installer" "LMM_ALLOW_LEGACY_CUDA_RUNFILE"
     assert_contains "$installer" "cuda_11.8.0_520.61.05_linux.run"
@@ -596,6 +599,18 @@ test_build_runtime_preserves_extra_cmake_args() {
     assert_contains "$launcher" 'append_extra_cmake_args cmake_args "${CMAKE_ARGS:-}" "CMAKE_ARGS"'
     assert_contains "$launcher" 'cd "$HOME" 2>/dev/null || cd /tmp 2>/dev/null || true'
     assert_contains "$launcher" 'rm -rf "$build_dir"'
+    assert_contains "$launcher" 'wrapper_cuda_lib_path="$CUDAToolkit_ROOT/lib64"'
+    assert_contains "$launcher" 'export LD_LIBRARY_PATH="\$SCRIPT_DIR:$wrapper_cuda_lib_path'
+    assert_contains "$launcher" 'exec "\$SCRIPT_DIR/llama-server.bin" "\$@"'
+}
+
+test_dashboard_run_cli_accepts_cwd_for_learning_loop() {
+    local app_py
+
+    app_py="$(cat "$ROOT_DIR/web/app.py")"
+    assert_contains "$app_py" "def run_cli(self, *args: str, cwd: str | Path | None = None) -> str:"
+    assert_contains "$app_py" "cwd=str(cwd) if cwd is not None else None"
+    assert_contains "$app_py" 'self.run_cli("learn", "init-project", cwd=project_path)'
 }
 
 test_interactive_installer_bootstraps_bun_for_oh_my_openagent() {
@@ -663,6 +678,7 @@ EOF
     GGML_CUDA_ARCHITECTURES="52"
     LMM_LEGACY_CUDA_PATHS="$legacy_root"
     LMM_SKIP_LEGACY_CUDA_COMPILER_INSTALL=1
+    LMM_CONFIGURE_CUDA_LDCONFIG=0
     PATH="/usr/bin:/bin"
     LD_LIBRARY_PATH="/lib"
 
@@ -733,6 +749,7 @@ EOF
     LMM_LEGACY_CUDA_TOOLKIT_PATH="$legacy_root"
     LMM_LEGACY_CUDA_PATHS="$legacy_root"
     LMM_SKIP_LEGACY_CUDA_COMPILER_INSTALL=1
+    LMM_CONFIGURE_CUDA_LDCONFIG=0
     primary_backend="cuda"
     GGML_CUDA_ARCHITECTURES="52"
 
@@ -3185,6 +3202,7 @@ main() {
     test_installer_cuda_apt_bootstrap_contract
     test_installer_detects_existing_lmm_cuda_runtime_before_build_prompt
     test_build_runtime_preserves_extra_cmake_args
+    test_dashboard_run_cli_accepts_cwd_for_learning_loop
     test_interactive_installer_bootstraps_bun_for_oh_my_openagent
     test_installer_legacy_cuda_arch_without_legacy_toolkit_falls_back_cpu
     test_installer_legacy_cuda_arch_selects_existing_cuda_118

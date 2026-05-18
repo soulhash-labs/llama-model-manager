@@ -2960,12 +2960,23 @@ build_runtime_backend() {
         mv "$install_dir/llama-server" "$install_dir/llama-server.bin"
     fi
 
-    cat > "$install_dir/llama-server" <<'WRAPPER'
+    local wrapper_cuda_lib_path=""
+    if [[ "$backend" == "cuda" && -n "${CUDAToolkit_ROOT:-}" && -d "${CUDAToolkit_ROOT:-}/lib64" ]]; then
+        wrapper_cuda_lib_path="$CUDAToolkit_ROOT/lib64"
+    elif [[ "$backend" == "cuda" && -d /usr/local/cuda-11.8/lib64 ]]; then
+        wrapper_cuda_lib_path="/usr/local/cuda-11.8/lib64"
+    fi
+
+    cat > "$install_dir/llama-server" <<WRAPPER
 #!/usr/bin/env bash
 set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export LD_LIBRARY_PATH="$SCRIPT_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-exec "$SCRIPT_DIR/llama-server.bin" "$@"
+SCRIPT_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+if [[ -n "$wrapper_cuda_lib_path" ]]; then
+    export LD_LIBRARY_PATH="\$SCRIPT_DIR:$wrapper_cuda_lib_path\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+else
+    export LD_LIBRARY_PATH="\$SCRIPT_DIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+fi
+exec "\$SCRIPT_DIR/llama-server.bin" "\$@"
 WRAPPER
     chmod 0755 "$install_dir/llama-server"
 

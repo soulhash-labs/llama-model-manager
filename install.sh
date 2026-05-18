@@ -1009,6 +1009,20 @@ normalize_legacy_cuda_cccl_layout() {
     done
 }
 
+configure_legacy_cuda_ldconfig() {
+    local cuda_path="${1:-/usr/local/cuda-11.8}"
+
+    [[ -d "$cuda_path/lib64" ]] || return 0
+    [[ "${LMM_CONFIGURE_CUDA_LDCONFIG:-1}" == "1" ]] || return 0
+
+    if [[ -w /etc/ld.so.conf.d ]] || command -v sudo >/dev/null 2>&1; then
+        printf '%s\n' "$cuda_path/lib64" | run_root_cmd tee /etc/ld.so.conf.d/cuda-11-8.conf >/dev/null || true
+        run_root_cmd ldconfig || true
+    else
+        printf 'post-install warning: cannot configure ldconfig for CUDA 11.8; sudo unavailable and /etc/ld.so.conf.d is not writable\n' >&2
+    fi
+}
+
 select_legacy_cuda_11_8_for_build() {
     [[ "${primary_backend:-}" == "cuda" ]] || return 0
     cuda_arches_need_legacy_toolkit || return 1
@@ -1040,6 +1054,7 @@ select_legacy_cuda_11_8_for_build() {
             legacy_cuda_header_patch_diagnostic "$legacy_path"
             normalize_legacy_cuda_cublas_layout "$legacy_path"
             normalize_legacy_cuda_cccl_layout "$legacy_path"
+            configure_legacy_cuda_ldconfig "$legacy_path"
             export LMM_LEGACY_CUDA_SELECTED=1
             hash -r 2>/dev/null || true
             "$legacy_path/bin/nvcc" --version || true
