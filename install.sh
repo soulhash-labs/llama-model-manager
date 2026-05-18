@@ -2276,7 +2276,7 @@ migrate_routed_gateway_defaults() {
     if grep -Eq '^[[:space:]]*(export[[:space:]]+)?LLAMA_MODEL_OPENCODE_GATEWAY_BASE_URL=' "$file"; then
         changed="yes"
     fi
-    for key in LLAMA_MODEL_HARNESS_MODE LLAMA_MODEL_GATEWAY_HOST LLAMA_MODEL_GATEWAY_PORT LLAMA_MODEL_GATEWAY_LOG LLAMA_MODEL_GATEWAY_FAST_ENABLED LLAMA_MODEL_GATEWAY_FAST_PORT LLAMA_MODEL_GATEWAY_FAST_LOG LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS; do
+    for key in LLAMA_MODEL_HARNESS_MODE LLAMA_MODEL_GATEWAY_HOST LLAMA_MODEL_GATEWAY_PORT LLAMA_MODEL_GATEWAY_LOG LLAMA_MODEL_GATEWAY_FAST_ENABLED LLAMA_MODEL_GATEWAY_FAST_PORT LLAMA_MODEL_GATEWAY_FAST_LOG LMM_GATEWAY_FAST_CONTEXT_TIMEOUT_MS LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS LMM_MAX_CONTEXT_TOKENS LMM_CONTEXT_SAFETY_MARGIN LMM_CONTEXT_OVERFLOW_MODE LMM_AGENT_SOFT_CONTEXT_LIMIT; do
         if ! defaults_has_key "$key" "$file"; then
             changed="yes"
         fi
@@ -2314,6 +2314,19 @@ migrate_routed_gateway_defaults() {
     fi
     if ! defaults_has_key LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS "$tmp"; then
         printf 'LMM_GATEWAY_FAST_CONTEXT_STREAM_TIMEOUT_MS=250\n' >>"$tmp"
+    fi
+    if ! defaults_has_key LMM_MAX_CONTEXT_TOKENS "$tmp"; then
+        printf '\n# Context budget — gateway pre-check before forwarding requests to backend.\n' >>"$tmp"
+        printf 'LMM_MAX_CONTEXT_TOKENS=65536\n' >>"$tmp"
+    fi
+    if ! defaults_has_key LMM_CONTEXT_SAFETY_MARGIN "$tmp"; then
+        printf 'LMM_CONTEXT_SAFETY_MARGIN=2048\n' >>"$tmp"
+    fi
+    if ! defaults_has_key LMM_CONTEXT_OVERFLOW_MODE "$tmp"; then
+        printf 'LMM_CONTEXT_OVERFLOW_MODE=reject\n' >>"$tmp"
+    fi
+    if ! defaults_has_key LMM_AGENT_SOFT_CONTEXT_LIMIT "$tmp"; then
+        printf 'LMM_AGENT_SOFT_CONTEXT_LIMIT=60000\n' >>"$tmp"
     fi
     mv "$tmp" "$file"
     printf 'migrated routed gateway defaults in %s\n' "$(compact_home_path "$file")"
