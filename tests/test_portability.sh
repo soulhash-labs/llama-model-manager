@@ -520,6 +520,21 @@ test_installer_cuda_apt_bootstrap_contract() {
     assert_contains "$installer" "configure_legacy_cuda_toolkit_for_build"
     assert_contains "$installer" "install_legacy_cuda_11_8_toolkit_runfile"
     assert_contains "$installer" "select_legacy_cuda_11_8_for_build"
+    assert_contains "$installer" "configure_legacy_cuda_host_compiler"
+    assert_contains "$installer" "CC=/usr/bin/gcc-11"
+    assert_contains "$installer" "CXX=/usr/bin/g++-11"
+    assert_contains "$installer" "CUDAHOSTCXX=/usr/bin/g++-11"
+    assert_contains "$installer" "find_existing_legacy_cuda_runfile"
+    assert_contains "$installer" '$HOME/Downloads/${runfile_name}'
+    assert_contains "$installer" "/tmp/\${runfile_name}"
+    assert_contains "$installer" "legacy_cuda_header_patch_diagnostic"
+    assert_contains "$installer" "LMM_ALLOW_CUDA_VENDOR_HEADER_PATCH"
+    assert_contains "$installer" "cospi sinpi rsqrt cospif sinpif rsqrtf"
+    assert_contains "$installer" "normalize_legacy_cuda_cublas_layout"
+    assert_contains "$installer" "libcublas/targets/x86_64-linux"
+    assert_contains "$installer" "normalize_legacy_cuda_cccl_layout"
+    assert_contains "$installer" "cuda_cccl/targets/x86_64-linux/include"
+    assert_contains "$installer" "LMM_CMAKE_ARGS"
     assert_contains "$installer" "LMM_ALLOW_LEGACY_CUDA_RUNFILE"
     assert_contains "$installer" "cuda_11.8.0_520.61.05_linux.run"
     assert_contains "$installer" "developer.download.nvidia.com/compute/cuda/11.8.0/local_installers"
@@ -548,6 +563,26 @@ test_installer_cuda_apt_bootstrap_contract() {
     assert_contains "$installer" 'cuda_arches_need_modern_toolkit "$cuda_arches"'
     assert_contains "$installer" '*":$cuda_path/bin:"*)'
     assert_contains "$installer" '*":$cuda_path/lib64:"*)'
+    assert_contains "$installer" "maybe_use_existing_llama_server_runtime"
+    assert_contains "$installer" "find_existing_llama_server_binary"
+    assert_contains "$installer" "validate_existing_llama_server_binary"
+    assert_contains "$installer" "existing_llama_server_backend_hint"
+    assert_contains "$installer" "persist_existing_llama_server_binary"
+    assert_contains "$installer" "LMM_USE_EXISTING_LLAMA_SERVER"
+    assert_contains "$installer" "LMM_FORCE_BUILD_RUNTIME"
+    assert_contains "$installer" "Skip OpenCode install/configuration step? [Y/n]"
+    assert_contains "$installer" "Skip oh-my-openagent install/sync step? [Y/n]"
+}
+
+test_build_runtime_preserves_extra_cmake_args() {
+    local launcher
+
+    launcher="$(cat "$ROOT_DIR/bin/llama-model")"
+    assert_contains "$launcher" "append_extra_cmake_args"
+    assert_contains "$launcher" 'append_extra_cmake_args cmake_args "${LMM_CMAKE_ARGS:-}" "LMM_CMAKE_ARGS"'
+    assert_contains "$launcher" 'append_extra_cmake_args cmake_args "${CMAKE_ARGS:-}" "CMAKE_ARGS"'
+    assert_contains "$launcher" 'cd "$HOME" 2>/dev/null || cd /tmp 2>/dev/null || true'
+    assert_contains "$launcher" 'rm -rf "$build_dir"'
 }
 
 test_interactive_installer_bootstraps_bun_for_oh_my_openagent() {
@@ -579,6 +614,7 @@ test_installer_legacy_cuda_arch_without_legacy_toolkit_falls_back_cpu() {
     LMM_LEGACY_CUDA_PATHS="$tmp/missing-11.8"
     LMM_LEGACY_CUDA_TOOLKIT_PATH="$tmp/missing-11.8"
     LMM_ALLOW_LEGACY_CUDA_RUNFILE=0
+    LMM_SKIP_LEGACY_CUDA_COMPILER_INSTALL=1
 
     guard_unsupported_legacy_cuda_architecture 2>"$stderr_log"
     [[ "$primary_backend" == "cpu" ]] || fail "expected legacy CUDA guard to switch to CPU"
@@ -613,6 +649,7 @@ EOF
     primary_backend="cuda"
     GGML_CUDA_ARCHITECTURES="52"
     LMM_LEGACY_CUDA_PATHS="$legacy_root"
+    LMM_SKIP_LEGACY_CUDA_COMPILER_INSTALL=1
     PATH="/usr/bin:/bin"
     LD_LIBRARY_PATH="/lib"
 
@@ -682,6 +719,7 @@ EOF
     LMM_ALLOW_LEGACY_CUDA_RUNFILE=1
     LMM_LEGACY_CUDA_TOOLKIT_PATH="$legacy_root"
     LMM_LEGACY_CUDA_PATHS="$legacy_root"
+    LMM_SKIP_LEGACY_CUDA_COMPILER_INSTALL=1
     primary_backend="cuda"
     GGML_CUDA_ARCHITECTURES="52"
 
@@ -730,6 +768,7 @@ EOF
     LMM_LEGACY_CUDA_PATHS="$tmp/missing-11.8"
     LMM_LEGACY_CUDA_TOOLKIT_PATH="$tmp/missing-11.8"
     LMM_ALLOW_LEGACY_CUDA_RUNFILE=0
+    LMM_SKIP_LEGACY_CUDA_COMPILER_INSTALL=1
 
     guard_unsupported_legacy_cuda_architecture >/dev/null 2>&1
     [[ "$primary_backend" == "cpu" ]] || fail "expected Ubuntu 26.04 legacy arch to remain CPU fallback"
@@ -1388,7 +1427,8 @@ test_installer_validates_runtime_bundle_subdirectories() {
     installer="$(cat "$ROOT_DIR/install.sh")"
     assert_contains "$installer" "valid_runtime_binaries"
     assert_contains "$installer" "runtime bundle failed --version check"
-    assert_contains "$installer" '*-"${primary_backend}"/llama-server'
+    assert_contains "$installer" 'backend_runtime_dir="$(find "$runtime_dir"'
+    assert_contains "$installer" '-name "*-${primary_backend}"'
     assert_not_contains "$installer" '"$runtime_dir/llama-server" --version'
 }
 
@@ -1410,12 +1450,12 @@ test_interactive_installer_has_harness_setup_wizard() {
 
     installer="$(cat "$ROOT_DIR/install.sh")"
     opencode_recommendation_body="$(awk '
-        /^recommended_opencode_install_command\(\) \{/ { in_func = 1 }
+        /^prompt_opencode_install_choice\(\) \{/ { in_func = 1 }
         in_func { print }
         in_func && /^}/ { exit }
     ' "$ROOT_DIR/install.sh")"
     assert_contains "$installer" "Integration setup check:"
-    assert_contains "$installer" "recommended_opencode_install_command"
+    assert_contains "$installer" "prompt_opencode_install_choice"
     assert_contains "$installer" "integration bundle:"
     assert_contains "$installer" "LMM defaults:"
     assert_contains "$installer" "LMM model registry:"
@@ -1434,11 +1474,12 @@ test_interactive_installer_has_harness_setup_wizard() {
     assert_contains "$installer" "synced OpenCode and oh-my-openagent to LMM GlyphOS providers"
     assert_contains "$installer" "https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/refs/heads/dev/docs/guide/installation.md"
     assert_contains "$installer" "llama-model sync-opencode"
-    assert_contains "$opencode_recommendation_body" "printf 'curl -fsSL https://opencode.ai/install | bash\\n'"
-    assert_not_contains "$opencode_recommendation_body" "brew install anomalyco/tap/opencode"
-    assert_not_contains "$opencode_recommendation_body" "paru -S opencode"
-    assert_not_contains "$opencode_recommendation_body" "bun add -g opencode-ai"
-    assert_not_contains "$opencode_recommendation_body" "npm i -g opencode-ai"
+    assert_contains "$opencode_recommendation_body" "curl -fsSL https://opencode.ai/install | bash"
+    assert_contains "$opencode_recommendation_body" "brew install anomalyco/tap/opencode"
+    assert_contains "$opencode_recommendation_body" "bun add -g opencode-ai"
+    assert_contains "$opencode_recommendation_body" "npm i -g opencode-ai"
+    assert_contains "$opencode_recommendation_body" "paru -S opencode"
+    assert_contains "$opencode_recommendation_body" "skip OpenCode installation"
 }
 
 test_state_and_shell_split_helpers() {
@@ -3187,6 +3228,7 @@ main() {
     test_dependency_install_preview_exists
     test_interactive_installer_declares_cuda_toolkit_install
     test_installer_cuda_apt_bootstrap_contract
+    test_build_runtime_preserves_extra_cmake_args
     test_interactive_installer_bootstraps_bun_for_oh_my_openagent
     test_installer_legacy_cuda_arch_without_legacy_toolkit_falls_back_cpu
     test_installer_legacy_cuda_arch_selects_existing_cuda_118

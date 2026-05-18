@@ -370,25 +370,48 @@ interactive_harness_setup_wizard() {
     printf '  GlyphOS policy: %s (%s)\n' "$glyphos_config" "$(path_state "$glyphos_config")"
 
     if command -v opencode >/dev/null 2>&1; then
-        printf 'post-install: opencode already available\n'
-    else
+        printf 'post-install: opencode already available: %s\n' "$(command -v opencode)"
+        printf 'Skip OpenCode install/configuration step? [Y/n] '
+        read -r reply || reply=""
+        reply="$(to_lower "$reply")"
+        if [[ "$reply" != "n" && "$reply" != "no" ]]; then
+            recommendation=""
+        else
+            recommendation="$(prompt_opencode_install_choice)"
+        fi
+    fi
+
+    if ! command -v opencode >/dev/null 2>&1; then
         printf 'post-install: opencode is not installed or not on PATH\n'
         recommendation="$(prompt_opencode_install_choice)"
-        if [[ -n "$recommendation" ]]; then
-            if run_opencode_install_command "$recommendation"; then
-                printf 'post-install: OpenCode install command completed\n'
-            else
-                printf 'post-install warning: OpenCode install command failed; retry manually with: %s\n' "$recommendation" >&2
-            fi
+    fi
+
+    if [[ -n "$recommendation" ]]; then
+        if run_opencode_install_command "$recommendation"; then
+            printf 'post-install: OpenCode install command completed\n'
         else
-            printf 'post-install: OpenCode install skipped\n'
+            printf 'post-install warning: OpenCode install command failed; retry manually with: %s\n' "$recommendation" >&2
         fi
+    else
+        printf 'post-install: OpenCode install skipped\n'
     fi
 
     if [[ -f "$openagent_config" ]]; then
         printf 'post-install: oh-my-openagent config found: %s\n' "$openagent_config"
-    else
-        printf 'post-install: oh-my-openagent config missing: %s\n' "$openagent_config"
+        printf 'Skip oh-my-openagent install/sync step? [Y/n] '
+        read -r reply || reply=""
+        reply="$(to_lower "$reply")"
+        if [[ "$reply" != "n" && "$reply" != "no" ]]; then
+            return 0
+        fi
+    fi
+
+    if [[ ! -f "$openagent_config" || "$reply" == "n" || "$reply" == "no" ]]; then
+        if [[ -f "$openagent_config" ]]; then
+            printf 'post-install: running oh-my-openagent repair/sync flow for existing config: %s\n' "$openagent_config"
+        else
+            printf 'post-install: oh-my-openagent config missing: %s\n' "$openagent_config"
+        fi
         printf 'Fetch the oh-my-openagent installation guide now? [Y/n] '
         read -r reply || reply=""
         reply="$(to_lower "$reply")"
@@ -901,6 +924,89 @@ append_cmake_toolkit_root_arg() {
     local cuda_path="$1"
     export CMAKE_ARGS="$(printf '%s\n' "${CMAKE_ARGS:-}" | sed -E 's/(^|[[:space:]])-DCUDAToolkit_ROOT=[^[:space:]]+//g' | xargs)"
     export CMAKE_ARGS="${CMAKE_ARGS:-} -DCUDAToolkit_ROOT=${cuda_path}"
+    export LMM_CMAKE_ARGS="$(printf '%s\n' "${LMM_CMAKE_ARGS:-}" | sed -E 's/(^|[[:space:]])-DCUDAToolkit_ROOT=[^[:space:]]+//g' | xargs)"
+    export LMM_CMAKE_ARGS="${LMM_CMAKE_ARGS:-} -DCUDAToolkit_ROOT=${cuda_path}"
+}
+
+configure_legacy_cuda_host_compiler() {
+    [[ "${primary_backend:-}" == "cuda" ]] || return 0
+    cuda_arches_need_legacy_toolkit || return 0
+
+    if { [[ ! -x /usr/bin/gcc-11 ]] || [[ ! -x /usr/bin/g++-11 ]]; } &&
+        [[ "${LMM_SKIP_LEGACY_CUDA_COMPILER_INSTALL:-}" != "1" ]] &&
+        command -v apt-get >/dev/null 2>&1; then
+        install_apt_packages_best_effort gcc-11 g++-11
+    fi
+
+    if [[ -x /usr/bin/gcc-11 && -x /usr/bin/g++-11 ]]; then
+        export CC=/usr/bin/gcc-11
+        export CXX=/usr/bin/g++-11
+        export CUDAHOSTCXX=/usr/bin/g++-11
+        printf 'post-install: selected gcc/g++ 11 for legacy CUDA 11.8 host compiler\n'
+    else
+        printf 'post-install warning: gcc-11/g++-11 unavailable; CUDA 11.8 may reject the default host compiler\n' >&2
+    fi
+}
+
+legacy_cuda_header_patch_diagnostic() {
+    local cuda_path="$1"
+    local header_h="$cuda_path/include/crt/math_functions.h"
+    local header_hpp="$cuda_path/include/crt/math_functions.hpp"
+
+    is_ubuntu_2604_or_newer || return 0
+    [[ -e "$header_h" || -e "$header_hpp" ]] || return 0
+
+    printf 'post-install warning: Legacy CUDA 11.8 on Ubuntu 26.04 may require local noexcept(true) patches in:\n' >&2
+    printf '  %s\n' "$header_h" >&2
+    printf '  %s\n' "$header_hpp" >&2
+    printf 'post-install warning: observed conflicting functions: cospi sinpi rsqrt cospif sinpif rsqrtf\n' >&2
+    if [[ "${LMM_ALLOW_CUDA_VENDOR_HEADER_PATCH:-}" == "1" ]]; then
+        printf 'post-install warning: LMM_ALLOW_CUDA_VENDOR_HEADER_PATCH=1 was set, but automatic vendor header patching is not implemented; patch manually and rerun if CUDA compile fails.\n' >&2
+    else
+        printf 'post-install warning: not patching NVIDIA vendor headers automatically; set LMM_ALLOW_CUDA_VENDOR_HEADER_PATCH=1 only after reviewing the local patch.\n' >&2
+    fi
+}
+
+normalize_legacy_cuda_cublas_layout() {
+    local cuda_path="${1:-/usr/local/cuda-11.8}"
+    local cublas_root="$cuda_path/libcublas/targets/x86_64-linux"
+    local lib=""
+    local header=""
+
+    [[ -d "$cublas_root" ]] || return 0
+
+    run_root_cmd mkdir -p "$cuda_path/lib64" "$cuda_path/lib64/stubs" "$cuda_path/include" || return 0
+
+    for lib in \
+        libcublas.so \
+        libcublas.so.11 \
+        libcublasLt.so \
+        libcublasLt.so.11 \
+        libcublas_static.a \
+        libcublasLt_static.a; do
+        [[ -e "$cublas_root/lib/$lib" ]] && run_root_cmd ln -sf "$cublas_root/lib/$lib" "$cuda_path/lib64/$lib" || true
+    done
+
+    for lib in libcublas.so libcublasLt.so; do
+        [[ -e "$cublas_root/lib/stubs/$lib" ]] && run_root_cmd ln -sf "$cublas_root/lib/stubs/$lib" "$cuda_path/lib64/stubs/$lib" || true
+    done
+
+    for header in cublas.h cublasLt.h cublasXt.h cublas_api.h cublas_v2.h nvblas.h; do
+        [[ -e "$cublas_root/include/$header" ]] && run_root_cmd ln -sf "$cublas_root/include/$header" "$cuda_path/include/$header" || true
+    done
+}
+
+normalize_legacy_cuda_cccl_layout() {
+    local cuda_path="${1:-/usr/local/cuda-11.8}"
+    local cccl_root="$cuda_path/cuda_cccl/targets/x86_64-linux/include"
+    local dir=""
+
+    [[ -d "$cccl_root" ]] || return 0
+
+    run_root_cmd mkdir -p "$cuda_path/include" || return 0
+    for dir in cub thrust cuda nv; do
+        [[ -e "$cccl_root/$dir" ]] && run_root_cmd ln -sfn "$cccl_root/$dir" "$cuda_path/include/$dir" || true
+    done
 }
 
 select_legacy_cuda_11_8_for_build() {
@@ -930,6 +1036,10 @@ select_legacy_cuda_11_8_for_build() {
             export CUDA_PATH="$legacy_path"
             export CUDAToolkit_ROOT="$legacy_path"
             append_cmake_toolkit_root_arg "$legacy_path"
+            configure_legacy_cuda_host_compiler
+            legacy_cuda_header_patch_diagnostic "$legacy_path"
+            normalize_legacy_cuda_cublas_layout "$legacy_path"
+            normalize_legacy_cuda_cccl_layout "$legacy_path"
             export LMM_LEGACY_CUDA_SELECTED=1
             hash -r 2>/dev/null || true
             "$legacy_path/bin/nvcc" --version || true
@@ -964,17 +1074,51 @@ allow_legacy_cuda_runfile_install() {
     return 1
 }
 
+find_existing_legacy_cuda_runfile() {
+    local runfile_name=""
+    local candidate=""
+
+    runfile_name="$(legacy_cuda_runfile_name)"
+    for candidate in \
+        "${XDG_CACHE_HOME:-$HOME/.cache}/llama-model-manager/cuda/${runfile_name}" \
+        "$HOME/${runfile_name}" \
+        "$HOME/Downloads/${runfile_name}" \
+        "/tmp/${runfile_name}"; do
+        if [[ -s "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 download_legacy_cuda_runfile() {
     local target_dir="${XDG_CACHE_HOME:-$HOME/.cache}/llama-model-manager/cuda"
     local runfile_name=""
     local runfile_url=""
     local runfile_path=""
+    local existing_runfile=""
 
     runfile_name="$(legacy_cuda_runfile_name)"
     runfile_url="$(legacy_cuda_runfile_url)"
     runfile_path="${target_dir}/${runfile_name}"
 
     mkdir -p "$target_dir"
+
+    existing_runfile="$(find_existing_legacy_cuda_runfile || true)"
+    if [[ -n "$existing_runfile" ]]; then
+        if [[ "$existing_runfile" != "$runfile_path" ]]; then
+            printf 'post-install: reusing existing CUDA 11.8 runfile: %s\n' "$existing_runfile" >&2
+            cp -f "$existing_runfile" "$runfile_path" || {
+                printf 'post-install warning: failed to copy existing CUDA 11.8 runfile from %s\n' "$existing_runfile" >&2
+                return 1
+            }
+        fi
+        chmod 0755 "$runfile_path" || true
+        printf '%s\n' "$runfile_path"
+        return 0
+    fi
 
     if [[ -s "$runfile_path" ]]; then
         printf '%s\n' "$runfile_path"
@@ -1071,13 +1215,145 @@ configure_legacy_cuda_toolkit_for_build() {
 
     primary_backend="cpu"
     unset GGML_CUDA_ARCHITECTURES
-    remove_cmake_cuda_arch_arg
-    export CMAKE_ARGS="$(printf '%s\n' "${CMAKE_ARGS:-}" | sed -E 's/(^|[[:space:]])-DCUDAToolkit_ROOT=[^[:space:]]+//g' | xargs)"
+    strip_cmake_cuda_args
     return 0
 }
 
 guard_unsupported_legacy_cuda_architecture() {
     configure_legacy_cuda_toolkit_for_build "$@"
+}
+
+find_existing_llama_server_binary() {
+    local candidate=""
+
+    if [[ -n "${LLAMA_SERVER_BIN:-}" && -x "${LLAMA_SERVER_BIN:-}" ]]; then
+        printf '%s\n' "$LLAMA_SERVER_BIN"
+        return 0
+    fi
+
+    candidate="$(command -v llama-server 2>/dev/null || true)"
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+
+    for candidate in \
+        "$HOME/.local/bin/llama-server" \
+        "/usr/local/bin/llama-server" \
+        "/usr/bin/llama-server" \
+        "/opt/llama.cpp/bin/llama-server" \
+        "/opt/llama-server/llama-server"; do
+        if [[ -x "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+validate_existing_llama_server_binary() {
+    local binary="$1"
+    [[ -x "$binary" ]] || return 1
+    "$binary" --version >/dev/null 2>&1
+}
+
+existing_llama_server_backend_hint() {
+    local binary="$1"
+    local output=""
+
+    output="$("$binary" --version 2>&1 || true)"
+    if printf '%s\n' "$output" | grep -qi 'cuda\|cublas\|ggml-cuda'; then
+        printf 'cuda\n'
+    elif printf '%s\n' "$output" | grep -qi 'vulkan'; then
+        printf 'vulkan\n'
+    elif printf '%s\n' "$output" | grep -qi 'metal'; then
+        printf 'metal\n'
+    else
+        printf 'unknown\n'
+    fi
+}
+
+persist_existing_llama_server_binary() {
+    local binary="$1"
+
+    mkdir -p "$CONFIG_DIR"
+    if [[ ! -f "$CONFIG_DIR/defaults.env" && -f "$ROOT_DIR/config/defaults.env.example" ]]; then
+        safe_install 0644 "$ROOT_DIR/config/defaults.env.example" "$CONFIG_DIR/defaults.env"
+    elif [[ ! -f "$CONFIG_DIR/defaults.env" ]]; then
+        : >"$CONFIG_DIR/defaults.env"
+    fi
+
+    if grep -Eq '^[[:space:]]*(export[[:space:]]+)?LLAMA_SERVER_BIN=' "$CONFIG_DIR/defaults.env"; then
+        local tmp_defaults=""
+        tmp_defaults="$(mktemp)"
+        awk -v binary="$binary" '
+            /^[[:space:]]*(export[[:space:]]+)?LLAMA_SERVER_BIN=/ {
+                print "LLAMA_SERVER_BIN=" binary
+                next
+            }
+            { print }
+        ' "$CONFIG_DIR/defaults.env" >"$tmp_defaults"
+        mv "$tmp_defaults" "$CONFIG_DIR/defaults.env"
+    else
+        printf '\nLLAMA_SERVER_BIN=%s\n' "$binary" >>"$CONFIG_DIR/defaults.env"
+    fi
+
+    printf 'post-install: persisted existing LLAMA_SERVER_BIN to defaults.env\n'
+}
+
+maybe_use_existing_llama_server_runtime() {
+    local binary=""
+    local backend_hint=""
+    local reply=""
+
+    case "${LMM_FORCE_BUILD_RUNTIME:-}" in
+        1|true|yes|Y|y) return 1 ;;
+    esac
+
+    binary="$(find_existing_llama_server_binary || true)"
+    [[ -n "$binary" ]] || return 1
+    validate_existing_llama_server_binary "$binary" || return 1
+
+    backend_hint="$(existing_llama_server_backend_hint "$binary")"
+
+    printf 'post-install: found existing llama-server binary:\n'
+    printf '  %s\n' "$binary"
+    printf 'post-install: existing runtime backend hint: %s\n' "$backend_hint"
+
+    if [[ "$backend_hint" != "unknown" && -n "${primary_backend:-}" && "$backend_hint" != "$primary_backend" ]]; then
+        printf 'post-install: existing runtime backend hint does not match detected host backend (%s); continuing with installer-managed build\n' "$primary_backend"
+        return 1
+    fi
+
+    if [[ -t 0 && -t 1 ]]; then
+        if [[ "$backend_hint" == "unknown" && "${primary_backend:-}" == "cuda" ]]; then
+            printf 'Existing runtime backend could not be confirmed as CUDA. Use it anyway and skip CUDA build? [y/N] '
+            read -r reply || reply=""
+            reply="$(to_lower "$reply")"
+            if [[ "$reply" != "y" && "$reply" != "yes" ]]; then
+                printf 'post-install: existing runtime not selected; continuing with installer-managed build\n'
+                return 1
+            fi
+        else
+            printf 'Use this existing llama.cpp runtime instead of building a bundled runtime now? [Y/n] '
+            read -r reply || reply=""
+            reply="$(to_lower "$reply")"
+            if [[ "$reply" == "n" || "$reply" == "no" ]]; then
+                printf 'post-install: existing runtime not selected; continuing with installer-managed build\n'
+                return 1
+            fi
+        fi
+    else
+        case "${LMM_USE_EXISTING_LLAMA_SERVER:-}" in
+            1|true|yes|Y|y) ;;
+            *) return 1 ;;
+        esac
+    fi
+
+    persist_existing_llama_server_binary "$binary"
+    printf 'post-install: skipped bundled runtime build; existing llama.cpp runtime is now managed outside LMM\n'
+    return 0
 }
 
 nvcc_supports_cuda_architecture() {
@@ -1109,6 +1385,11 @@ nvcc_supports_cuda_architecture() {
 
 remove_cmake_cuda_arch_arg() {
     export CMAKE_ARGS="$(printf '%s\n' "${CMAKE_ARGS:-}" | sed -E 's/(^|[[:space:]])-DGGML_CUDA_ARCHITECTURES=[^[:space:]]+//g' | xargs)"
+}
+
+strip_cmake_cuda_args() {
+    export CMAKE_ARGS="$(printf '%s\n' "${CMAKE_ARGS:-}" | sed -E 's/(^|[[:space:]])-DGGML_CUDA_ARCHITECTURES=[^[:space:]]+//g; s/(^|[[:space:]])-DCUDAToolkit_ROOT=[^[:space:]]+//g' | xargs)"
+    export LMM_CMAKE_ARGS="$(printf '%s\n' "${LMM_CMAKE_ARGS:-}" | sed -E 's/(^|[[:space:]])-DGGML_CUDA_ARCHITECTURES=[^[:space:]]+//g; s/(^|[[:space:]])-DCUDAToolkit_ROOT=[^[:space:]]+//g' | xargs)"
 }
 
 configure_cuda_architectures_for_build() {
@@ -1373,7 +1654,7 @@ configure_cuda_toolkit_for_build() {
         printf 'post-install warning: Ubuntu-native CUDA toolkit setup did not make nvcc available; falling back to CPU runtime\n' >&2
         primary_backend="cpu"
         unset GGML_CUDA_ARCHITECTURES
-        remove_cmake_cuda_arch_arg
+        strip_cmake_cuda_args
         return 0
     fi
 
@@ -1449,7 +1730,7 @@ configure_cuda_toolkit_for_build() {
         printf 'post-install warning: nvcc still unavailable after CUDA toolkit setup; falling back to CPU runtime\n' >&2
         primary_backend="cpu"
         unset GGML_CUDA_ARCHITECTURES
-        remove_cmake_cuda_arch_arg
+        strip_cmake_cuda_args
         return 0
     fi
 
@@ -1577,6 +1858,10 @@ build_runtime_during_install() {
         primary_backend="cpu"
     fi
 
+    if [[ "$has_gpu" == "yes" ]] && maybe_use_existing_llama_server_runtime; then
+        return 0
+    fi
+
     if [[ -t 0 && -t 1 ]]; then
         # Interactive: show what we're doing and ask
         printf 'post-install: host %s backend detected\n' "$primary_backend"
@@ -1656,7 +1941,7 @@ build_runtime_during_install() {
             printf 'post-install: retrying CPU fallback runtime\n' >&2
             primary_backend="cpu"
             unset GGML_CUDA_ARCHITECTURES
-            remove_cmake_cuda_arch_arg
+            strip_cmake_cuda_args
 
             if ! LLAMA_SERVER_RUNTIME_DIR="${APP_SHARE_DIR}/runtime" \
                  LLAMA_AUTO_INSTALL_DEPS=1 \

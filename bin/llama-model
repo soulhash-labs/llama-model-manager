@@ -2895,6 +2895,21 @@ resolve_bundle_payload_binary() {
     printf '%s\n' "$binary"
 }
 
+append_extra_cmake_args() {
+    local -n target_args="$1"
+    local raw="$2"
+    local label="$3"
+    local -a parsed_args=()
+
+    [[ -n "$raw" ]] || return 0
+
+    mapfile -d '' -t parsed_args < <(split_shell_words_strict "$raw")
+    if ((${#parsed_args[@]} > 0)); then
+        printf 'using %s: %s\n' "$label" "$raw" >&2
+        target_args+=("${parsed_args[@]}")
+    fi
+}
+
 build_runtime_backend() {
     local src_dir="$1"
     local backend="$2"
@@ -2906,6 +2921,7 @@ build_runtime_backend() {
     local binary=""
     local runtime_dir=""
 
+    cd "$HOME" 2>/dev/null || cd /tmp 2>/dev/null || true
     rm -rf "$build_dir"
     mkdir -p "$build_dir"
 
@@ -2931,6 +2947,9 @@ build_runtime_backend() {
             die "unsupported build backend: $backend"
             ;;
     esac
+
+    append_extra_cmake_args cmake_args "${LMM_CMAKE_ARGS:-}" "LMM_CMAKE_ARGS"
+    append_extra_cmake_args cmake_args "${CMAKE_ARGS:-}" "CMAKE_ARGS"
 
     printf 'configuring llama.cpp (%s backend)...\n' "$backend" >&2
     cmake -S "$src_dir" -B "$build_dir" "${cmake_args[@]}" >&2
